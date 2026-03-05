@@ -226,6 +226,10 @@ IMPORTANT LANGUAGE RULE:
 - Example: if query is in English but docs are in French → target_language = "en"
 - Example: if query is in Arabic → target_language = "ar"
 
+IMPORTANT SOURCE CITATION RULE:
+- should_cite_sources = true ONLY when the answer retrieves specific facts, values, or quotes from documents that the user can verify.
+- should_cite_sources = false when the task is a transformation (translation, rewrite, paraphrase, summarise) or a conversational reply — in these cases sources add no value.
+
 Respond ONLY with this JSON:
 {{
   "target_language": "<ISO 639-1 code of the QUERY language>",

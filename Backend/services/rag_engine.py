@@ -76,7 +76,7 @@ class AgentState(TypedDict):
     top_k: int
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -519,7 +519,7 @@ class RAGEngine:
         workflow.add_node("synthesise", self.synthesise)
         workflow.add_node("judge_evaluate", self.judge_evaluate)
         workflow.add_node("analytics_node", self.analytics_node)
-        # Source Agent is called directly inside synthesise — no separate node needed
+        workflow.add_node("transform_node", self.transform_node)
 
         # Entry point
         workflow.set_entry_point("router")
@@ -533,6 +533,7 @@ class RAGEngine:
                 "rag": "retrieve",
                 "iterative_rag": "retrieve",
                 "analytics": "retrieve",
+                "transform": "retrieve",   # fetch doc content, then transform
             }
         )
 
@@ -542,27 +543,31 @@ class RAGEngine:
         # Retrieval flow
         workflow.add_conditional_edges(
             "check_retrieval",
-            lambda s: "rewrite" if (
-                s["route"] == "iterative_rag" and
-                s["retrieval_iterations"] < MAX_ITER and
-                not _is_good_retrieval(s["retrieved_chunks"])
-            ) else "done",
-            {"rewrite": "rewrite_query", "done": "judge_plan"}  # Changed: go to judge first
+            lambda s: "transform" if s["route"] == "transform" else (
+                "rewrite" if (
+                    s["route"] == "iterative_rag" and
+                    s["retrieval_iterations"] < MAX_ITER and
+                    not _is_good_retrieval(s["retrieved_chunks"])
+                ) else "done"
+            ),
+            {"rewrite": "rewrite_query", "done": "judge_plan", "transform": "transform_node"}
         )
 
         workflow.add_edge("retrieve", "check_retrieval")
         workflow.add_edge("rewrite_query", "retrieve")
 
+        # Transform ends directly — no judge eval loop, no sources
+        workflow.add_edge("transform_node", END)
+
         # Judge-driven synthesis flow
         workflow.add_edge("judge_plan", "synthesise")
         workflow.add_edge("synthesise", "judge_evaluate")
         
-        # NEW: Conditional retry based on judge's evaluation
         workflow.add_conditional_edges(
             "judge_evaluate",
             lambda s: self._should_retry(s),
             {
-                "retry": "synthesise",      # Skip re-planning; plan was fine, just re-generate
+                "retry": "synthesise",
                 "analytics": "analytics_node",
                 "done": END
             }
@@ -594,11 +599,13 @@ class RAGEngine:
 
 ROUTES:
 - direct: greetings, small talk, thanks, casual chat ("hi", "thanks", "how are you")
-- rag: any question asking for specific information, values, specs, facts, summaries, or explanations from documents — this includes asking for a specific number, metric, or technical value
+- transform: tasks that require transforming/rewriting document content — translation, summarization into another language, reformatting, rewriting, paraphrasing. These need the document content but NOT citation sources.
+- rag: any question asking for specific information, values, specs, facts, or explanations from documents — including asking for a specific number, metric, or technical value
 - iterative_rag: comparisons or multi-part questions that require looking across multiple documents ("compare X and Y", "differences between")
-- analytics: ONLY for requests asking for aggregated statistics across ALL documents, like totals, averages, distributions, or counts across the entire document set ("how many documents total", "what is the average across all files")
+- analytics: ONLY for requests asking for aggregated statistics across ALL documents, like totals, averages, or counts across the entire document set
 
-IMPORTANT: If the query asks for a specific value or fact (e.g. "what is the downlink throughput", "what is the latency target", "what is the site ID"), route it to RAG — not analytics.
+IMPORTANT: "translate", "summarise in [language]", "rewrite", "paraphrase" → always transform. Never iterative_rag.
+IMPORTANT: Asking for a specific fact or value → always rag. Never analytics.
 
 QUERY: {query}
 
@@ -612,7 +619,7 @@ Reply with ONE word only — the route name."""
             ).strip().lower()
             
             # Validate route
-            valid_routes = ["direct", "analytics", "iterative_rag", "rag"]
+            valid_routes = ["direct", "transform", "analytics", "iterative_rag", "rag"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
@@ -637,6 +644,13 @@ Reply with ONE word only — the route name."""
         if any(kw in query for kw in ["analytics", "statistiques", "rapport analytique"]):
             print("analytics (fallback)")
             return {**state, "route": "analytics"}
+
+        # Transform route — translation, rewriting, reformatting
+        transform_kws = ["translat", "translate", "tradui", "traduire", "rewrite", "paraphrase",
+                         "summarise in", "summarize in", "résume en", "résumer en"]
+        if any(kw in query for kw in transform_kws):
+            print("transform (fallback)")
+            return {**state, "route": "transform"}
 
         # Direct answer - expanded keywords for casual messages
         casual_keywords = [
@@ -875,16 +889,20 @@ Respond with ONLY the rewritten query, nothing else."""
         # Clean the answer first — needed by both source paths below
         clean_answer = _clean_answer(answer)
 
-        # Build sources — use Source Agent if available, else pure-Python bracket matching
-        if self._source_node and _SOURCE_AGENT_AVAILABLE:
-            intermediate = {**state, "answer": clean_answer, "retrieved_chunks": chunks}
-            intermediate = self._source_node(intermediate)
-            built_sources = intermediate.get("sources", [])
-            if not built_sources:
+        # Build sources only when the judge's plan calls for citations
+        if plan.should_cite_sources:
+            if self._source_node and _SOURCE_AGENT_AVAILABLE:
+                intermediate = {**state, "answer": clean_answer, "retrieved_chunks": chunks}
+                intermediate = self._source_node(intermediate)
+                built_sources = intermediate.get("sources", [])
+                if not built_sources:
+                    built_sources = _build_sources_from_brackets(answer, chunks)
+            else:
                 built_sources = _build_sources_from_brackets(answer, chunks)
+            print(f"📋 Sources built: {len(built_sources)}")
         else:
-            built_sources = _build_sources_from_brackets(answer, chunks)
-        print(f"📋 Sources built: {len(built_sources)}")
+            built_sources = []
+            print(f"📋 Sources skipped (plan: should_cite_sources=False)")
 
         return {
             **state,
@@ -1064,6 +1082,68 @@ Answer in {plan.target_language}:"""
         state["retry_count"] = retry_count + 1
         
         return "retry"
+
+    # ------------------------------------------------------------------ #
+    #  TRANSFORM NODE  (translation, rewrite, reformat — no sources)     #
+    # ------------------------------------------------------------------ #
+
+    def transform_node(self, state: AgentState) -> AgentState:
+        """
+        Execute a transformation task (translate, rewrite, reformat) on the
+        retrieved document content.
+
+        Key differences from synthesise:
+        - The judge plans tone/language as usual
+        - No [N] citation markers injected — sources are irrelevant
+        - No judge evaluation loop — no retry recursion
+        - Returns empty sources list
+        """
+        query   = state["query"]
+        chunks  = state["retrieved_chunks"]
+
+        print(f"🔀 Transform → ", end="")
+
+        if not chunks:
+            print("no documents")
+            return {**state, "answer": "No document content found to transform.", "sources": []}
+
+        # Ask the judge to plan (language detection etc.) — same as normal flow
+        plan = self.judge.plan_response(query, retrieved_docs=chunks)
+        print(f"{plan.target_language}/{plan.target_tone}")
+
+        context = _build_context(chunks)
+
+        prompt = f"""You are a document assistant. Your ONLY task is: {query}
+
+Use the document content below to complete this task.
+Do NOT add explanations, preambles, or meta-commentary.
+Do NOT add citation markers like [1] or [2].
+Just perform the task directly.
+
+Language of output: {plan.target_language}
+
+{context}"""
+
+        if self.llm.enabled:
+            answer = self.llm.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=2000,
+            )
+        else:
+            answer = "LLM unavailable — cannot perform transformation."
+
+        answer = _clean_answer(answer)
+        print(f"done ({len(answer)} chars)")
+
+        return {
+            **state,
+            "response_plan": plan,
+            "answer":     answer,
+            "raw_answer": answer,
+            "sources":    [],          # no sources for transform tasks
+            "confidence": 0.9,
+        }
 
     # ------------------------------------------------------------------ #
     #  ANALYTICS NODE                                                     #
