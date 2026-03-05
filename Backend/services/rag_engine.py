@@ -594,9 +594,11 @@ class RAGEngine:
 
 ROUTES:
 - direct: greetings, small talk, thanks, casual chat ("hi", "thanks", "how are you")
-- rag: any request for information, content, summaries, explanations, or questions about documents
-- iterative_rag: comparisons or multi-part questions across documents ("compare X and Y", "differences between")
-- analytics: requests for stats, metrics, numbers, KPIs, or data analysis
+- rag: any question asking for specific information, values, specs, facts, summaries, or explanations from documents — this includes asking for a specific number, metric, or technical value
+- iterative_rag: comparisons or multi-part questions that require looking across multiple documents ("compare X and Y", "differences between")
+- analytics: ONLY for requests asking for aggregated statistics across ALL documents, like totals, averages, distributions, or counts across the entire document set ("how many documents total", "what is the average across all files")
+
+IMPORTANT: If the query asks for a specific value or fact (e.g. "what is the downlink throughput", "what is the latency target", "what is the site ID"), route it to RAG — not analytics.
 
 QUERY: {query}
 
@@ -631,8 +633,8 @@ Reply with ONE word only — the route name."""
         """Simple keyword-based routing when LLM unavailable."""
         query = state["query"].lower()
         
-        # Analytics route
-        if any(kw in query for kw in ["analytics", "stats", "metrics", "kpi", "rapport", "statistiques"]):
+        # Analytics route — only explicit aggregate/cross-doc requests
+        if any(kw in query for kw in ["analytics", "statistiques", "rapport analytique"]):
             print("analytics (fallback)")
             return {**state, "route": "analytics"}
 
