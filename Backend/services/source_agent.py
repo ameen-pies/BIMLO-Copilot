@@ -1,27 +1,22 @@
 """
-Source Agent v5 — Full-Document LLM Extraction
+Source Agent v6 — Direct Verbatim Line Matching
 
 How it works:
-  1. From the retrieved chunks, figure out which filenames are cited in the answer
-  2. Pull ALL chunks for each cited filename from the vector store (not just the
-     retrieval top-k), reconstruct the full document text in reading order
-  3. Give the LLM:
-       - The full document text, labelled with the filename
-       - The specific answer section it generated for that document
-  4. Ask it: "copy the shortest sentence from the document that proves this"
-  5. Dedup across sections of the same document
+  1. Parse the answer line-by-line, one section per cited bullet
+  2. Pull ALL chunks for each cited filename from the vector store,
+     reconstruct the full document text in reading order
+  3. For each answer bullet, score every document line by weighted token
+     overlap (numbers > units/acronyms > long keywords > medium keywords)
+  4. Return the highest-scoring line — guaranteed to be verbatim from the doc
 
-The LLM now reads what a human would read — the actual document — not a
-RAG chunk fragment.  It also only sees ONE document at a time per call,
-so it cannot confuse sources.
+No LLM calls for extraction. The answer was generated FROM the document,
+so its key tokens must appear in it.
 """
 
 from __future__ import annotations
 
 import re
 import os
-import time
-import requests
 from typing import Dict, List, Optional, Tuple
 
 
@@ -118,156 +113,83 @@ def _parse_answer_sections(answer: str) -> List[Tuple[str, int, str]]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# LLM EXTRACTION — one doc at a time, clear instructions
-# ────────────────────────────────────────────────────────────────────────────
-
-def _extract_with_llm(
-    filename: str,
-    doc_text: str,
-    section_title: str,
-    section_content: str,
-    api_key: str,
-    model: str,
-) -> str:
-    """
-    Give the LLM:
-      - The full reconstructed document (trimmed to 8000 chars if needed)
-      - The specific section the answer wrote about this document
-    Ask it to copy the single most specific sentence from the document
-    that is the direct source of that section.
-    """
-    # If doc is very long, trim but keep it large — we want full context
-    doc_excerpt = doc_text[:8000]
-    if len(doc_text) > 8000:
-        doc_excerpt += "\n[... document continues ...]"
-
-    prompt = f"""You are a citation extractor for a document Q&A system.
-
-DOCUMENT: "{filename}"
-{doc_excerpt}
-
----
-
-The assistant wrote this section about the document above:
-
-SECTION TITLE: {section_title}
-SECTION TEXT:
-{section_content[:600]}
-
----
-
-Your task:
-Find the ONE sentence in the document that is the most direct source for the section text above.
-It must be a complete sentence — do not cut mid-sentence.
-Copy it VERBATIM from the document. Do not paraphrase. Do not explain.
-Output ONLY that sentence. Nothing else.
-
-If multiple sentences are equally relevant, pick the shorter one.
-Maximum output: 250 characters."""
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,
-        "max_tokens": 120,
-    }
-
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=25)
-            if resp.status_code == 200:
-                result = resp.json()["choices"][0]["message"]["content"].strip()
-                result = result.strip('"\'')
-
-                # Reject meta-commentary
-                bad_starts = (
-                    "i cannot", "i don't", "there is no", "no matching",
-                    "the document", "i was unable", "here is", "the sentence",
-                    "this sentence", "based on",
-                )
-                if len(result) > 15 and not result.lower().startswith(bad_starts):
-                    print(f"      🤖 LLM: {result[:120]!r}")
-                    return result[:260]
-
-                print(f"      ❌ LLM rejected: {result[:80]!r}")
-                return ""
-
-            elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"      ❌ HTTP {resp.status_code}: {resp.text[:80]}")
-                return ""
-
-        except Exception as e:
-            print(f"      ❌ Exception: {e}")
-            if attempt < 2:
-                time.sleep(1)
-
-    return ""
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# HEURISTIC FALLBACK — anchor-term sentence scoring (no LLM)
+# DIRECT VERBATIM LINE FINDER  (replaces LLM extraction + old heuristic)
 # ────────────────────────────────────────────────────────────────────────────
 
 _STOPWORDS = {
-    'the', 'les', 'des', 'and', 'pour', 'avec', 'dans', 'that', 'this',
-    'are', 'was', 'were', 'has', 'have', 'from', 'will', 'been', 'not',
-    'par', 'sur', 'une', 'est', 'qui', 'que', 'son', 'ses', 'leur',
-    'project', 'document', 'system', 'network', 'phase', 'source',
-    'also', 'each', 'both', 'more', 'than', 'its', 'into', 'they',
+    'the','les','des','and','pour','avec','dans','that','this',
+    'are','was','were','has','have','from','will','been','not',
+    'par','sur','une','est','qui','que','son','ses','leur',
+    'also','each','both','more','than','its','into','they',
+    'must','should','shall','about','which','where','when',
+    'target','value','level','between','install','upgrade',
 }
 
 
-def _extract_anchors(text: str) -> List[str]:
-    anchors: set[str] = set()
-    for m in re.finditer(r'\b\d[\d\s]*(?:[.,]\d+)?(?:\s*(?:dB|km|€|%|ms|PM|PBO|NRO|ONU))?\b', text):
-        val = m.group().strip()
-        if re.search(r'\d', val) and len(val) >= 2:
-            anchors.add(val)
-    for m in re.finditer(r'\b[A-Z]{2,6}\b', text):
-        anchors.add(m.group())
-    for m in re.finditer(r'\b[A-Z][A-Za-z0-9]*[-_.][A-Za-z0-9][-_.A-Za-z0-9]*\b', text):
-        anchors.add(m.group())
-    for m in re.finditer(r'\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b', text):
-        anchors.add(m.group())
-    for m in re.finditer(r'\b[A-ZÁÀÂÄÉÈÊËÎÏÔÙÛÜ][a-záàâäéèêëîïôùûü]+-[A-ZÁÀÂÄÉÈÊËÎÏÔÙÛÜ][a-z]+\b', text):
-        anchors.add(m.group())
-    return sorted(anchors, key=len, reverse=True)
+def _find_verbatim_line(section_content: str, doc_text: str) -> str:
+    """
+    Find the line in doc_text that is the direct verbatim source for
+    section_content.
 
+    The LLM generated section_content FROM doc_text, so the key tokens
+    (numbers, units, acronyms, long domain words) MUST appear in one of
+    the document's lines.  We score every line by weighted token overlap
+    and return the best match — no LLM call needed.
 
-def _split_sentences(text: str) -> List[str]:
-    text = re.sub(r'[ \t]+', ' ', text).strip()
-    raw = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÀÂÄÉÈÊËÎÏÔÙÛÜŒÇ\d\"])|(?:\n+)', text)
-    return [s.strip() for s in raw if len(s.strip()) >= 20]
+    Scoring weights:
+      - Numbers / numeric values  → weight 4  (most discriminating)
+      - Units / acronyms          → weight 3
+      - Long keywords (≥6 chars)  → weight 2
+      - Medium keywords (4-5 chr) → weight 1
+    """
+    stopwords = _STOPWORDS
 
+    tokens: List[tuple] = []   # (token_str, weight)
 
-def _heuristic_best_sentence(section_content: str, doc_text: str) -> str:
-    sentences = _split_sentences(doc_text)
-    if not sentences:
+    # Numbers — strip internal spaces so "1 .2 Gbps" → "1.2"
+    for m in re.finditer(r'\d[\d\s,.]*\d|\d', section_content):
+        t = re.sub(r'\s', '', m.group())
+        if t:
+            tokens.append((t, 4))
+
+    # Units and short acronyms
+    for m in re.finditer(
+        r'\b(?:Gbps|Mbps|kbps|MHz|GHz|kHz|dBm?|ms|km|m²?|[A-Z]{2,6})\b',
+        section_content, re.IGNORECASE
+    ):
+        tokens.append((m.group().lower(), 3))
+
+    # Long keywords
+    for m in re.finditer(r'[a-zA-ZÀ-ÿ]{6,}', section_content):
+        w = m.group().lower()
+        if w not in stopwords:
+            tokens.append((w, 2))
+
+    # Medium keywords
+    for m in re.finditer(r'[a-zA-ZÀ-ÿ]{4,5}', section_content):
+        w = m.group().lower()
+        if w not in stopwords:
+            tokens.append((w, 1))
+
+    if not tokens:
+        lines = [l.strip() for l in doc_text.split('\n') if len(l.strip()) >= 15]
+        return lines[0] if lines else doc_text[:250]
+
+    lines = [l.strip() for l in doc_text.split('\n') if len(l.strip()) >= 15]
+    if not lines:
         return doc_text[:250]
 
-    anchors = _extract_anchors(section_content)
-    if anchors:
-        scores = [sum(len(a) for a in anchors if a.lower() in s.lower()) for s in sentences]
-        best = max(scores)
-        if best > 0:
-            return sentences[scores.index(best)]
+    def score_line(line: str) -> int:
+        ll = line.lower()
+        return sum(w for t, w in tokens if t in ll)
 
-    content_words = [w.lower() for w in re.findall(r'[a-zA-ZÀ-ÿ]{4,}', section_content)
-                     if w.lower() not in _STOPWORDS]
-    if content_words:
-        scores = [sum(1 for w in content_words if w in s.lower()) for s in sentences]
-        best = max(scores)
-        if best > 0:
-            return sentences[scores.index(best)]
+    best_score, best_line = max(((score_line(l), l) for l in lines), key=lambda x: x[0])
 
-    return sentences[0]
+    if best_score == 0:
+        return lines[0]
+
+    print(f"      🎯 verbatim match (score {best_score}): {best_line[:100]!r}")
+    return best_line
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -299,12 +221,9 @@ class SourceAgent:
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  vector_store=None):
-        self.api_key = api_key or os.getenv("GROQ_API_KEY", "")
-        self.model   = model   or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        self.vs      = vector_store   # VectorStoreManager — can be None
-        self.use_llm = bool(self.api_key)
-        mode = f"LLM ({self.model})" if self.use_llm else "heuristic"
-        print(f"📎 Source Agent v5 [full-doc, {mode}]")
+        # api_key / model kept for API compatibility but no longer used for extraction
+        self.vs = vector_store   # VectorStoreManager — can be None
+        print(f"📎 Source Agent v6 [full-doc, direct verbatim match]")
 
     # ── fetch ALL chunks for a given filename from the vector store ────────
     def _get_all_chunks_for_file(self, filename: str) -> List[Dict]:
@@ -365,30 +284,22 @@ class SourceAgent:
             built_sections = []
 
             for title, section_content in sec_list:
-                # ── LLM extraction on full doc ─────────────────────────────
-                if self.use_llm:
-                    passage = _extract_with_llm(
-                        filename, doc_text,
-                        title, section_content,
-                        self.api_key, self.model,
-                    )
-                    if not passage:
-                        print(f"      ⚠️  LLM empty for '{title}', using heuristic")
-                        passage = _heuristic_best_sentence(section_content, doc_text)
-                else:
-                    passage = _heuristic_best_sentence(section_content, doc_text)
+                # Direct verbatim match — find the doc line whose tokens best
+                # match the answer line.  No LLM call, no guesswork.
+                passage = _find_verbatim_line(section_content, doc_text)
 
-                # Dedup: if same sentence picked again, use heuristic on full doc
-                if _is_duplicate(passage, seen_passages):
-                    sentences = _split_sentences(doc_text)
-                    for s in sentences:
-                        if not _is_duplicate(s, seen_passages):
-                            passage = s
+                # Dedup only at very high similarity so similar bullets
+                # (e.g. three throughput lines) aren't collapsed into one
+                if _is_duplicate(passage, seen_passages, threshold=0.85):
+                    lines = [l.strip() for l in doc_text.split('\n') if len(l.strip()) >= 15]
+                    for l in lines:
+                        if not _is_duplicate(l, seen_passages, threshold=0.85):
+                            passage = l
                             break
 
                 seen_passages.append(passage)
                 built_sections.append({"title": title, "excerpt": passage})
-                print(f"      ✓ '{title}': {passage[:120]!r}")
+                print(f"      ✓ [{src_num}] '{title}': {passage[:120]!r}")
 
             sources.append({
                 "source_number": src_num,
