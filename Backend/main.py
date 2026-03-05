@@ -182,6 +182,66 @@ async def delete_document(doc_id: str):
         raise HTTPException(500, f"Error deleting document: {e}")
 
 
+@app.get("/documents/{doc_id}/content")
+async def get_document_content(doc_id: str):
+    """Return the raw text content of a stored document for in-app viewing."""
+    try:
+        docs = vector_store.list_documents()
+        doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
+        if not doc_meta:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        filename  = doc_meta["filename"]
+        file_path = os.path.join(UPLOAD_DIR, filename)
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found on disk: {filename}")
+
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext == ".txt":
+            content = None
+            for enc in ("utf-8", "latin-1", "cp1252"):
+                try:
+                    with open(file_path, "r", encoding=enc) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if content is None:
+                raise HTTPException(status_code=500, detail="Could not decode file")
+
+        elif ext == ".pdf":
+            try:
+                import PyPDF2
+                content = ""
+                with open(file_path, "rb") as f:
+                    reader = PyPDF2.PdfReader(f)
+                    for page in reader.pages:
+                        content += (page.extract_text() or "") + "\n"
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"PDF extraction failed: {e}")
+
+        elif ext in (".docx", ".doc"):
+            try:
+                from docx import Document as DocxDocument
+                doc = DocxDocument(file_path)
+                content = "\n".join(p.text for p in doc.paragraphs)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {e}")
+
+        else:
+            raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
+
+        return {"document_id": doc_id, "filename": filename, "content": content}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Content fetch error: {e}")
+        raise HTTPException(500, f"Error reading document: {e}")
+
+
 @app.get("/health")
 async def health_check():
     try:
