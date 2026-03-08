@@ -1,0 +1,34 @@
+/* Custom Scrollbar Styles */
+
+/* For Webkit browsers (Chrome, Safari, Edge) */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.2);
+  border-radius: 4px;
+}
+
+.scrollbar-thin:hover::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* For Firefox */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
+}
+
+.scrollbar-thin:hover {
+  scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+}

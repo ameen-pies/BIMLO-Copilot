@@ -1,0 +1,132 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import './scrollbar.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 30% 97%;
+    --foreground: 220 25% 18%;
+
+    --card: 220 25% 99%;
+    --card-foreground: 220 25% 18%;
+
+    --popover: 220 25% 99%;
+    --popover-foreground: 220 25% 18%;
+
+    --primary: 221 75% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 40% 93%;
+    --secondary-foreground: 220 25% 22%;
+
+    --muted: 220 25% 93%;
+    --muted-foreground: 220 12% 48%;
+
+    --accent: 221 70% 93%;
+    --accent-foreground: 221 75% 38%;
+
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 20% 86%;
+    --input: 220 20% 88%;
+    --ring: 221 75% 52%;
+
+    --radius: 0.75rem;
+
+    --hero-gradient: linear-gradient(135deg, hsl(221, 83%, 53%) 0%, hsl(230, 90%, 65%) 100%);
+    --surface-blue: 221 83% 97%;
+    --blue-glow: 221 83% 53%;
+
+    --sidebar-background: 220 28% 95%;
+    --sidebar-foreground: 220 25% 18%;
+    --sidebar-primary: 221 75% 52%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 221 70% 93%;
+    --sidebar-accent-foreground: 221 75% 38%;
+    --sidebar-border: 220 20% 86%;
+    --sidebar-ring: 221 75% 52%;
+
+    --font-heading: 'Space Grotesk', sans-serif;
+    --font-body: 'Inter', sans-serif;
+  }
+
+  .dark {
+    --background: 222 40% 6%;
+    --foreground: 210 40% 98%;
+    --card: 222 40% 8%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222 40% 8%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 221 83% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 30% 14%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 220 20% 14%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 221 50% 16%;
+    --accent-foreground: 221 83% 70%;
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 20% 18%;
+    --input: 220 20% 18%;
+    --ring: 221 83% 58%;
+    --sidebar-background: 222 40% 8%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 221 83% 58%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 221 50% 16%;
+    --sidebar-accent-foreground: 221 83% 70%;
+    --sidebar-border: 220 20% 18%;
+    --sidebar-ring: 221 83% 58%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-body);
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+}
+
+@layer utilities {
+  .text-gradient-blue {
+    @apply bg-clip-text text-transparent;
+    background-image: var(--hero-gradient);
+  }
+  .bg-hero-gradient {
+    background: var(--hero-gradient);
+  }
+  .shadow-blue {
+    box-shadow: 0 8px 32px -8px hsl(var(--blue-glow) / 0.3);
+  }
+  .glass-surface {
+    @apply bg-card/80 backdrop-blur-lg border border-border/50;
+  }
+}
+
+@keyframes highlight-fade {
+  0%   { background-color: hsl(var(--primary) / 0.55); }
+  40%  { background-color: hsl(var(--primary) / 0.45); }
+  100% { background-color: hsl(48 96% 70% / 0); }
+}
+
+.doc-highlight {
+  background-color: hsl(48 96% 70% / 0);
+  border-radius: 2px;
+  padding: 1px 0;
+  /* will be toggled on via .doc-highlight-active */
+}
+
+.doc-highlight-active {
+  animation: highlight-fade 3.5s cubic-bezier(0.4, 0, 0.6, 1) forwards;
+}
