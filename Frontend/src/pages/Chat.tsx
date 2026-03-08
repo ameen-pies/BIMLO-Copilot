@@ -1338,7 +1338,7 @@ const Chat = () => {
                 {msg.role === "assistant" && (
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
-                <div className="max-w-[80%] space-y-2">
+                <div className="max-w-[80%] space-y-1">
                   <div
                     className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
@@ -1360,6 +1360,10 @@ const Chat = () => {
                     ) : (
                       msg.content
                     )}
+                  </div>
+
+                  <div className={`text-[10px] text-muted-foreground/60 px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}>
+                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   </div>
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
