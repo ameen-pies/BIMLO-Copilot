@@ -1128,8 +1128,10 @@ Answer in {plan.target_language}:"""
 TASK: {query}
 
 STRUCTURE RULES:
-- Preserve the exact structure of the original document: same sections, headings, bullets, numbered lists, paragraph breaks.
-- Apply the task to the text content only — never alter the structure or layout.
+- The document content below may have lost some formatting due to text extraction. Reconstruct a clean, well-structured document as output.
+- Identify sections, subsections, bullet points, and numbered lists from context clues in the text (e.g. "1.", "2.", "- ", all-caps titles, etc.) and render them properly using markdown: ## for section headings, - for bullets, numbered lists where appropriate.
+- ALL-CAPS phrases that look like section titles (e.g. "EXECUTIVE SUMMARY", "EQUIPMENT SPECIFICATIONS") should become ## headings.
+- Apply the task to the text content only — the structure and layout must be clean and readable in the output.
 - Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
 
 DOCUMENT:
