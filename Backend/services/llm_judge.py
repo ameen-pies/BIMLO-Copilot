@@ -221,10 +221,12 @@ QUERY: {user_query}
 {history_section}
 
 IMPORTANT LANGUAGE RULE:
-- Detect the language of the QUERY (not the documents).
-- The response MUST be in the query language, even if the documents are in a different language.
-- Example: if query is in English but docs are in French → target_language = "en"
-- Example: if query is in Arabic → target_language = "ar"
+- If the user explicitly requests a specific output language (e.g. "translate to French", "respond in Spanish", "باللغة العربية"), set target_language to that requested language — this overrides everything else.
+- If the user explicitly requests a specific format, tone, or style, honour it exactly.
+- Otherwise, mirror the query language: respond in whatever language the user wrote in.
+- Example: query in English, no language request → target_language = "en"
+- Example: query in English but says "translate to French" → target_language = "fr"
+- Example: query in Arabic → target_language = "ar"
 
 IMPORTANT SOURCE CITATION RULE:
 - should_cite_sources = true whenever the query asks for ANY information from documents — facts, values, specs, descriptions, names, dates, quantities, explanations. When in doubt → true.

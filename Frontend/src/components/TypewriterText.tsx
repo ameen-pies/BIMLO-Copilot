@@ -2,16 +2,11 @@ import { useState, useEffect, useRef } from "react";
 
 interface TypewriterTextProps {
   text: string;
-  speed?: number;
+  speed?: number;  // ms per token — same as original (speed={10} = 10ms/token = fast)
   onComplete?: () => void;
   render?: (partial: string) => React.ReactNode;
 }
 
-/**
- * Tokenize text so we never cut inside a markdown link [text](url),
- * a citation {{fact|Source N}}, bold/italic, or inline code.
- * These are emitted as single atomic tokens.
- */
 function tokenize(text: string): string[] {
   const tokens: string[] = [];
   const re = /(\{\{[^}]*\}\}|\[[^\]]*\]\([^)]*\)|[*_]{1,2}[^*_\n]+[*_]{1,2}|`[^`]+`|[\s\S])/g;
@@ -22,36 +17,51 @@ function tokenize(text: string): string[] {
   return tokens;
 }
 
+/**
+ * TypewriterText — survives tab switches.
+ *
+ * speed = ms per token (same contract as original — speed={10} is fast).
+ *
+ * Uses requestAnimationFrame + wall-clock time instead of chained setTimeout.
+ * Browsers throttle/pause setTimeout on hidden tabs; rAF + performance.now()
+ * means when you switch back, the next frame catches up instantly.
+ */
 const TypewriterText = ({ text, speed = 20, onComplete, render }: TypewriterTextProps) => {
   const [displayedText, setDisplayedText] = useState("");
-  const [tokenIndex, setTokenIndex] = useState(0);
-  const tokensRef = useRef<string[]>([]);
+  const startTimeRef  = useRef<number>(0);
+  const rafRef        = useRef<number>(0);
+  const doneRef       = useRef(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    tokensRef.current = tokenize(text);
+    const tokens = tokenize(text);
+    startTimeRef.current = performance.now();
+    doneRef.current = false;
     setDisplayedText("");
-    setTokenIndex(0);
-  }, [text]);
 
-  useEffect(() => {
-    const tokens = tokensRef.current;
-    if (tokenIndex < tokens.length) {
-      const timeout = setTimeout(() => {
-        setDisplayedText((prev) => prev + tokens[tokenIndex]);
-        setTokenIndex((prev) => prev + 1);
-      }, speed);
-      return () => clearTimeout(timeout);
-    } else if (tokenIndex > 0 && tokenIndex === tokens.length) {
-      onCompleteRef.current?.();
-    }
-  }, [tokenIndex, speed]);
+    const tick = (now: number) => {
+      if (doneRef.current) return;
 
-  if (render) {
-    return <>{render(displayedText)}</>;
-  }
+      const elapsed = now - startTimeRef.current;
+      const target  = Math.min(Math.floor(elapsed / speed), tokens.length);
 
+      setDisplayedText(tokens.slice(0, target).join(""));
+
+      if (target >= tokens.length) {
+        doneRef.current = true;
+        onCompleteRef.current?.();
+        return;
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [text, speed]);
+
+  if (render) return <>{render(displayedText)}</>;
   return <span>{displayedText}</span>;
 };
 

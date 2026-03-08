@@ -1120,16 +1120,20 @@ Answer in {plan.target_language}:"""
 
         context = _build_context(chunks)
 
-        prompt = f"""You are a document assistant. Your ONLY task is: {query}
+        # Build a clean context for transform — no [Source N] headers bleeding into output
+        clean_context = "\n\n".join(c["text"] for c in chunks)
 
-Use the document content below to complete this task.
-Do NOT add explanations, preambles, or meta-commentary.
-Do NOT add citation markers like [1] or [2].
-Just perform the task directly.
+        prompt = f"""You are a document assistant. Complete the following task exactly as instructed:
 
-Language of output: {plan.target_language}
+TASK: {query}
 
-{context}"""
+STRUCTURE RULES:
+- Preserve the exact structure of the original document: same sections, headings, bullets, numbered lists, paragraph breaks.
+- Apply the task to the text content only — never alter the structure or layout.
+- Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
+
+DOCUMENT:
+{clean_context}"""
 
         if self.llm.enabled:
             answer = self.llm.chat(
@@ -1140,7 +1144,9 @@ Language of output: {plan.target_language}
         else:
             answer = "LLM unavailable — cannot perform transformation."
 
-        answer = _clean_answer(answer)
+        # Do NOT run _clean_answer on transform output — it would mangle
+        # the original document structure (headings, bullets, line breaks).
+        answer = answer.strip()
         print(f"done ({len(answer)} chars)")
 
         return {
