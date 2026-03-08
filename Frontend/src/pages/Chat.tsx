@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -709,6 +709,8 @@ const Chat = () => {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
   const [isUploading, setIsUploading] = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -1031,7 +1033,8 @@ const Chat = () => {
 
     try {
       // Query the RAG system
-      const response = await api.query(trimmedInput);
+      abortControllerRef.current = new AbortController();
+      const response = await api.query(trimmedInput, abortControllerRef.current.signal);
 
       // Create assistant message with sources
       const assistantMsg: Message = {
@@ -1063,6 +1066,41 @@ const Chat = () => {
         description: error instanceof Error ? error.message : "Unknown error",
         variant: "destructive",
       });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleStop = () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsLoading(false);
+    setTypingMessageId(null);
+  };
+
+  const handleRedo = async (msgId: string) => {
+    const msgIndex = messages.findIndex(m => m.id === msgId);
+    if (msgIndex < 1) return;
+    const prevUserMsg = [...messages].slice(0, msgIndex).reverse().find(m => m.role === "user");
+    if (!prevUserMsg) return;
+    setMessages(prev => prev.filter(m => m.id !== msgId));
+    setIsLoading(true);
+    try {
+      abortControllerRef.current = new AbortController();
+      const response = await api.query(prevUserMsg.content, abortControllerRef.current.signal);
+      const redoMsg: Message = {
+        id: Date.now().toString(),
+        role: "assistant",
+        content: response.answer,
+        rawAnswer: response.raw_answer ?? response.answer,
+        sources: response.sources,
+        confidence: response.confidence,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, redoMsg]);
+      setTypingMessageId(redoMsg.id);
+    } catch {
+      // silently ignore abort
     } finally {
       setIsLoading(false);
     }
@@ -1338,7 +1376,7 @@ const Chat = () => {
                 {msg.role === "assistant" && (
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
-                <div className="max-w-[80%] space-y-1">
+                <div className="max-w-[80%] space-y-2">
                   <div
                     className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
@@ -1362,8 +1400,37 @@ const Chat = () => {
                     )}
                   </div>
 
-                  <div className={`text-[10px] text-muted-foreground/60 px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}>
-                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  {/* Timestamp + action bar */}
+                  <div className={`flex items-center gap-2 px-1 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <span className="text-[10px] text-muted-foreground/50">
+                      {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    {msg.role === "assistant" && msg.id !== typingMessageId && (
+                      <div className="flex items-center gap-1 ml-1">
+                        <button
+                          onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
+                          className={`p-1 rounded-md transition-colors ${feedback[msg.id] === "like" ? "text-primary" : "text-muted-foreground/40 hover:text-primary"}`}
+                          title="Good response"
+                        >
+                          <ThumbsUp className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "dislike" ? null : "dislike" }))}
+                          className={`p-1 rounded-md transition-colors ${feedback[msg.id] === "dislike" ? "text-destructive" : "text-muted-foreground/40 hover:text-destructive"}`}
+                          title="Bad response"
+                        >
+                          <ThumbsDown className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={() => handleRedo(msg.id)}
+                          disabled={isLoading}
+                          className="p-1 rounded-md text-muted-foreground/40 hover:text-foreground transition-colors disabled:opacity-30"
+                          title="Regenerate response"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
@@ -1547,19 +1614,26 @@ const Chat = () => {
                 </svg>
               </button>
 
-              {/* Send button */}
-              <Button
-                size="icon"
-                className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
-                onClick={handleSend}
-                disabled={!input.trim() || isLoading}
-              >
-                {isLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
+              {/* Send / Stop button */}
+              {isLoading ? (
+                <Button
+                  size="icon"
+                  className="h-8 w-8 bg-destructive/90 hover:bg-destructive text-white transition-colors shrink-0 rounded-lg mb-0.5"
+                  onClick={handleStop}
+                  title="Stop generating"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
+                  onClick={handleSend}
+                  disabled={!input.trim()}
+                >
                   <Send className="h-4 w-4" />
-                )}
-              </Button>
+                </Button>
+              )}
             </div>
           </div>
         </div>
