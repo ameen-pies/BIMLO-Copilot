@@ -598,14 +598,15 @@ class RAGEngine:
         routing_prompt = f"""You are a router. Pick exactly one route for this query.
 
 ROUTES:
-- direct: greetings, small talk, thanks, casual chat ("hi", "thanks", "how are you")
-- transform: tasks that require transforming/rewriting document content — translation, summarization into another language, reformatting, rewriting, paraphrasing. These need the document content but NOT citation sources.
-- rag: any question asking for specific information, values, specs, facts, or explanations from documents — including asking for a specific number, metric, or technical value
-- iterative_rag: comparisons or multi-part questions that require looking across multiple documents ("compare X and Y", "differences between")
-- analytics: ONLY for requests asking for aggregated statistics across ALL documents, like totals, averages, or counts across the entire document set
+- direct: greetings, small talk, thanks, casual chat
+- transform: the user wants to produce a NEW VERSION of document content in a different form — e.g. translate the document to another language, rewrite or paraphrase the whole document, reformat the entire document. The output IS the transformed document. No sources needed.
+- rag: the user wants to LEARN from documents — ask a question, get a summary with cited facts, understand what is in the documents, extract specific information. Sources and citations are expected.
+- iterative_rag: like rag but requires looking across multiple documents (comparisons, differences)
+- analytics: aggregated statistics across ALL documents (totals, counts, averages across the whole set)
 
-IMPORTANT: "translate", "summarise in [language]", "rewrite", "paraphrase" → always transform. Never iterative_rag.
-IMPORTANT: Asking for a specific fact or value → always rag. Never analytics.
+TO DECIDE BETWEEN transform AND rag, ask yourself:
+- Would the user be satisfied with a cited, structured answer that explains the content? → rag
+- Does the user want the document itself reproduced in a new language or form, with no citation needed? → transform
 
 QUERY: {query}
 
@@ -617,9 +618,9 @@ Reply with ONE word only — the route name."""
                 temperature=0.0,
                 max_tokens=50
             ).strip().lower()
-            
-            # Validate route
-            valid_routes = ["direct", "transform", "analytics", "iterative_rag", "rag"]
+
+            # Validate — rag checked BEFORE transform so ambiguous responses default safely
+            valid_routes = ["direct", "iterative_rag", "analytics", "transform", "rag"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
@@ -888,6 +889,12 @@ Respond with ONLY the rewritten query, nothing else."""
 
         # Clean the answer first — needed by both source paths below
         clean_answer = _clean_answer(answer)
+
+        # RAG routes always use sources — override judge if needed
+        route = state.get("route", "")
+        if route in ("rag", "iterative_rag", "analytics") and not plan.should_cite_sources:
+            print("⚠️  Judge said no-cite but route is RAG — overriding to True")
+            plan = ResponsePlan(**{**plan.to_dict(), "should_cite_sources": True})
 
         # Build sources only when the judge's plan calls for citations
         if plan.should_cite_sources:

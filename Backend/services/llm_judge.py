@@ -227,8 +227,8 @@ IMPORTANT LANGUAGE RULE:
 - Example: if query is in Arabic → target_language = "ar"
 
 IMPORTANT SOURCE CITATION RULE:
-- should_cite_sources = true ONLY when the answer retrieves specific facts, values, or quotes from documents that the user can verify.
-- should_cite_sources = false when the task is a transformation (translation, rewrite, paraphrase, summarise) or a conversational reply — in these cases sources add no value.
+- should_cite_sources = true whenever the query asks for ANY information from documents — facts, values, specs, descriptions, names, dates, quantities, explanations. When in doubt → true.
+- should_cite_sources = false ONLY for: translation, rewriting, paraphrasing, summarising into another language, or casual greetings/small talk. These are the ONLY exceptions.
 
 Respond ONLY with this JSON:
 {{
