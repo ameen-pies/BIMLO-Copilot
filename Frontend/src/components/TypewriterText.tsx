@@ -1,87 +1,58 @@
-import { useEffect, useRef, useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
 interface TypewriterTextProps {
   text: string;
-  speed?: number; // chars per interval tick (default 1)
+  speed?: number;
   onComplete?: () => void;
-  render: (partial: string) => React.ReactNode;
+  render?: (partial: string) => React.ReactNode;
 }
 
 /**
- * Typewriter that keeps running even when the user switches tabs.
- *
- * Root cause of the freeze: browsers throttle/suspend setTimeout when the
- * tab is hidden (Page Visibility API + background timer throttling).
- *
- * Fix: listen for `visibilitychange`. When the tab becomes visible again,
- * immediately jump the displayed text to wherever the real-time cursor
- * should be, based on elapsed wall-clock time — so no characters are lost
- * and it never "freezes" visually.
+ * Tokenize text so we never cut inside a markdown link [text](url),
+ * a citation {{fact|Source N}}, bold/italic, or inline code.
+ * These are emitted as single atomic tokens.
  */
-const TypewriterText: React.FC<TypewriterTextProps> = ({
-  text,
-  speed = 1,
-  onComplete,
-  render,
-}) => {
-  const [displayed, setDisplayed] = useState("");
-  const indexRef    = useRef(0);       // how many chars we've shown
-  const startRef    = useRef<number>(Date.now()); // wall-clock start time
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const doneRef     = useRef(false);
-  const TICK_MS     = 16; // ~60 fps tick rate
-  const CHARS_PER_TICK = Math.max(1, speed); // chars to advance per tick
+function tokenize(text: string): string[] {
+  const tokens: string[] = [];
+  const re = /(\{\{[^}]*\}\}|\[[^\]]*\]\([^)]*\)|[*_]{1,2}[^*_\n]+[*_]{1,2}|`[^`]+`|[\s\S])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    tokens.push(m[1]);
+  }
+  return tokens;
+}
 
-  // How many chars should be visible right now based on elapsed time?
-  const expectedIndex = () => {
-    const elapsed = Date.now() - startRef.current;
-    const ticks = elapsed / TICK_MS;
-    return Math.min(Math.floor(ticks * CHARS_PER_TICK), text.length);
-  };
-
-  const advance = () => {
-    if (doneRef.current) return;
-
-    const target = expectedIndex();
-    if (target >= text.length) {
-      setDisplayed(text);
-      doneRef.current = true;
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      onComplete?.();
-      return;
-    }
-
-    if (target > indexRef.current) {
-      indexRef.current = target;
-      setDisplayed(text.slice(0, target));
-    }
-  };
-
-  // When tab becomes visible again, snap to the correct position immediately
-  const onVisibilityChange = () => {
-    if (!document.hidden) {
-      advance();
-    }
-  };
+const TypewriterText = ({ text, speed = 20, onComplete, render }: TypewriterTextProps) => {
+  const [displayedText, setDisplayedText] = useState("");
+  const [tokenIndex, setTokenIndex] = useState(0);
+  const tokensRef = useRef<string[]>([]);
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    // Reset on new text
-    indexRef.current  = 0;
-    doneRef.current   = false;
-    startRef.current  = Date.now();
-    setDisplayed("");
-
-    intervalRef.current = setInterval(advance, TICK_MS);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    tokensRef.current = tokenize(text);
+    setDisplayedText("");
+    setTokenIndex(0);
   }, [text]);
 
-  return <>{render(displayed)}</>;
+  useEffect(() => {
+    const tokens = tokensRef.current;
+    if (tokenIndex < tokens.length) {
+      const timeout = setTimeout(() => {
+        setDisplayedText((prev) => prev + tokens[tokenIndex]);
+        setTokenIndex((prev) => prev + 1);
+      }, speed);
+      return () => clearTimeout(timeout);
+    } else if (tokenIndex > 0 && tokenIndex === tokens.length) {
+      onCompleteRef.current?.();
+    }
+  }, [tokenIndex, speed]);
+
+  if (render) {
+    return <>{render(displayedText)}</>;
+  }
+
+  return <span>{displayedText}</span>;
 };
 
 export default TypewriterText;
