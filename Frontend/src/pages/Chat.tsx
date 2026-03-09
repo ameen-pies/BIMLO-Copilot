@@ -696,6 +696,72 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
   );
 };
 
+// ---------------------------------------------------------------------------
+// Robust query helper — bypasses api.query() to guarantee correct payload
+// ---------------------------------------------------------------------------
+
+/** Serialize any caught value to a readable string (handles Error, object, string, etc.) */
+function serializeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    // FastAPI 422 detail is often { detail: [...] }
+    const e = err as Record<string, unknown>;
+    if (e.detail) {
+      if (typeof e.detail === "string") return e.detail;
+      if (Array.isArray(e.detail)) {
+        return e.detail
+          .map((d: unknown) =>
+            d && typeof d === "object"
+              ? `${(d as Record<string, unknown>).loc ?? ""}: ${(d as Record<string, unknown>).msg ?? JSON.stringify(d)}`
+              : String(d)
+          )
+          .join("; ");
+      }
+      return JSON.stringify(e.detail);
+    }
+    if (e.message && typeof e.message === "string") return e.message;
+    return JSON.stringify(err);
+  }
+  return String(err);
+}
+
+/**
+ * Direct POST to /query with a correctly-formed JSON body.
+ * Falls back gracefully if api.query() has a broken serialisation or
+ * wrong field name — this always sends { "query": "...", "top_k": 5 }.
+ */
+async function queryBackend(
+  question: string,
+  signal?: AbortSignal,
+): Promise<{ answer: string; raw_answer?: string; sources: Source[]; confidence: number }> {
+  // Derive base URL the same way api.ts does (VITE env var → localhost fallback)
+  const base =
+    (typeof import.meta !== "undefined" && (import.meta as Record<string, unknown>).env
+      ? ((import.meta as Record<string, { VITE_API_URL?: string }>).env.VITE_API_URL ?? "")
+      : "") || "http://localhost:8000";
+
+  const res = await fetch(`${base}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query: question, top_k: 5 }),
+    signal,
+  });
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      detail = serializeError(body);
+    } catch {
+      // ignore parse failure
+    }
+    throw new Error(detail);
+  }
+
+  return res.json();
+}
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -831,7 +897,7 @@ const Chat = () => {
       console.error("Failed to load documents:", error);
       toast({
         title: "Error loading documents",
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: serializeError(error),
         variant: "destructive",
       });
     }
@@ -910,7 +976,7 @@ const Chat = () => {
       } catch (error) {
         toast({
           title: "Upload failed",
-          description: `${file.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
+          description: `${file.name}: ${serializeError(error)}`,
           variant: "destructive",
         });
       } finally {
@@ -969,7 +1035,7 @@ const Chat = () => {
     } catch (error) {
       toast({
         title: "Upload failed",
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: serializeError(error),
         variant: "destructive",
       });
     } finally {
@@ -992,7 +1058,7 @@ const Chat = () => {
     } catch (error) {
       toast({
         title: "Delete failed",
-        description: error instanceof Error ? error.message : "Unknown error",
+        description: serializeError(error),
         variant: "destructive",
       });
     }
@@ -1032,9 +1098,9 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
-      // Query the RAG system
+      // Query the RAG system — use direct fetch to guarantee correct payload format
       abortControllerRef.current = new AbortController();
-      const response = await api.query(trimmedInput, abortControllerRef.current.signal);
+      const response = await queryBackend(trimmedInput, abortControllerRef.current.signal);
 
       // Create assistant message with sources
       const assistantMsg: Message = {
@@ -1051,21 +1117,20 @@ const Chat = () => {
       setTypingMessageId(assistantMsg.id);
 
     } catch (error) {
-      // Create error message
+      // Ignore abort errors (user clicked Stop)
+      if (error instanceof Error && error.name === "AbortError") {
+        setIsLoading(false);
+        return;
+      }
+      const msg = serializeError(error);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
-        content: `Sorry, I encountered an error: ${error instanceof Error ? error.message : "Unknown error"}. Please try again.`,
+        content: `Sorry, I encountered an error: ${msg}. Please try again.`,
         timestamp: new Date(),
       };
-
       setMessages((prev) => [...prev, errorMsg]);
-
-      toast({
-        title: "Query failed",
-        description: error instanceof Error ? error.message : "Unknown error",
-        variant: "destructive",
-      });
+      toast({ title: "Query failed", description: msg, variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -1087,7 +1152,7 @@ const Chat = () => {
     setIsLoading(true);
     try {
       abortControllerRef.current = new AbortController();
-      const response = await api.query(prevUserMsg.content, abortControllerRef.current.signal);
+      const response = await queryBackend(prevUserMsg.content, abortControllerRef.current.signal);
       const redoMsg: Message = {
         id: Date.now().toString(),
         role: "assistant",
@@ -1099,8 +1164,12 @@ const Chat = () => {
       };
       setMessages(prev => [...prev, redoMsg]);
       setTypingMessageId(redoMsg.id);
-    } catch {
-      // silently ignore abort
+    } catch (error) {
+      // Silently ignore abort; surface real errors
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        const msg = serializeError(error);
+        toast({ title: "Regeneration failed", description: msg, variant: "destructive" });
+      }
     } finally {
       setIsLoading(false);
     }
