@@ -58,12 +58,12 @@ except ImportError:
 
 # Import the new judge
 try:
-    from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation
+    from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation, DOC_RELEVANCE_THRESHOLD
 except ImportError as e:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
-    from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation
+    from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation, DOC_RELEVANCE_THRESHOLD
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -378,6 +378,46 @@ def _is_good_retrieval(chunks: List[Dict]) -> bool:
         return False
     good = [c for c in chunks if (c.get("distance") or 1.0) < RELEVANCE_THRESHOLD]
     return len(good) >= MIN_CHUNKS
+
+
+# Patterns that indicate specific, citable data in an answer
+_SPECIFIC_DATA_PATTERNS = [
+    # Numbers with units: 22 kPa, 3.5 km, 400 MHz, 12.4 dBm, 1,200 rpm
+    r'\b\d[\d,\.]*\s*(?:kPa|MPa|psi|bar|kg|g|mg|m\xb2|m\xb3|km|mm|cm|nm|'
+    r'kW|MW|kWh|MWh|V|A|mA|\u03a9|Hz|kHz|MHz|GHz|dB|dBm|'
+    r'rpm|m/s|km/h|\xb0C|\xb0F|K|l|ml|L|mL|Mbps|Gbps|kbps)\b',
+    # Standalone years: 2019, 2024 (4-digit, 1900-2099)
+    r'\b(19|20)\d{2}\b',
+    # Explicit dates: 14/05/2023, 2023-05-14
+    r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
+    # Month name dates: May 14 2023
+    r'\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|'
+    r'Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+    r'\s+\d{1,2},?\s+\d{4}\b',
+    # Percentages: 87.3%, 12%
+    r'\b\d[\d\.]*\s*%',
+    # Currency amounts: $1,200, 45.00 EUR
+    r'[$\u20ac\xa3\xa5\u20b9]\s*\d[\d,\.]+',
+    # Bare numbers >= 4 digits (part numbers, large counts, etc.)
+    r'\b\d{4,}\b',
+    # Version / revision: v2.3.1, Rev. 4
+    r'\b(?:v|ver(?:sion)?|rev(?:ision)?|issue|rel(?:ease)?)\s*\.?\s*\d[\d\.]*\b',
+]
+
+_SPECIFIC_DATA_RE = re.compile(
+    '|'.join(_SPECIFIC_DATA_PATTERNS),
+    re.IGNORECASE,
+)
+
+
+def _answer_contains_specific_data(text: str) -> bool:
+    """
+    Return True if the answer contains specific numbers, dates, units,
+    percentages, or version numbers that must be backed by a source citation.
+    Strips existing [N] markers first so they don't self-trigger.
+    """
+    clean = re.sub(r'\[\d+\]', '', text)
+    return bool(_SPECIFIC_DATA_RE.search(clean))
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -798,23 +838,56 @@ Respond with ONLY the rewritten query, nothing else."""
     def judge_plan(self, state: AgentState) -> AgentState:
         """
         Ask the judge to plan how to respond.
-        
-        This is where all language/tone decisions happen.
-        NO hardcoding.
+
+        v3 additions:
+        - Passes the current route as a hint so the judge can confirm or override it.
+        - Reads doc_relevance_score from the plan to decide whether to downgrade
+          a RAG route to "direct" when the retrieved docs are off-topic.
+        - Carries the (possibly overridden) route forward in state so synthesise
+          and _should_retry can see it.
         """
-        query = state["query"]
-        chunks = state["retrieved_chunks"]
-        
+        query        = state["query"]
+        chunks       = state["retrieved_chunks"]
+        current_route = state.get("route", "rag")
+
         print(f"🧠 Judge planning response → ", end="")
-        
-        # Get the judge's plan
-        plan = self.judge.plan_response(query, retrieved_docs=chunks)
-        
-        print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style}")
-        
+
+        # Pass retrieved docs + current router decision so judge can assess relevance
+        plan = self.judge.plan_response(
+            query,
+            retrieved_docs=chunks,
+            current_route=current_route,
+        )
+
+        print(
+            f"{plan.target_language}/{plan.target_tone}/{plan.response_style} "
+            f"| route={plan.recommended_route} "
+            f"| relevance={plan.doc_relevance_score:.2f}"
+        )
+
+        # ── Route override logic ──────────────────────────────────────────────
+        # If the judge says docs aren't relevant enough, honour that verdict.
+        effective_route = current_route
+        if plan.doc_relevance_score < DOC_RELEVANCE_THRESHOLD:
+            if current_route in ("rag", "iterative_rag"):
+                print(
+                    f"⚠️  Judge: doc relevance {plan.doc_relevance_score:.2f} < "
+                    f"{DOC_RELEVANCE_THRESHOLD} — downgrading {current_route} → direct"
+                )
+                effective_route = "direct"
+        elif plan.recommended_route != current_route and plan.recommended_route in (
+            "direct", "rag", "iterative_rag", "analytics", "transform"
+        ):
+            print(
+                f"ℹ️  Judge overrides router: {current_route} → {plan.recommended_route} "
+                f"({plan.route_reasoning})"
+            )
+            effective_route = plan.recommended_route
+
         return {
             **state,
             "response_plan": plan,
+            "route": effective_route,   # update route so synthesise uses the right mode
         }
 
     # ------------------------------------------------------------------ #
@@ -840,7 +913,23 @@ Respond with ONLY the rewritten query, nothing else."""
         if not plan:
             print("❌ No response plan available")
             return {**state, "error": "No response plan"}
-        
+
+        # ── Judge downgraded to direct (low doc relevance) ────────────────────
+        route = state.get("route", "")
+        if route == "direct" and state.get("retrieved_chunks"):
+            # The judge decided docs are not relevant — answer directly from LLM knowledge
+            print(f"💬 Synthesise → direct mode (judge downgrade, relevance={plan.doc_relevance_score:.2f})")
+            direct_answer = self._generate_direct_answer(state["query"], plan)
+            clean = _clean_answer(direct_answer)
+            return {
+                **state,
+                "context": "",
+                "answer": clean,
+                "raw_answer": clean,
+                "sources": [],
+                "confidence": 0.5,   # lower confidence — not doc-backed
+            }
+
         print(f"✍️  Generating (attempt {retry_count + 1}, following plan) → ", end="")
         
         # Build context
@@ -890,10 +979,26 @@ Respond with ONLY the rewritten query, nothing else."""
         # Clean the answer first — needed by both source paths below
         clean_answer = _clean_answer(answer)
 
-        # RAG routes always use sources — override judge if needed
+        # RAG routes always use sources — override judge if needed.
+        # BUT if judge downgraded to direct, respect that (no forced citations).
         route = state.get("route", "")
         if route in ("rag", "iterative_rag", "analytics") and not plan.should_cite_sources:
-            print("⚠️  Judge said no-cite but route is RAG — overriding to True")
+            # Only force citations if doc relevance was actually acceptable
+            if plan.doc_relevance_score >= DOC_RELEVANCE_THRESHOLD:
+                print("⚠️  Judge said no-cite but route is RAG — overriding to True")
+                plan = ResponsePlan(**{**plan.to_dict(), "should_cite_sources": True})
+            else:
+                print(
+                    f"✅  Judge no-cite respected (relevance={plan.doc_relevance_score:.2f} "
+                    f"< {DOC_RELEVANCE_THRESHOLD})"
+                )
+
+        # ── Specific-data citation enforcement ───────────────────────────────
+        # If the answer contains any concrete numbers, dates, units, percentages
+        # or version strings, sources MUST be attached regardless of what the
+        # judge decided about should_cite_sources.
+        if not plan.should_cite_sources and chunks and _answer_contains_specific_data(clean_answer):
+            print("🔢 Answer contains specific data (numbers/dates/units) — forcing citations")
             plan = ResponsePlan(**{**plan.to_dict(), "should_cite_sources": True})
 
         # Build sources only when the judge's plan calls for citations
