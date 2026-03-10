@@ -14,9 +14,8 @@ class DocumentProcessor:
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self._api_key = os.getenv("GROQ_API_KEY", "")
-        self._model   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        self._api_url = "https://api.groq.com/openai/v1/chat/completions"
+        self._api_key = os.getenv("CF_API_KEY", "")
+        self._api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
 
     # ── Public entry point ────────────────────────────────────────────────
 
@@ -111,15 +110,14 @@ Reply with ONLY the doc_type label. Nothing else."""
                 self._api_url,
                 headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
                 json={
-                    "model": self._model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0,
+                    "prompt":     prompt,
                     "max_tokens": 20,
+                    "task":       "classify",
                 },
                 timeout=15,
             )
             if resp.status_code == 200:
-                label = resp.json()["choices"][0]["message"]["content"].strip().lower()
+                label = (resp.json().get("response") or "").strip().lower()
                 # Sanitise: keep only word chars and underscores
                 label = re.sub(r'[^\w]', '_', label).strip('_')
                 return label or "document"
