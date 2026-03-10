@@ -784,6 +784,8 @@ const Chat = () => {
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
+  const [isDraggingInput, setIsDraggingInput] = useState(false);
+  const [inputDragDepth, setInputDragDepth] = useState(0);
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   
@@ -1003,6 +1005,36 @@ const Chat = () => {
         setIsUploading(false);
       }
     }
+  };
+
+  const handleInputDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setInputDragDepth(prev => prev + 1);
+    setIsDraggingInput(true);
+  };
+
+  const handleInputDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setInputDragDepth(prev => {
+      const next = prev - 1;
+      if (next === 0) setIsDraggingInput(false);
+      return next;
+    });
+  };
+
+  const handleInputDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleInputDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingInput(false);
+    setInputDragDepth(0);
+    await handleDrop(e);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1568,7 +1600,7 @@ const Chat = () => {
                           }}
                           rows={1}
                           style={{ maxHeight: "300px" }}
-                          className="w-full resize-none bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary-foreground/40 leading-relaxed overflow-y-auto"
+                          className="w-full resize-none bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary-foreground/40 leading-relaxed overflow-y-auto scrollbar-thin"
                         />
                         <div className="flex items-center gap-1.5 justify-end">
                           <button
@@ -1756,90 +1788,124 @@ const Chat = () => {
         {/* Input */}
         <div className="border-t border-border p-4">
           <div className="max-w-3xl mx-auto">
-            <div className="flex items-end gap-2 rounded-2xl border border-input bg-card px-3 py-2.5 focus-within:ring-2 focus-within:ring-ring focus-within:border-transparent transition-all">
-              {/* Plus / attach button — front */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mb-0.5"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
-              >
-                <Plus className="h-5 w-5" />
-              </Button>
+            <div
+              className="relative rounded-2xl border border-input bg-card focus-within:ring-2 focus-within:ring-ring focus-within:border-transparent transition-all"
+              onDragEnter={handleInputDragEnter}
+              onDragOver={handleInputDragOver}
+              onDragLeave={handleInputDragLeave}
+              onDrop={handleInputDrop}
+            >
+              {/* Drag-over overlay — same style as the page-level one */}
+              <AnimatePresence>
+                {isDraggingInput && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="absolute inset-0 z-10 rounded-2xl bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none"
+                  >
+                    <motion.div
+                      initial={{ scale: 0.9 }}
+                      animate={{ scale: 1 }}
+                      exit={{ scale: 0.9 }}
+                      className="border-2 border-dashed border-primary rounded-2xl p-6 bg-card/50"
+                    >
+                      <div className="text-center">
+                        <FileText className="h-8 w-8 text-primary mx-auto mb-2" />
+                        <h3 className="text-sm font-semibold text-foreground mb-1">Drop files here</h3>
+                        <p className="text-xs text-muted-foreground">PDF · DOCX · TXT</p>
+                      </div>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-              {/* Auto-expanding textarea */}
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                placeholder="Ask a question about your documents..."
-                rows={1}
-                disabled={isLoading}
-                style={{ maxHeight: "200px" }}
-                className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto"
-              />
-
-              {/* Voice wave button */}
-              <button
-                type="button"
-                onMouseEnter={() => setIsHoveringVoice(true)}
-                onMouseLeave={() => setIsHoveringVoice(false)}
-                className="h-8 w-8 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-primary transition-colors mb-0.5 group"
-                title="Voice message"
-              >
-                <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
-                  {[
-                    { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                    { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
-                    { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
-                    { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
-                    { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
-                    { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
-                    { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                  ].map((bar, i) => (
-                    <rect
-                      key={i}
-                      x={bar.x}
-                      y={isHoveringVoice ? (9 - bar.hoverH / 2) : (9 - bar.baseH / 2)}
-                      width="2"
-                      rx="1"
-                      height={isHoveringVoice ? bar.hoverH : bar.baseH}
-                      fill="currentColor"
-                      style={{
-                        transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
-                      }}
-                    />
-                  ))}
-                </svg>
-              </button>
-
-              {/* Send / Stop button */}
-              {isLoading ? (
+              {/* Actual input row — hidden behind overlay when dragging */}
+              <div className={`flex items-end gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
+                {/* Plus / attach button */}
                 <Button
+                  variant="ghost"
                   size="icon"
-                  className="h-8 w-8 bg-destructive/90 hover:bg-destructive text-white transition-colors shrink-0 rounded-lg mb-0.5"
-                  onClick={handleStop}
-                  title="Stop generating"
+                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mb-0.5"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading}
                 >
-                  <Square className="h-3.5 w-3.5 fill-current" />
+                  <Plus className="h-5 w-5" />
                 </Button>
-              ) : (
-                <Button
-                  size="icon"
-                  className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
-                  onClick={handleSend}
-                  disabled={!input.trim()}
+
+                {/* Auto-expanding textarea */}
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder="Ask a question about your documents..."
+                  rows={1}
+                  disabled={isLoading}
+                  style={{ maxHeight: "160px" }}
+                  className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
+                />
+
+                {/* Voice wave button */}
+                <button
+                  type="button"
+                  onMouseEnter={() => setIsHoveringVoice(true)}
+                  onMouseLeave={() => setIsHoveringVoice(false)}
+                  className="h-8 w-8 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-primary transition-colors mb-0.5 group"
+                  title="Voice message"
                 >
-                  <Send className="h-4 w-4" />
-                </Button>
-              )}
+                  <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
+                    {[
+                      { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
+                      { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
+                      { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
+                      { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
+                      { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
+                      { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
+                      { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
+                    ].map((bar, i) => (
+                      <rect
+                        key={i}
+                        x={bar.x}
+                        y={isHoveringVoice ? (9 - bar.hoverH / 2) : (9 - bar.baseH / 2)}
+                        width="2"
+                        rx="1"
+                        height={isHoveringVoice ? bar.hoverH : bar.baseH}
+                        fill="currentColor"
+                        style={{
+                          transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
+                        }}
+                      />
+                    ))}
+                  </svg>
+                </button>
+
+                {/* Send / Stop button */}
+                {isLoading ? (
+                  <Button
+                    size="icon"
+                    className="h-8 w-8 bg-destructive/90 hover:bg-destructive text-white transition-colors shrink-0 rounded-lg mb-0.5"
+                    onClick={handleStop}
+                    title="Stop generating"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon"
+                    className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
+                    onClick={handleSend}
+                    disabled={!input.trim()}
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         </div>
