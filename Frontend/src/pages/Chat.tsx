@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -777,6 +777,9 @@ const Chat = () => {
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -866,6 +869,23 @@ const Chat = () => {
       );
     }
   };
+
+  // Auto-resize edit textarea
+  useEffect(() => {
+    const ta = editTextareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 300)}px`;
+  }, [editDraft]);
+
+  // Focus edit textarea when entering edit mode
+  useEffect(() => {
+    if (editingMsgId && editTextareaRef.current) {
+      const ta = editTextareaRef.current;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }, [editingMsgId]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -1141,6 +1161,72 @@ const Chat = () => {
     abortControllerRef.current = null;
     setIsLoading(false);
     setTypingMessageId(null);
+  };
+
+  const handleEditCancel = () => {
+    setEditingMsgId(null);
+    setEditDraft("");
+  };
+
+  const handleEditSubmit = async (msgId: string) => {
+    const newContent = editDraft.trim();
+    if (!newContent) return;
+
+    // Stop any in-flight request immediately
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsLoading(false);
+    setTypingMessageId(null);
+    setEditingMsgId(null);
+    setEditDraft("");
+
+    // Find the user message index and drop everything from it onward
+    const msgIndex = messages.findIndex(m => m.id === msgId);
+    if (msgIndex === -1) return;
+
+    const updatedUserMsg: Message = {
+      ...messages[msgIndex],
+      content: newContent,
+      timestamp: new Date(),
+    };
+
+    // Keep all messages before the edited one, then the updated user message
+    setMessages(prev => [...prev.slice(0, msgIndex), updatedUserMsg]);
+    setIsLoading(true);
+
+    try {
+      abortControllerRef.current = new AbortController();
+      const response = await queryBackend(newContent, abortControllerRef.current.signal);
+
+      const assistantMsg: Message = {
+        id: Date.now().toString(),
+        role: "assistant",
+        content: response.answer,
+        rawAnswer: response.raw_answer ?? response.answer,
+        sources: response.sources,
+        confidence: response.confidence,
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, assistantMsg]);
+      setTypingMessageId(assistantMsg.id);
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        setIsLoading(false);
+        return;
+      }
+      const msg = serializeError(error);
+      const errorMsg: Message = {
+        id: Date.now().toString(),
+        role: "assistant",
+        content: `Sorry, I encountered an error: ${msg}. Please try again.`,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
+      toast({ title: "Query failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleRedo = async (msgId: string) => {
@@ -1464,8 +1550,59 @@ const Chat = () => {
                       />
                     ) : msg.role === "assistant" ? (
                       <div className="leading-relaxed">{renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick)}</div>
+                    ) : editingMsgId === msg.id ? (
+                      /* ── Inline edit mode ── */
+                      <div className="flex flex-col gap-2 -mx-1">
+                        <textarea
+                          ref={editTextareaRef}
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              handleEditSubmit(msg.id);
+                            }
+                            if (e.key === "Escape") {
+                              handleEditCancel();
+                            }
+                          }}
+                          rows={1}
+                          style={{ maxHeight: "300px" }}
+                          className="w-full resize-none bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary-foreground/40 leading-relaxed overflow-y-auto"
+                        />
+                        <div className="flex items-center gap-1.5 justify-end">
+                          <button
+                            onClick={handleEditCancel}
+                            className="flex items-center gap-1 text-[11px] text-primary-foreground/60 hover:text-primary-foreground px-2 py-1 rounded-md hover:bg-primary-foreground/10 transition-colors"
+                          >
+                            <X className="h-3 w-3" />
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => handleEditSubmit(msg.id)}
+                            disabled={!editDraft.trim()}
+                            className="flex items-center gap-1 text-[11px] bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground px-2 py-1 rounded-md transition-colors disabled:opacity-40"
+                          >
+                            <Check className="h-3 w-3" />
+                            Send
+                          </button>
+                        </div>
+                      </div>
                     ) : (
-                      msg.content
+                      /* ── Normal user message with edit button on hover ── */
+                      <div className="group/usermsg relative">
+                        <span>{msg.content}</span>
+                        <button
+                          onClick={() => {
+                            setEditingMsgId(msg.id);
+                            setEditDraft(msg.content);
+                          }}
+                          className="absolute -left-7 top-1/2 -translate-y-1/2 opacity-0 group-hover/usermsg:opacity-100 transition-opacity p-1 rounded-md text-primary-foreground/50 hover:text-primary-foreground hover:bg-primary-foreground/10"
+                          title="Edit message"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                      </div>
                     )}
                   </div>
 
