@@ -1,9 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any
-import os
+import os, mimetypes
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -240,6 +240,34 @@ async def get_document_content(doc_id: str):
     except Exception as e:
         print(f"❌ Content fetch error: {e}")
         raise HTTPException(500, f"Error reading document: {e}")
+
+
+@app.get("/documents/{doc_id}/download")
+async def download_document(doc_id: str):
+    """Return the original uploaded file as binary for in-app PDF/image viewer."""
+    try:
+        docs = vector_store.list_documents()
+        doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
+        if not doc_meta:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        filename  = doc_meta["filename"]
+        file_path = os.path.join(UPLOAD_DIR, filename)
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found on disk: {filename}")
+
+        mime, _ = mimetypes.guess_type(file_path)
+        return FileResponse(
+            file_path,
+            media_type=mime or "application/octet-stream",
+            filename=filename,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Download error: {e}")
+        raise HTTPException(500, f"Error downloading document: {e}")
 
 
 @app.get("/health")

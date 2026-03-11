@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -16,10 +16,18 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
-  rawAnswer?: string;   // original answer with {{}} citation tags (for source matching)
+  rawAnswer?: string;
   sources?: Source[];
   confidence?: number;
   timestamp: Date;
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  preview: string;
+  timestamp: Date;
+  messages: Message[];
 }
 
 // ---------------------------------------------------------------------------
@@ -81,8 +89,8 @@ const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["components"] = 
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
   h1: ({ children }) => <h1 className="text-base font-bold mb-2 mt-4 block">{children}</h1>,
-  h2: ({ children }) => <h2 className="text-sm font-bold mb-1.5 mt-3 block">{children}</h2>,
-  h3: ({ children }) => <h3 className="text-sm font-semibold mb-1 mt-2 block">{children}</h3>,
+  h2: ({ children }) => <h2 className="text-sm font-bold mb-1.5 mt-3 first:mt-0 block">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-sm font-semibold mb-1 mt-2 first:mt-0 block">{children}</h3>,
   code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
     inline ? (
       <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
@@ -533,6 +541,8 @@ interface ViewerState {
   highlightText: string | null;
   highlightLines: string[] | null;
   highlightKey: number;
+  blobUrl?: string;          // object URL for PDF/image local preview
+  mediaType?: "pdf" | "image" | "txt";  // what kind of viewer to show
 }
 
 interface DocumentViewerProps {
@@ -617,6 +627,262 @@ function renderDocumentContent(
   return <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/85">{nodes}</pre>;
 }
 
+// ---------------------------------------------------------------------------
+// PDF.js viewer with highlight support
+// ---------------------------------------------------------------------------
+
+declare global {
+  interface Window {
+    pdfjsLib: any;
+  }
+}
+
+interface PdfViewerProps {
+  blobUrl: string;
+  highlightText: string | null;
+  highlightLines: string[] | null;
+  highlightKey: number;
+}
+
+function loadPdfJs(): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    script.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      resolve(window.pdfjsLib);
+    };
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
+const HIGHLIGHT_COLOR = "rgba(253, 224, 71, 0.45)"; // yellow-300 at 45%
+
+const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlightLines, highlightKey }) => {
+  const containerRef   = useRef<HTMLDivElement>(null);
+  const pdfDocRef      = useRef<any>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const renderQueueRef = useRef<number[]>([]);
+  const renderingRef   = useRef(false);
+  const viewportsRef   = useRef<Map<number, any>>(new Map());
+
+  const highlights = useCallback((): string[] => {
+    const all = [...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean);
+    return [...new Set(all)];
+  }, [highlightText, highlightLines]);
+
+  // Draw highlights onto the OVERLAY canvas only — never re-renders the page content
+  const drawOverlay = useCallback(async (pageNum: number) => {
+    const pdf = pdfDocRef.current;
+    if (!pdf || !containerRef.current) return;
+    const wrapper = containerRef.current.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
+    if (!wrapper) return;
+    const overlay = wrapper.querySelector("canvas.hl-overlay") as HTMLCanvasElement | null;
+    if (!overlay) return;
+    const ctx = overlay.getContext("2d")!;
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const needles = highlights();
+    if (needles.length === 0) return;
+    const viewport = viewportsRef.current.get(pageNum);
+    if (!viewport) return;
+    const page        = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const items       = textContent.items as Array<{ str: string; transform: number[] }>;
+    const pageText    = items.map(i => i.str).join(" ");
+    const pageTextLo  = pageText.toLowerCase();
+    ctx.save();
+    for (const needle of needles) {
+      if (!needle.trim()) continue;
+      const needleLo = needle.toLowerCase();
+      let searchFrom = 0;
+      while (true) {
+        const idx = pageTextLo.indexOf(needleLo, searchFrom);
+        if (idx === -1) break;
+        let charCount = 0;
+        for (const item of items) {
+          const itemStart = charCount;
+          const itemEnd   = charCount + item.str.length;
+          charCount += item.str.length + 1;
+          if (itemEnd <= idx || itemStart >= idx + needleLo.length) continue;
+          const [sx, , , sy, tx, ty] = item.transform;
+          const [cx, cy] = viewport.convertToViewportPoint(tx, ty);
+          const width  = Math.abs(sx) * viewport.scale * (item.str.length * 0.55);
+          const height = Math.abs(sy) * viewport.scale;
+          ctx.fillStyle = HIGHLIGHT_COLOR;
+          ctx.fillRect(cx, cy - height, width, height * 1.15);
+        }
+        searchFrom = idx + 1;
+      }
+    }
+    ctx.restore();
+  }, [highlights]);
+
+  // Render page content ONCE — two stacked canvases (page content + highlight overlay)
+  const renderPage = useCallback(async (pageNum: number) => {
+    const pdf = pdfDocRef.current;
+    if (!pdf || !containerRef.current) return;
+    const container       = containerRef.current;
+    const existingWrapper = container.querySelector(`[data-page="${pageNum}"]`);
+    try {
+      const page           = await pdf.getPage(pageNum);
+      const availableWidth = container.clientWidth - 32;
+      const baseViewport   = page.getViewport({ scale: 1 });
+      const scale          = availableWidth / baseViewport.width;
+      const viewport       = page.getViewport({ scale: Math.max(scale, 0.5) });
+      viewportsRef.current.set(pageNum, viewport);
+
+      if (existingWrapper) {
+        // Resize only if dimensions actually changed — skip re-render otherwise
+        const wrapper    = existingWrapper as HTMLDivElement;
+        const pgCanvas   = wrapper.querySelector("canvas.pg-canvas") as HTMLCanvasElement;
+        const hlCanvas   = wrapper.querySelector("canvas.hl-overlay") as HTMLCanvasElement;
+        if (pgCanvas.width !== viewport.width || pgCanvas.height !== viewport.height) {
+          wrapper.style.width  = viewport.width + "px";
+          wrapper.style.height = viewport.height + "px";
+          pgCanvas.width  = viewport.width;
+          pgCanvas.height = viewport.height;
+          hlCanvas.width  = viewport.width;
+          hlCanvas.height = viewport.height;
+          const ctx = pgCanvas.getContext("2d")!;
+          await page.render({ canvasContext: ctx, viewport }).promise;
+        }
+      } else {
+        const wrapper         = document.createElement("div");
+        wrapper.dataset.page  = String(pageNum);
+        wrapper.style.cssText = `position:relative;margin:0 auto 12px;box-shadow:0 1px 8px rgba(0,0,0,.25);background:#fff;width:${viewport.width}px;height:${viewport.height}px;`;
+
+        const pgCanvas         = document.createElement("canvas");
+        pgCanvas.className     = "pg-canvas";
+        pgCanvas.width         = viewport.width;
+        pgCanvas.height        = viewport.height;
+        pgCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;";
+        wrapper.appendChild(pgCanvas);
+
+        const hlCanvas         = document.createElement("canvas");
+        hlCanvas.className     = "hl-overlay";
+        hlCanvas.width         = viewport.width;
+        hlCanvas.height        = viewport.height;
+        hlCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;";
+        wrapper.appendChild(hlCanvas);
+
+        const siblings     = Array.from(container.querySelectorAll("[data-page]"));
+        const insertBefore = siblings.find(s => Number((s as HTMLElement).dataset.page) > pageNum);
+        if (insertBefore) container.insertBefore(wrapper, insertBefore);
+        else container.appendChild(wrapper);
+
+        const ctx = pgCanvas.getContext("2d")!;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+      }
+      // Draw highlights on overlay after page is rendered
+      await drawOverlay(pageNum);
+    } catch { /* skip silently */ }
+  }, [drawOverlay]);
+
+  const processQueue = useCallback(async () => {
+    if (renderingRef.current) return;
+    renderingRef.current = true;
+    while (renderQueueRef.current.length > 0) {
+      const next = renderQueueRef.current.shift()!;
+      await renderPage(next);
+    }
+    renderingRef.current = false;
+  }, [renderPage]);
+
+  const enqueuePages = useCallback((pages: number[]) => {
+    for (const p of pages) {
+      if (!renderQueueRef.current.includes(p)) renderQueueRef.current.push(p);
+    }
+    processQueue();
+  }, [processQueue]);
+
+  // Load PDF once on mount
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    viewportsRef.current.clear();
+    (async () => {
+      try {
+        const lib = await loadPdfJs();
+        const pdf = await lib.getDocument(blobUrl).promise;
+        if (cancelled) return;
+        pdfDocRef.current = pdf;
+        setStatus("ready");
+        enqueuePages(Array.from({ length: pdf.numPages }, (_, i) => i + 1));
+      } catch {
+        if (!cancelled) setStatus("error");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [blobUrl, enqueuePages]);
+
+  // Resize observer — re-render pages only when container width actually changes
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver(() => {
+      if (status !== "ready" || !pdfDocRef.current) return;
+      enqueuePages(Array.from({ length: pdfDocRef.current.numPages }, (_, i) => i + 1));
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, [status, enqueuePages]);
+
+  // Highlight change — ONLY update overlay canvases, page content untouched → zero flicker
+  useEffect(() => {
+    if (status !== "ready" || !pdfDocRef.current) return;
+    const n = pdfDocRef.current.numPages;
+    for (let i = 1; i <= n; i++) drawOverlay(i);
+  }, [highlightKey, status, drawOverlay]);
+
+  // Scroll to first page that contains the highlighted text
+  useEffect(() => {
+    if (status !== "ready" || !pdfDocRef.current) return;
+    const needles = highlights();
+    if (!needles.length || !containerRef.current) return;
+    setTimeout(async () => {
+      const pdf      = pdfDocRef.current;
+      const wrappers = Array.from(containerRef.current!.querySelectorAll("[data-page]")) as HTMLDivElement[];
+      for (const wrapper of wrappers) {
+        const pageNum = Number(wrapper.dataset.page);
+        const page    = await pdf.getPage(pageNum);
+        const tc      = await page.getTextContent();
+        const txt     = (tc.items as any[]).map((i: any) => i.str).join(" ").toLowerCase();
+        if (needles.some(n => txt.includes(n.toLowerCase()))) {
+          wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
+          break;
+        }
+      }
+    }, 150);
+  }, [highlightKey, status, highlights]);
+
+  return (
+    <div className="flex flex-col h-full bg-muted/30">
+      {status === "loading" && (
+        <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+          <Loader2 className="h-7 w-7 animate-spin text-primary" />
+          <p className="text-sm">Rendering PDF…</p>
+        </div>
+      )}
+      {status === "error" && (
+        <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
+          <AlertCircle className="h-8 w-8 text-destructive/70" />
+          <p className="text-sm text-muted-foreground">Could not render PDF.</p>
+        </div>
+      )}
+      {status === "ready" && (
+        <div
+          ref={containerRef}
+          className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
+          style={{ background: "hsl(var(--muted)/0.3)" }}
+        />
+      )}
+    </div>
+  );
+};
+
+
 const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
   const highlightRef = useRef<HTMLElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -631,9 +897,6 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
     container.scrollTo({ top: targetScroll, behavior: "smooth" });
   }, [state.highlightKey, state.content]);
 
-  const ext = state.doc.filename.split('.').pop()?.toLowerCase() ?? '';
-  const isTxt = ext === 'txt';
-
   return (
     <motion.aside
       initial={{ width: 0, opacity: 0 }}
@@ -644,7 +907,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
     >
       {/* Header */}
       <div className="h-14 border-b border-border flex items-center gap-3 px-4 shrink-0">
-        <ScrollText className="h-4 w-4 text-primary shrink-0" />
+        {state.mediaType === 'image' ? <ImageIcon className="h-4 w-4 text-primary shrink-0" /> : <ScrollText className="h-4 w-4 text-primary shrink-0" />}
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-foreground truncate">{state.doc.filename}</p>
           <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{state.doc.doc_type}</p>
@@ -655,7 +918,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
       </div>
 
       {/* Highlight badge */}
-      {state.highlightText && (
+      {state.highlightText && state.mediaType !== 'image' && (
         <div className="px-4 py-2 bg-primary/8 border-b border-primary/20 flex items-start gap-2">
           <span className="text-[10px] font-semibold text-primary uppercase tracking-wide shrink-0 mt-0.5">Cited passage</span>
           <p className="text-[11px] text-primary/80 leading-relaxed line-clamp-2 flex-1">{state.highlightText}</p>
@@ -663,7 +926,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
       )}
 
       {/* Content */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
+      <div ref={scrollContainerRef} className={`flex-1 overflow-hidden scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40 ${state.mediaType === 'pdf' ? 'p-0' : state.mediaType === 'image' ? 'p-2 overflow-y-auto' : 'p-4 overflow-y-auto'}`}>
         {state.loading && (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -678,18 +941,35 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
           </div>
         )}
 
-        {!state.loading && !state.error && state.content !== null && (
-          isTxt ? (
-            renderDocumentContent(state.content, state.highlightText, highlightRef, state.highlightKey, state.highlightLines)
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
-              <FileText className="h-10 w-10 text-muted-foreground/40" />
-              <p className="text-sm text-muted-foreground">
-                In-app preview for <span className="font-semibold">.{ext}</span> files coming soon.
-              </p>
-              <p className="text-xs text-muted-foreground/60">Only .txt files are rendered inline for now.</p>
+        {!state.loading && !state.error && (
+          state.mediaType === 'image' ? (
+            <div className="flex flex-col items-center justify-center h-full p-4 gap-4">
+              <img
+                src={state.blobUrl}
+                alt={state.doc.filename}
+                className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+                style={{ maxHeight: 'calc(100vh - 180px)' }}
+              />
+              <p className="text-xs text-muted-foreground">{state.doc.filename}</p>
             </div>
-          )
+          ) : state.mediaType === 'pdf' ? (
+            state.blobUrl ? (
+              <PdfViewer
+                blobUrl={state.blobUrl}
+                highlightText={state.highlightText}
+                highlightLines={state.highlightLines}
+                highlightKey={state.highlightKey}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
+                <FileText className="h-10 w-10 text-muted-foreground/40" />
+                <p className="text-sm text-muted-foreground">PDF preview available after upload.</p>
+                <p className="text-xs text-muted-foreground/60">The file could not be fetched from the server.</p>
+              </div>
+            )
+          ) : state.content !== null ? (
+            renderDocumentContent(state.content, state.highlightText, highlightRef, state.highlightKey, state.highlightLines)
+          ) : null
         )}
       </div>
     </motion.aside>
@@ -774,11 +1054,17 @@ const Chat = () => {
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string>("default");
+  const [historySearch, setHistorySearch] = useState("");
+  const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
+  const [docsPanelOpen, setDocsPanelOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
@@ -788,6 +1074,8 @@ const Chat = () => {
   const [inputDragDepth, setInputDragDepth] = useState(0);
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const [viewer, setViewer] = useState<ViewerState | null>(null);
+  // Map document_id → local object URL (for PDF/image preview without re-downloading)
+  const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" }>>(new Map());
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -797,13 +1085,60 @@ const Chat = () => {
 
   // ── Document viewer helpers ──────────────────────────────────────────────
 
+  const getApiBase = () =>
+    ((typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000");
+
+  // Fetch a raw file from the backend and cache it as a blob URL
+  const fetchBlobUrl = async (doc: Document): Promise<{ url: string; type: "pdf" | "image" | "txt" }> => {
+    const cached = blobUrlMapRef.current.get(doc.document_id);
+    if (cached) return cached;
+
+    const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+    const type: "pdf" | "image" | "txt" = IMAGE_EXTS.includes(`.${ext}`) ? "image" : ext === "pdf" ? "pdf" : "txt";
+
+    const base = getApiBase();
+    const res = await fetch(`${base}/documents/${doc.document_id}/download`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    blobUrlMapRef.current.set(doc.document_id, { url, type });
+    return { url, type };
+  };
+
   const openDocumentViewer = async (doc: Document, highlightText: string | null = null, highlightLines: string[] | null = null) => {
+    const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+    const isPdfOrImage = ext === 'pdf' || IMAGE_EXTS.includes(`.${ext}`);
+
+    if (isPdfOrImage) {
+      // Show loading state immediately, then fetch blob in background
+      const cached = blobUrlMapRef.current.get(doc.document_id);
+      if (cached) {
+        setViewer({ doc, content: null, loading: false, error: null, highlightText, highlightLines, highlightKey: 0, blobUrl: cached.url, mediaType: cached.type });
+      } else {
+        setViewer({ doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: ext === 'pdf' ? 'pdf' : 'image' });
+        try {
+          const { url, type } = await fetchBlobUrl(doc);
+          setViewer(p => p && p.doc.document_id === doc.document_id
+            ? { ...p, loading: false, blobUrl: url, mediaType: type }
+            : p
+          );
+        } catch (e) {
+          setViewer(p => p && p.doc.document_id === doc.document_id
+            ? { ...p, loading: false, error: "Could not load file. Make sure the backend exposes GET /documents/{id}/download." }
+            : p
+          );
+        }
+      }
+      return;
+    }
+
+    // Text document — fetch text content as before
     setViewer(prev => {
       const alreadyLoaded = prev && prev.doc.document_id === doc.document_id && prev.content !== null;
       if (alreadyLoaded) {
         return { ...prev!, highlightText, highlightLines, highlightKey: (prev!.highlightKey ?? 0) + 1 };
       }
-      return { doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0 };
+      return { doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: 'txt' };
     });
     setViewer(prev => {
       if (prev && prev.doc.document_id === doc.document_id && prev.content !== null) return prev;
@@ -902,6 +1237,17 @@ const Chat = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Close docs panel when clicking outside
+  useEffect(() => {
+    if (!docsPanelOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest("[data-docs-panel]")) setDocsPanelOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [docsPanelOpen]);
+
   // Load documents on mount
   useEffect(() => {
     loadDocuments();
@@ -949,6 +1295,44 @@ const Chat = () => {
     e.stopPropagation();
   };
 
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+  const ALLOWED_EXTS = ['.pdf', '.docx', '.doc', '.txt', ...IMAGE_EXTS];
+
+  const _processUploadFile = async (file: File) => {
+    const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+    const isImage = IMAGE_EXTS.includes(fileExt);
+    const isPdf   = fileExt === '.pdf';
+
+    if (!ALLOWED_EXTS.includes(fileExt)) {
+      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF`, variant: "destructive" });
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      toast({ title: "File too large", description: `${file.name}: maximum file size is 50MB`, variant: "destructive" });
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const response = await api.uploadDocument(file);
+      const docId = response.document_id ?? response.id ?? response.filename;
+
+      // Store a local object URL so the viewer can open it instantly without re-downloading
+      const blobUrl = URL.createObjectURL(file);
+      blobUrlMapRef.current.set(docId, {
+        url: blobUrl,
+        type: isImage ? "image" : isPdf ? "pdf" : "txt",
+      });
+
+      toast({ title: "Uploaded", description: response.filename });
+      await loadDocuments();
+    } catch (error) {
+      toast({ title: "Upload failed", description: `${file.name}: ${serializeError(error)}`, variant: "destructive" });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -958,52 +1342,8 @@ const Chat = () => {
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
-    // Process each file
     for (const file of files) {
-      // Validate file type
-      const allowedTypes = ['.pdf', '.docx', '.doc', '.txt'];
-      const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-      
-      if (!allowedTypes.includes(fileExt)) {
-        toast({
-          title: "Invalid file type",
-          description: `${file.name}: Please upload ${allowedTypes.join(', ')} files only`,
-          variant: "destructive",
-        });
-        continue;
-      }
-
-      // Validate file size (max 10MB)
-      const maxSize = 10 * 1024 * 1024;
-      if (file.size > maxSize) {
-        toast({
-          title: "File too large",
-          description: `${file.name}: Maximum file size is 10MB`,
-          variant: "destructive",
-        });
-        continue;
-      }
-
-      setIsUploading(true);
-
-      try {
-        const response = await api.uploadDocument(file);
-        
-        toast({
-          title: "Document uploaded successfully",
-          description: `${response.filename} processed (${response.chunks_processed} chunks)`,
-        });
-
-        await loadDocuments();
-      } catch (error) {
-        toast({
-          title: "Upload failed",
-          description: `${file.name}: ${serializeError(error)}`,
-          variant: "destructive",
-        });
-      } finally {
-        setIsUploading(false);
-      }
+      await _processUploadFile(file);
     }
   };
 
@@ -1040,59 +1380,10 @@ const Chat = () => {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-
-    const file = files[0];
-    
-    // Validate file type
-    const allowedTypes = ['.pdf', '.docx', '.doc', '.txt'];
-    const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-    
-    if (!allowedTypes.includes(fileExt)) {
-      toast({
-        title: "Invalid file type",
-        description: `Please upload ${allowedTypes.join(', ')} files only`,
-        variant: "destructive",
-      });
-      return;
+    for (const file of Array.from(files)) {
+      await _processUploadFile(file);
     }
-
-    // Validate file size (max 10MB)
-    const maxSize = 10 * 1024 * 1024; // 10MB
-    if (file.size > maxSize) {
-      toast({
-        title: "File too large",
-        description: "Maximum file size is 10MB",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setIsUploading(true);
-
-    try {
-      const response = await api.uploadDocument(file);
-      
-      toast({
-        title: "Document uploaded successfully",
-        description: `${response.filename} processed (${response.chunks_processed} chunks)`,
-      });
-
-      // Reload documents list
-      await loadDocuments();
-
-      // Clear file input
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-    } catch (error) {
-      toast({
-        title: "Upload failed",
-        description: serializeError(error),
-        variant: "destructive",
-      });
-    } finally {
-      setIsUploading(false);
-    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const removeDocument = async (documentId: string) => {
@@ -1119,6 +1410,27 @@ const Chat = () => {
   // ==========================================================================
   // MESSAGE HANDLING
   // ==========================================================================
+
+  const startNewConversation = () => {
+    const newId = Date.now().toString();
+    setActiveConvId(newId);
+    setMessages([{
+      id: "welcome-" + newId,
+      role: "assistant",
+      content: "Hello! I'm Bimlo Copilot. How can I help you with your documents today?",
+      timestamp: new Date(),
+    }]);
+  };
+
+  const loadConversation = (conv: Conversation) => {
+    setActiveConvId(conv.id);
+    setMessages(conv.messages);
+  };
+
+  const deleteConversation = (convId: string) => {
+    setConversations(prev => prev.filter(c => c.id !== convId));
+    if (convId === activeConvId) startNewConversation();
+  };
 
   const handleSend = async () => {
     const trimmedInput = input.trim();
@@ -1165,7 +1477,20 @@ const Chat = () => {
         timestamp: new Date(),
       };
 
-      setMessages((prev) => [...prev, assistantMsg]);
+      setMessages((prev) => {
+        const updated = [...prev, assistantMsg];
+        // Save/update conversation in history
+        const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+        const preview = response.answer.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+        setConversations(convs => {
+          const existing = convs.find(c => c.id === activeConvId);
+          if (existing) {
+            return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+          }
+          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated }, ...convs];
+        });
+        return updated;
+      });
       setTypingMessageId(assistantMsg.id);
 
     } catch (error) {
@@ -1403,7 +1728,7 @@ const Chat = () => {
                 <FileText className="h-16 w-16 text-primary mx-auto mb-4" />
                 <h3 className="text-xl font-semibold text-foreground mb-2">Drop files here</h3>
                 <p className="text-sm text-muted-foreground">
-                  Upload PDF, DOCX, DOC, or TXT files
+                  Upload PDF, DOCX, TXT, or images (PNG, JPG)
                 </p>
               </div>
             </motion.div>
@@ -1411,112 +1736,113 @@ const Chat = () => {
         )}
       </AnimatePresence>
 
-      {/* Sidebar */}
+      {/* Chat History Sidebar */}
       <AnimatePresence>
         {sidebarOpen && (
           <motion.aside
             initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 320, opacity: 1 }}
+            animate={{ width: 280, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            className="border-r border-border bg-secondary/30 flex flex-col overflow-hidden shrink-0"
+            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+            className="border-r border-border bg-background flex flex-col overflow-hidden shrink-0"
           >
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <FileText className="h-5 w-5 text-primary" />
-                <span className="font-heading font-semibold text-foreground text-sm">
-                  Source Documents ({documents.length})
-                </span>
-              </div>
+            {/* Header */}
+            <div className="h-14 border-b border-border flex items-center gap-3 px-4 shrink-0">
+              <MessageSquare className="h-4 w-4 text-primary shrink-0" />
+              <span className="font-semibold text-sm text-foreground flex-1">Conversations</span>
               <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                variant="ghost" size="icon"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground shrink-0"
                 onClick={() => setSidebarOpen(false)}
               >
-                <X className="h-4 w-4" />
+                <X className="h-3.5 w-3.5" />
               </Button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
-              {documents.length === 0 && !isUploading && (
-                <div className="text-center py-12">
-                  <FileText className="h-10 w-10 text-muted-foreground/40 mx-auto mb-3" />
-                  <p className="text-sm text-muted-foreground">No documents uploaded yet</p>
-                  <p className="text-xs text-muted-foreground/60 mt-1">Upload PDFs, .txt, or .docx files</p>
-                </div>
-              )}
-
-              {isUploading && (
-                <div className="text-center py-8">
-                  <Loader2 className="h-8 w-8 text-primary mx-auto mb-2 animate-spin" />
-                  <p className="text-sm text-muted-foreground">Uploading document...</p>
-                </div>
-              )}
-
-              {documents.map((doc) => (
-                <motion.div
-                  key={doc.document_id}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="flex items-start gap-3 p-3 rounded-lg bg-card border border-border group hover:border-primary/30 hover:bg-primary/5 transition-colors cursor-pointer"
-                  onClick={() => openDocumentViewer(doc, null)}
-                >
-                  <div className="h-9 w-9 rounded-lg bg-accent flex items-center justify-center shrink-0">
-                    <FileText className="h-4 w-4 text-accent-foreground" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground truncate" title={doc.filename}>
-                      {doc.filename}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Type: {doc.doc_type}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className="opacity-0 group-hover:opacity-60 transition-opacity">
-                      <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
-                      onClick={(e) => { e.stopPropagation(); removeDocument(doc.document_id); }}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-
-            <div className="p-4 border-t border-border">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.txt,.docx,.doc"
-                className="hidden"
-                onChange={handleFileUpload}
-                disabled={isUploading}
-              />
-              <Button
-                variant="outline"
-                className="w-full gap-2 text-sm font-medium"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
+            {/* New Chat button */}
+            <div className="px-3 pt-3 pb-2">
+              <button
+                onClick={startNewConversation}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-sm font-medium transition-colors group"
               >
-                {isUploading ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Uploading...
-                  </>
-                ) : (
-                  <>
-                    <Plus className="h-4 w-4" />
-                    Upload Documents
-                  </>
-                )}
-              </Button>
+                <Plus className="h-4 w-4" />
+                New conversation
+              </button>
+            </div>
+
+            {/* Search + Sort */}
+            <div className="px-3 pb-2 space-y-2">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/60 pointer-events-none" />
+                <input
+                  value={historySearch}
+                  onChange={e => setHistorySearch(e.target.value)}
+                  placeholder="Search conversations…"
+                  className="w-full pl-8 pr-3 py-2 text-xs bg-muted/50 rounded-lg border border-transparent focus:border-primary/30 focus:bg-background focus:outline-none text-foreground placeholder:text-muted-foreground/50 transition-all"
+                />
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setHistorySort(s => s === "newest" ? "oldest" : "newest")}
+                  className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/50 transition-colors"
+                >
+                  <Clock className="h-3 w-3" />
+                  {historySort === "newest" ? "Newest first" : "Oldest first"}
+                  <SortAsc className={`h-3 w-3 transition-transform ${historySort === "oldest" ? "rotate-180" : ""}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Conversation list */}
+            <div className="flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
+              {conversations.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full gap-2 text-center py-12 px-4">
+                  <div className="h-10 w-10 rounded-2xl bg-muted/60 flex items-center justify-center mb-1">
+                    <MessageSquare className="h-5 w-5 text-muted-foreground/40" />
+                  </div>
+                  <p className="text-xs font-medium text-muted-foreground">No conversations yet</p>
+                  <p className="text-[11px] text-muted-foreground/60">Start chatting to build your history</p>
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {[...conversations]
+                    .filter(c => historySearch === "" || c.title.toLowerCase().includes(historySearch.toLowerCase()) || c.preview.toLowerCase().includes(historySearch.toLowerCase()))
+                    .sort((a, b) => historySort === "newest"
+                      ? b.timestamp.getTime() - a.timestamp.getTime()
+                      : a.timestamp.getTime() - b.timestamp.getTime()
+                    )
+                    .map(conv => (
+                      <motion.div
+                        key={conv.id}
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className={`group relative flex flex-col gap-0.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
+                          conv.id === activeConvId
+                            ? "bg-primary/10 text-foreground"
+                            : "hover:bg-muted/60 text-muted-foreground hover:text-foreground"
+                        }`}
+                        onClick={() => loadConversation(conv)}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
+                          <span className="text-[10px] text-muted-foreground/60 shrink-0 mt-0.5 tabular-nums">
+                            {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{conv.preview}</p>
+                        {/* Delete button — appears on hover */}
+                        <button
+                          onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
+                          className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-all"
+                          title="Delete conversation"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </motion.div>
+                    ))
+                  }
+                </div>
+              )}
             </div>
           </motion.aside>
         )}
@@ -1525,7 +1851,7 @@ const Chat = () => {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="h-14 border-b border-border flex items-center px-4 gap-3 shrink-0">
+        <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0">
           <Link to="/">
             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">
               <ArrowLeft className="h-4 w-4" />
@@ -1533,19 +1859,142 @@ const Chat = () => {
           </Link>
           {!sidebarOpen && (
             <Button
-              variant="ghost"
-              size="icon"
+              variant="ghost" size="icon"
               className="h-8 w-8 text-muted-foreground hover:text-foreground"
               onClick={() => setSidebarOpen(true)}
+              title="Chat history"
             >
-              <FileText className="h-4 w-4" />
+              <MessageSquare className="h-4 w-4" />
             </Button>
           )}
           <div className="flex items-center gap-2">
             <Logo className="h-7 w-7" />
             <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
           </div>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            {/* Documents bubble */}
+            <div className="relative" data-docs-panel>
+              <button
+                onClick={() => setDocsPanelOpen(p => !p)}
+                className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+                  docsPanelOpen
+                    ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                    : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                }`}
+                title="Documents"
+              >
+                <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                <span>Documents</span>
+                {documents.length > 0 && (
+                  <span className={`inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-full text-[10px] font-bold ${
+                    docsPanelOpen ? "bg-primary-foreground/20 text-primary-foreground" : "bg-primary/15 text-primary"
+                  }`}>
+                    {documents.length}
+                  </span>
+                )}
+              </button>
+
+              {/* Messenger-style panel popping out from bubble */}
+              <AnimatePresence>
+                {docsPanelOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.92, y: -8, transformOrigin: "top right" }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.92, y: -8 }}
+                    transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+                    className="absolute right-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-xl overflow-hidden z-50"
+                    style={{ transformOrigin: "top right" }}
+                  >
+                    {/* Panel header */}
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+                      <div className="flex items-center gap-2">
+                        <FolderOpen className="h-4 w-4 text-primary" />
+                        <span className="text-sm font-semibold text-foreground">Documents</span>
+                        <span className="text-xs text-muted-foreground">({documents.length})</span>
+                      </div>
+                      <button
+                        onClick={() => setDocsPanelOpen(false)}
+                        className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Document list */}
+                    <div className="max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                      {documents.length === 0 && !isUploading ? (
+                        <div className="flex flex-col items-center justify-center py-10 gap-2 px-4 text-center">
+                          <div className="h-9 w-9 rounded-xl bg-muted/60 flex items-center justify-center">
+                            <FileText className="h-4 w-4 text-muted-foreground/40" />
+                          </div>
+                          <p className="text-xs text-muted-foreground font-medium">No documents yet</p>
+                          <p className="text-[11px] text-muted-foreground/60">Upload PDFs, images or text files</p>
+                        </div>
+                      ) : (
+                        <div className="p-2 space-y-1">
+                          {isUploading && (
+                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-primary/5">
+                              <Loader2 className="h-4 w-4 text-primary animate-spin shrink-0" />
+                              <span className="text-xs text-muted-foreground">Uploading…</span>
+                            </div>
+                          )}
+                          {documents.map(doc => {
+                            const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+                            const isImg = IMAGE_EXTS.includes(`.${ext}`);
+                            return (
+                              <motion.div
+                                key={doc.document_id}
+                                initial={{ opacity: 0, y: 4 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-muted/60 cursor-pointer transition-colors"
+                                onClick={() => { openDocumentViewer(doc, null); setDocsPanelOpen(false); }}
+                              >
+                                <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                  {isImg
+                                    ? <ImageIcon className="h-3.5 w-3.5 text-primary" />
+                                    : <FileText className="h-3.5 w-3.5 text-primary" />
+                                  }
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs font-medium text-foreground truncate">{doc.filename}</p>
+                                  <p className="text-[10px] text-muted-foreground capitalize">{doc.doc_type}</p>
+                                </div>
+                                <button
+                                  onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
+                                  className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/50 hover:text-destructive transition-all"
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </motion.div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Upload button */}
+                    <div className="p-3 border-t border-border">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif"
+                        className="hidden"
+                        onChange={handleFileUpload}
+                        disabled={isUploading}
+                      />
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isUploading}
+                        className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-xs font-medium transition-colors disabled:opacity-50"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Upload document
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
             <ThemeToggle />
           </div>
         </header>
@@ -1621,25 +2070,42 @@ const Chat = () => {
                         </div>
                       </div>
                     ) : (
-                      /* ── Normal user message with edit button on hover ── */
-                      <div className="group/usermsg relative">
-                        <span>{msg.content}</span>
+                      /* ── Normal user message ── */
+                      <span>{msg.content}</span>
+                    )}
+                  </div>
+
+                  {/* Timestamp + action bar */}
+                  <div className={`flex items-center gap-2 px-1 ${msg.role === "user" ? "justify-end" : "justify-start"} group/msgbar`}>
+                    {/* User message actions — edit + copy, shown on hover */}
+                    {msg.role === "user" && editingMsgId !== msg.id && (
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover/msgbar:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.content);
+                            setCopiedMsgId(msg.id);
+                            setTimeout(() => setCopiedMsgId(null), 1500);
+                          }}
+                          className="p-1 rounded-md text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                          title="Copy message"
+                        >
+                          {copiedMsgId === msg.id
+                            ? <Check className="h-3 w-3 text-primary" />
+                            : <Copy className="h-3 w-3" />
+                          }
+                        </button>
                         <button
                           onClick={() => {
                             setEditingMsgId(msg.id);
                             setEditDraft(msg.content);
                           }}
-                          className="absolute -left-7 top-1/2 -translate-y-1/2 opacity-0 group-hover/usermsg:opacity-100 transition-opacity p-1 rounded-md text-primary-foreground/50 hover:text-primary-foreground hover:bg-primary-foreground/10"
+                          className="p-1 rounded-md text-muted-foreground/40 hover:text-muted-foreground transition-colors"
                           title="Edit message"
                         >
                           <Pencil className="h-3 w-3" />
                         </button>
                       </div>
                     )}
-                  </div>
-
-                  {/* Timestamp + action bar */}
-                  <div className={`flex items-center gap-2 px-1 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                     <span className="text-[10px] text-muted-foreground/50">
                       {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
@@ -1813,7 +2279,7 @@ const Chat = () => {
                       <div className="text-center">
                         <FileText className="h-8 w-8 text-primary mx-auto mb-2" />
                         <h3 className="text-sm font-semibold text-foreground mb-1">Drop files here</h3>
-                        <p className="text-xs text-muted-foreground">PDF · DOCX · TXT</p>
+                        <p className="text-xs text-muted-foreground">PDF · DOCX · TXT · PNG · JPG</p>
                       </div>
                     </motion.div>
                   </motion.div>

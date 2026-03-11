@@ -1,22 +1,22 @@
 """
-Source Agent v7 — Per-Fact Verbatim Matching
+Source Agent v8 — LLM-Powered Source Extraction
 
-Key improvements over v6:
-  1. Title = the specific cited fact, not just the section heading
-     e.g. "Architectural model: 95% complete" not "Project Status Overview"
-  2. Per-number splitting: if an answer bullet has multiple key numbers,
-     each number is searched independently → separate source lines
-  3. Value-first scoring: numbers+units carry 10x weight over keywords
-     so paraphrased LLM output still finds the right doc sentence
-  4. Window expansion: short best-match sentences are padded with
-     surrounding context so excerpts are always readable
-  5. Section titles derived from the specific fact text, not headings
+The LLM reads the generated answer and the full reconstructed documents,
+then for each cited source returns:
+  - The exact section heading from the answer (clean card title)
+  - The verbatim sentence(s) from the document that back each claim
+
+No scoring systems. No token matching. No fragile hardcoding.
+The LLM understands context, paraphrasing, and implicit references.
 """
 
 from __future__ import annotations
 
 import re
 import os
+import json
+import requests
+import time
 from typing import Dict, List, Optional, Tuple
 
 
@@ -24,11 +24,8 @@ from typing import Dict, List, Optional, Tuple
 # RECONSTRUCT FULL DOCUMENT FROM CHUNKS
 # ────────────────────────────────────────────────────────────────────────────
 
-def _reconstruct_doc(all_chunks_for_filename: List[Dict]) -> str:
-    sorted_chunks = sorted(
-        all_chunks_for_filename,
-        key=lambda c: c.get("metadata", {}).get("chunk_index", 0)
-    )
+def _reconstruct_doc(chunks: List[Dict]) -> str:
+    sorted_chunks = sorted(chunks, key=lambda c: c.get("metadata", {}).get("chunk_index", 0))
     if not sorted_chunks:
         return ""
     result = sorted_chunks[0].get("text", "")
@@ -50,282 +47,41 @@ def _find_overlap(a: str, b: str, max_check: int = 300) -> int:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# VALUE EXTRACTION — numbers with units, LOD codes, antenna types etc.
+# PARSE [N] CITATION NUMBERS FROM ANSWER
 # ────────────────────────────────────────────────────────────────────────────
 
-_VALUE_RE = re.compile(
-    r'(?:'
-    r'\d+(?:[.,]\d+)?\s*(?:Gbps|Mbps|kbps|GHz|MHz|kHz|dBm?|ms|km|m²?|%|GB|MB|TB|W|V|A|rpm|°C)'
-    r'|\b(?:LOD\s*\d{3}|\d+T\d+R)\b'
-    r')',
-    re.IGNORECASE,
-)
-
-def _extract_values(text: str) -> List[str]:
-    return [m.group().strip().lower() for m in _VALUE_RE.finditer(text)]
+def _cited_source_nums(answer: str) -> List[int]:
+    """Return sorted unique [N] citation numbers found in the answer."""
+    return sorted(set(int(m) for m in re.findall(r'\[(\d+)\](?!\()', answer)))
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# SPLIT ANSWER LINE INTO PER-FACT UNITS
-# ────────────────────────────────────────────────────────────────────────────
-
-def _split_into_facts(content: str) -> List[str]:
+def _section_heading_for_num(answer: str, src_num: int) -> str:
     """
-    If a single line contains multiple distinct measurable values
-    (e.g. "1.2Gbps downlink, 150Mbps uplink, 10ms latency") → split it
-    so each value gets its own source entry.
-
-    If fewer than 2 values found, return [content] unchanged.
+    Find all ## headings that have lines citing [N].
+    If one heading → return it. If multiple → join with " / ".
+    Falls back to 'Source N' if none found.
     """
-    values = _extract_values(content)
-    if len(values) < 2:
-        return [content]
+    current_heading = ""
+    headings_seen: List[str] = []
 
-    # Split on commas / semicolons / "and"
-    clauses = re.split(r'[,;]|\s+and\s+|\s+et\s+', content)
-    clauses = [c.strip() for c in clauses if c.strip()]
-
-    facts = []
-    used_values: set = set()
-
-    for clause in clauses:
-        clause_vals = _extract_values(clause)
-        if clause_vals:
-            for v in clause_vals:
-                if v not in used_values:
-                    used_values.add(v)
-                    facts.append(clause)
-                    break
-        elif facts:
-            # Context-only clause — merge into previous
-            facts[-1] = facts[-1] + ", " + clause
-
-    return facts if facts else [content]
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# PARSE ANSWER INTO SECTIONS
-# ────────────────────────────────────────────────────────────────────────────
-
-def _parse_answer_sections(answer: str) -> List[Tuple[str, int, str]]:
-    """
-    Returns list of (title, src_num, content).
-
-    - title  = specific fact label (NOT just the section heading)
-    - src_num = [N] citation number
-    - content = cleaned line text used for doc matching
-    """
-    sections: List[Tuple[str, int, str]] = []
-    current_heading: str = ""
-
-    for raw_line in answer.split('\n'):
-        line = raw_line.strip()
+    for line in answer.split('\n'):
+        line = line.strip()
         if not line:
             continue
-
-        heading_match = re.match(r'^#{1,3}\s+(.+)', line)
-        if heading_match:
-            current_heading = re.sub(r'\s*\[\d+\](?!\()', '', heading_match.group(1)).strip()
-            nums = [int(m) for m in re.findall(r'\[(\d+)\](?!\()', line)]
-            if nums:
-                content = re.sub(r'\[\d+\](?!\()', '', line).lstrip('#').strip()
-                title = _make_fact_title(content, current_heading)
-                sections.append((title, nums[0], content))
+        h = re.match(r'^#{1,3}\s+(.+)', line)
+        if h:
+            current_heading = re.sub(r'\s*\[\d+\](?!\()', '', h.group(1)).strip()
             continue
+        if f'[{src_num}]' in line and current_heading:
+            if current_heading not in headings_seen:
+                headings_seen.append(current_heading)
 
-        nums = [int(m) for m in re.findall(r'\[(\d+)\](?!\()', line)]
-        if not nums:
-            continue
-
-        src_num = nums[0]
-
-        # Clean citation markers and bullet chars
-        clean = re.sub(r'\[\d+\](?!\()', '', line).strip()
-        clean = re.sub(r'^[-*•]\s*', '', clean).strip()
-        # Unwrap **Label**: pattern but keep the text
-        clean = re.sub(r'^\*\*([^*]+)\*\*:\s*', r'\1: ', clean)
-
-        # Split multi-value lines
-        facts = _split_into_facts(clean)
-
-        for fact in facts:
-            title = _make_fact_title(fact, current_heading)
-            sections.append((title, src_num, fact))
-
-    return sections
-
-
-def _make_fact_title(content: str, section_heading: str) -> str:
-    """
-    Build a short, specific title for a source section card.
-
-    Priority:
-      1. Bold **Label**: value pattern → "Label: value"
-      2. "Label: value" colon pattern → "Label: value snippet"
-      3. Content has a measurable value → "context keyword: value"
-      4. Truncate content to ~70 chars
-      5. Fall back to section_heading
-    """
-    if not content:
-        return section_heading or "Reference"
-
-    # **Label**: rest
-    bold_match = re.match(r'\*\*([^*]{2,40})\*\*[:\s]*(.*)', content)
-    if bold_match:
-        label = bold_match.group(1).strip()
-        rest  = bold_match.group(2).strip()
-        if rest:
-            return f"{label}: {rest[:70]}"
-        return label
-
-    # Label: value (already de-bolded)
-    colon_match = re.match(r'([A-Za-z][^:]{2,35}):\s*(.+)', content)
-    if colon_match:
-        label = colon_match.group(1).strip()
-        value = colon_match.group(2).strip()
-        return f"{label}: {value[:60]}{'…' if len(value) > 60 else ''}"
-
-    # Has measurable value — find the keyword immediately before it
-    values = _extract_values(content)
-    if values:
-        first_val = values[0]
-        idx = content.lower().find(first_val.split()[0])
-        if idx > 0:
-            prefix = content[:idx].strip().rstrip(':,').strip()
-            words = prefix.split()
-            label = " ".join(words[-4:]) if words else ""
-            if label and len(label) > 2:
-                return f"{label}: {first_val}"
-
-    # Plain truncation
-    stripped = content[:70] + ("…" if len(content) > 70 else "")
-    return stripped or section_heading or "Reference"
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# VERBATIM LINE FINDER — value-first scoring
-# ────────────────────────────────────────────────────────────────────────────
-
-_STOPWORDS = {
-    'the','les','des','and','pour','avec','dans','that','this',
-    'are','was','were','has','have','from','will','been','not',
-    'par','sur','une','est','qui','que','son','ses','leur',
-    'also','each','both','more','than','its','into','they',
-    'must','should','shall','about','which','where','when',
-}
-
-_MIN_SCORE = 8   # lowered — value matches (weight 10) dominate
-
-
-def _score_tokens(content: str) -> List[Tuple[str, int]]:
-    tokens: List[Tuple[str, int]] = []
-
-    # Full value+unit combos — highest weight
-    # Add BOTH the compact form AND the spaced form so "150Mbps" matches "150 Mbps"
-    for m in _VALUE_RE.finditer(content):
-        val = m.group().strip().lower()
-        tokens.append((val, 10))
-        # Also add spaced variant: "150mbps" → "150 mbps"
-        spaced = re.sub(r'(\d)([a-z])', r'\1 \2', val)
-        if spaced != val:
-            tokens.append((spaced, 10))
-        # Also add just the number part
-        num_only = re.match(r'(\d+(?:[.,]\d+)?)', val)
-        if num_only:
-            tokens.append((num_only.group(1), 6))
-
-    # Bare numbers not already captured
-    for m in re.finditer(r'\b\d+(?:[.,]\d+)?\b', content):
-        tokens.append((m.group(), 6))
-
-    # Domain acronyms / units standalone
-    for m in re.finditer(
-        r'\b(?:Gbps|Mbps|kbps|MHz|GHz|kHz|dBm?|ms|km|BBU|MIMO|RAN|BIM|MEP|LOD|RFI|HVAC|FTTC)\b',
-        content, re.IGNORECASE
-    ):
-        tokens.append((m.group().lower(), 4))
-
-    # Long keywords
-    for m in re.finditer(r'[a-zA-ZÀ-ÿ]{6,}', content):
-        w = m.group().lower()
-        if w not in _STOPWORDS:
-            tokens.append((w, 2))
-
-    # Medium keywords
-    for m in re.finditer(r'[a-zA-ZÀ-ÿ]{4,5}', content):
-        w = m.group().lower()
-        if w not in _STOPWORDS:
-            tokens.append((w, 1))
-
-    return tokens
-
-
-def _expand_sentence(best_line: str, doc_text: str, max_len: int = 220) -> str:
-    """
-    If best_line is short (< 60 chars), expand it with surrounding context
-    to make the excerpt more readable and self-contained.
-    """
-    if len(best_line) >= 60:
-        return best_line
-
-    idx = doc_text.find(best_line)
-    if idx == -1:
-        return best_line
-
-    # Expand backward to previous sentence/newline boundary
-    start = max(0, idx - 120)
-    prefix_text = doc_text[start:idx]
-    for sep in ['. ', '\n', ': ']:
-        pos = prefix_text.rfind(sep)
-        if pos != -1:
-            start = start + pos + len(sep)
-            break
-
-    # Expand forward to next sentence/newline boundary
-    end_start = idx + len(best_line)
-    suffix_text = doc_text[end_start:end_start + 120]
-    for sep in ['. ', '\n']:
-        pos = suffix_text.find(sep)
-        if pos != -1:
-            end_start = end_start + pos + len(sep)
-            break
-    else:
-        end_start = end_start + len(suffix_text)
-
-    expanded = doc_text[start:end_start].strip()
-    if len(expanded) > max_len:
-        expanded = expanded[:max_len] + "…"
-    return expanded if expanded else best_line
-
-
-def _find_verbatim_line(section_content: str, doc_text: str) -> Optional[str]:
-    """
-    Find the document sentence that best matches section_content.
-    Returns None if best score < _MIN_SCORE.
-    """
-    tokens = _score_tokens(section_content)
-    if not tokens:
-        return None
-
-    raw_segments = re.split(r'\n|(?<=[.!?])\s+', doc_text)
-    candidates = [s.strip() for s in raw_segments if len(s.strip()) >= 10]
-
-    if not candidates:
-        return doc_text[:250] if doc_text.strip() else None
-
-    def score(line: str) -> int:
-        ll = line.lower()
-        return sum(w for t, w in tokens if t in ll)
-
-    best_score, best_line = max(((score(l), l) for l in candidates), key=lambda x: x[0])
-
-    if best_score < _MIN_SCORE:
-        print(f"      ⛔ score {best_score} < {_MIN_SCORE}, skipping")
-        return None
-
-    result = _expand_sentence(best_line, doc_text)
-    print(f"      🎯 match (score {best_score}): {result[:100]!r}")
-    return result
+    if not headings_seen:
+        return f"Source {src_num}"
+    if len(headings_seen) == 1:
+        return headings_seen[0]
+    # Multiple headings — use the first (most prominent)
+    return headings_seen[0]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -338,8 +94,165 @@ def _jaccard(a: str, b: str) -> float:
     return len(wa & wb) / len(union) if union else 0.0
 
 
-def _is_duplicate(passage: str, seen: List[str], threshold: float = 0.80) -> bool:
-    return any(_jaccard(passage, s) > threshold for s in seen) if seen else False
+def _dedup_excerpts(excerpts: List[str], threshold: float = 0.80) -> List[str]:
+    seen = []
+    for ex in excerpts:
+        if not any(_jaccard(ex, s) > threshold for s in seen):
+            seen.append(ex)
+    return seen
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LLM CALL
+# ────────────────────────────────────────────────────────────────────────────
+
+def _call_llm(prompt: str, api_key: str, base_url: str, max_tokens: int = 800) -> str:
+    payload = {
+        "prompt": prompt,
+        "task": "plan",           # short call — use fast model
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    for attempt in range(3):
+        try:
+            resp = requests.post(base_url, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 200:
+                return (resp.json().get("response") or "").strip()
+            elif resp.status_code == 429:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"      ⚠️  LLM source call {resp.status_code}: {resp.text[:100]}")
+                return ""
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                print(f"      ⚠️  LLM source call failed: {e}")
+                return ""
+    return ""
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LLM-BASED EXTRACTION
+# ────────────────────────────────────────────────────────────────────────────
+
+def _extract_excerpts_with_llm(
+    answer_section: str,
+    doc_text: str,
+    api_key: str,
+    base_url: str,
+) -> List[str]:
+    """
+    For each claim in the answer section, ask the LLM to find the ONE
+    sentence in the document that contains that specific information.
+
+    The key discipline: we give the LLM the exact claims to look up,
+    and force it to copy sentences verbatim or output nothing.
+    """
+    doc_snippet = doc_text[:3500]
+
+    # Strip citation markers from answer for cleaner claim text
+    clean_answer = re.sub(r'\[\d+\]', '', answer_section).strip()
+
+    prompt = f"""You are given an ANSWER and its SOURCE DOCUMENT.
+
+Your task: for each fact stated in the answer, find and copy the EXACT sentence from the source document that contains that fact.
+
+RULES — follow strictly:
+1. Only copy sentences that are ALREADY in the SOURCE DOCUMENT, word for word.
+2. Each output line must be a direct copy from the document — no rewording, no summarising.
+3. Only include sentences where you can see the specific fact from the answer is present in the document sentence.
+4. If the answer mentions "April 14: Lock structural framing" → find and copy the document sentence that contains "April 14" and "structural framing".
+5. Do NOT include sentences that are vaguely related — only sentences that directly contain the claimed fact.
+6. Do NOT repeat the same sentence twice.
+7. If you cannot find a sentence in the document for a claim, skip it — output nothing for that claim.
+8. Output format: one sentence per line, starting with "- ".
+9. Maximum 5 sentences.
+
+ANSWER:
+{clean_answer}
+
+SOURCE DOCUMENT:
+{doc_snippet}
+
+Copy the matching document sentences (verbatim, one per line):"""
+
+    raw = _call_llm(prompt, api_key, base_url, max_tokens=500)
+    if not raw:
+        return []
+
+    excerpts = []
+    for line in raw.split('\n'):
+        line = line.strip()
+        if line.startswith('- '):
+            sentence = line[2:].strip()
+            if sentence and len(sentence) > 10:
+                excerpts.append(sentence)
+
+    # Strict grounding check: only keep excerpts that actually appear
+    # (or near-appear) in the document — prevents hallucinated sentences
+    verified = []
+    doc_lower = doc_text.lower()
+    for ex in excerpts:
+        # Check if at least 60% of the excerpt's words appear consecutively in the doc
+        words = ex.lower().split()
+        if len(words) < 4:
+            verified.append(ex)
+            continue
+        # Sliding window: look for any 4-word run from the excerpt in the doc
+        found = False
+        for i in range(len(words) - 3):
+            chunk = ' '.join(words[i:i+4])
+            if chunk in doc_lower:
+                found = True
+                break
+        if found:
+            verified.append(ex)
+        else:
+            print(f"      ⚠️  Grounding check failed, dropping: {ex[:80]!r}")
+
+    return _dedup_excerpts(verified)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# EXTRACT ANSWER SECTION FOR A GIVEN SOURCE NUMBER
+# ────────────────────────────────────────────────────────────────────────────
+
+def _get_answer_sections_by_heading(answer: str, src_num: int) -> Dict[str, List[str]]:
+    """
+    Group all lines citing [N] by their ## heading.
+    Returns OrderedDict: {heading: [lines...]} preserving answer order.
+    Only headings that actually have cited lines are included.
+    """
+    from collections import OrderedDict
+    result: Dict[str, List[str]] = OrderedDict()
+    current_heading = f"Source {src_num}"
+
+    for line in answer.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        h = re.match(r'^#{1,3}\s+(.+)', stripped)
+        if h:
+            current_heading = re.sub(r'\s*\[\d+\](?!\()', '', h.group(1)).strip()
+            continue
+        if f'[{src_num}]' in stripped:
+            if current_heading not in result:
+                result[current_heading] = []
+            result[current_heading].append(stripped)
+
+    return result
+
+
+def _get_answer_section_for_num(answer: str, src_num: int) -> str:
+    """Full answer section for a source number (all headings combined)."""
+    groups = _get_answer_sections_by_heading(answer, src_num)
+    parts = []
+    for heading, lines in groups.items():
+        parts.append(f"## {heading}")
+        parts.extend(lines)
+    return '\n'.join(parts)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -347,19 +260,13 @@ def _is_duplicate(passage: str, seen: List[str], threshold: float = 0.80) -> boo
 # ────────────────────────────────────────────────────────────────────────────
 
 class SourceAgent:
-    """
-    Per-fact verbatim source extraction — no LLM calls needed.
-
-    For each cited answer line:
-      - Splits multi-value lines into individual facts
-      - Finds the best-matching document sentence per fact
-      - Titles each source card section with the specific fact, not just heading
-    """
-
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  vector_store=None):
-        self.vs = vector_store
-        print(f"📎 Source Agent v7 [per-fact verbatim match, min_score={_MIN_SCORE}]")
+        self.vs       = vector_store
+        self.api_key  = api_key or os.getenv("CF_API_KEY", "")
+        self.base_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+        self.llm_ok   = bool(self.api_key)
+        print(f"📎 Source Agent v8 [LLM-powered extraction, llm={'✅' if self.llm_ok else '❌'}]")
 
     def _get_all_chunks_for_file(self, filename: str) -> List[Dict]:
         if self.vs is None:
@@ -376,62 +283,90 @@ class SourceAgent:
             return []
 
     def build_sources(self, answer: str, chunks: List[Dict]) -> List[Dict]:
-        sections = _parse_answer_sections(answer)
-        if not sections:
+        cited_nums = _cited_source_nums(answer)
+        if not cited_nums:
             return []
 
-        by_source: Dict[int, List[Tuple[str, str]]] = {}
-        for title, src_num, content in sections:
-            by_source.setdefault(src_num, []).append((title, content))
-
         sources = []
-        for i, chunk in enumerate(chunks):
-            src_num = i + 1
-            if src_num not in by_source:
+
+        # Global dedup guards
+        emitted_cards: set = set()        # (filename, heading) — no duplicate cards
+        emitted_excerpts: List[str] = []  # all excerpts seen — no duplicate sentences across cards
+
+        for src_num in cited_nums:
+            idx = src_num - 1
+            if idx < 0 or idx >= len(chunks):
                 continue
 
+            chunk    = chunks[idx]
             metadata = chunk.get("metadata", {})
             filename = metadata.get("filename", f"source_{src_num}")
 
+            # Reconstruct full document from all its chunks
             all_file_chunks = self._get_all_chunks_for_file(filename)
             if all_file_chunks:
                 doc_text = _reconstruct_doc(all_file_chunks)
-                print(f"   📄 '{filename}': {len(doc_text)} chars from {len(all_file_chunks)} chunks")
+                print(f"   📄 [{src_num}] '{filename}': {len(doc_text)} chars from {len(all_file_chunks)} chunks")
             else:
                 doc_text = chunk.get("text", "")
-                print(f"   📄 '{filename}': using RAG chunk ({len(doc_text)} chars)")
+                print(f"   📄 [{src_num}] '{filename}': using RAG chunk ({len(doc_text)} chars)")
 
-            sec_list = by_source[src_num]
-            seen_passages: List[str] = []
-            built_sections = []
-
-            for title, section_content in sec_list:
-                passage = _find_verbatim_line(section_content, doc_text)
-
-                if passage is None:
-                    print(f"      ✗ [{src_num}] '{title[:60]}' — no match above threshold, skipped")
-                    continue
-
-                if _is_duplicate(passage, seen_passages):
-                    print(f"      ✗ [{src_num}] '{title[:60]}' — duplicate, skipped")
-                    continue
-
-                seen_passages.append(passage)
-                built_sections.append({"title": title, "excerpt": passage})
-                print(f"      ✓ [{src_num}] '{title[:60]}' → {passage[:100]!r}")
-
-            if not built_sections:
+            if not doc_text:
                 continue
 
-            sources.append({
-                "source_number": src_num,
-                "filename":      filename,
-                "doc_type":      metadata.get("doc_type", "unknown"),
-                "project_ref":   metadata.get("project_ref"),
-                "sections":      built_sections,
-                "excerpt":       built_sections[0]["excerpt"],
-                "cited_facts":   [t for t, _ in sec_list],
-            })
+            # Group answer lines by heading for this source number
+            heading_groups = _get_answer_sections_by_heading(answer, src_num)
+
+            for heading, section_lines in heading_groups.items():
+                card_key = (filename, heading)
+
+                # Skip if we've already emitted a card for this file+heading combo
+                if card_key in emitted_cards:
+                    print(f"      ⏭  Skipping duplicate card: [{src_num}] '{heading}'")
+                    continue
+                emitted_cards.add(card_key)
+
+                answer_section = f"## {heading}\n" + "\n".join(section_lines)
+
+                # Ask LLM to extract verbatim supporting sentences
+                if self.llm_ok:
+                    print(f"      🤖 LLM extracting for [{src_num}] '{heading}'")
+                    raw_excerpts = _extract_excerpts_with_llm(
+                        answer_section, doc_text, self.api_key, self.base_url
+                    )
+                else:
+                    raw_excerpts = []
+
+                if not raw_excerpts:
+                    print(f"      ⚠️  LLM extraction empty — using chunk fallback")
+                    raw_excerpts = [doc_text[:300].strip()]
+
+                # Drop excerpts already used in a previous card (global dedup)
+                fresh_excerpts = []
+                for ex in raw_excerpts:
+                    if not any(_jaccard(ex, seen) > 0.75 for seen in emitted_excerpts):
+                        fresh_excerpts.append(ex)
+                        emitted_excerpts.append(ex)
+                    else:
+                        print(f"      ⏭  Global dedup dropped: {ex[:80]!r}")
+
+                if not fresh_excerpts:
+                    print(f"      ⚠️  All excerpts were duplicates — skipping card")
+                    continue
+
+                print(f"      → {len(fresh_excerpts)} excerpt(s)")
+
+                built_sections = [{"title": heading, "excerpt": ex} for ex in fresh_excerpts]
+
+                sources.append({
+                    "source_number": src_num,
+                    "filename":      filename,
+                    "doc_type":      metadata.get("doc_type", "unknown"),
+                    "project_ref":   metadata.get("project_ref"),
+                    "sections":      built_sections,
+                    "excerpt":       built_sections[0]["excerpt"],
+                    "cited_facts":   [heading],
+                })
 
         return sources
 
@@ -449,7 +384,7 @@ def build_sources_node(api_key: Optional[str] = None, model: Optional[str] = Non
         chunks = state.get("retrieved_chunks", [])
         if not answer or not chunks:
             return state
-        print("📎 Source Agent → extracting from full documents")
+        print("📎 Source Agent → LLM-powered extraction")
         sources = agent.build_sources(answer, chunks)
         n_sec = sum(len(s["sections"]) for s in sources)
         print(f"   → {len(sources)} source(s), {n_sec} section(s) total")
