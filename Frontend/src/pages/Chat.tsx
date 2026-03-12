@@ -668,11 +668,9 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
   const renderQueueRef = useRef<number[]>([]);
   const renderingRef   = useRef(false);
   const viewportsRef   = useRef<Map<number, any>>(new Map());
-
-  const highlights = useCallback((): string[] => {
-    const all = [...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean);
-    return [...new Set(all)];
-  }, [highlightText, highlightLines]);
+  // Always-fresh ref so drawOverlay never captures stale highlight values
+  const highlightsRef  = useRef<string[]>([]);
+  highlightsRef.current = [...new Set([...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean))];
 
   // Draw highlights onto the OVERLAY canvas only — never re-renders the page content
   const drawOverlay = useCallback(async (pageNum: number) => {
@@ -684,7 +682,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     if (!overlay) return;
     const ctx = overlay.getContext("2d")!;
     ctx.clearRect(0, 0, overlay.width, overlay.height);
-    const needles = highlights();
+    const needles = highlightsRef.current;  // always fresh
     if (needles.length === 0) return;
     const viewport = viewportsRef.current.get(pageNum);
     if (!viewport) return;
@@ -718,7 +716,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
       }
     }
     ctx.restore();
-  }, [highlights]);
+  }, []); // no deps — reads from refs only
 
   // Render page content ONCE — two stacked canvases (page content + highlight overlay)
   const renderPage = useCallback(async (pageNum: number) => {
@@ -839,11 +837,12 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
   // Scroll to first page that contains the highlighted text
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
-    const needles = highlights();
+    const needles = highlightsRef.current;
     if (!needles.length || !containerRef.current) return;
     setTimeout(async () => {
       const pdf      = pdfDocRef.current;
-      const wrappers = Array.from(containerRef.current!.querySelectorAll("[data-page]")) as HTMLDivElement[];
+      if (!pdf || !containerRef.current) return;
+      const wrappers = Array.from(containerRef.current.querySelectorAll("[data-page]")) as HTMLDivElement[];
       for (const wrapper of wrappers) {
         const pageNum = Number(wrapper.dataset.page);
         const page    = await pdf.getPage(pageNum);
@@ -855,7 +854,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
         }
       }
     }, 150);
-  }, [highlightKey, status, highlights]);
+  }, [highlightKey, status]);
 
   return (
     <div className="flex flex-col h-full bg-muted/30">
@@ -1059,6 +1058,10 @@ const Chat = () => {
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
+  const [convsPanelOpen, setConvsPanelOpen] = useState(false);
+  const [bubbleDoc, setBubbleDoc] = useState<Document | null>(null);
+  const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
+  const bubbleViewerRef = useRef<ViewerState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
@@ -1076,7 +1079,9 @@ const Chat = () => {
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
   const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" }>>(new Map());
-  
+  const bubbleHighlightRef = useRef<HTMLElement>(null);
+  const bubbleScrollRef    = useRef<HTMLDivElement>(null);
+  bubbleViewerRef.current  = bubbleViewer; // always-fresh mirror, no stale closure
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1103,6 +1108,46 @@ const Chat = () => {
     const url = URL.createObjectURL(blob);
     blobUrlMapRef.current.set(doc.document_id, { url, type });
     return { url, type };
+  };
+
+  const openBubbleDoc = async (doc: Document, highlightText: string | null = null, highlightLines: string[] | null = null) => {
+    // Read from ref — never stale, even in async callbacks
+    const current = bubbleViewerRef.current;
+
+    // Same doc already open and loaded — just move the highlight, no panel touch at all
+    if (current && current.doc.document_id === doc.document_id && !current.loading && !current.error) {
+      setBubbleViewer(prev => prev ? { ...prev, highlightText, highlightLines, highlightKey: (prev.highlightKey ?? 0) + 1 } : prev);
+      return;
+    }
+
+    setDocsPanelOpen(true);
+
+    const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+    const isPdfOrImage = ext === 'pdf' || IMAGE_EXTS.includes(`.${ext}`);
+    setBubbleDoc(doc);
+
+    if (isPdfOrImage) {
+      const cached = blobUrlMapRef.current.get(doc.document_id);
+      if (cached) {
+        setBubbleViewer({ doc, content: null, loading: false, error: null, highlightText, highlightLines, highlightKey: 0, blobUrl: cached.url, mediaType: cached.type });
+      } else {
+        setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: ext === 'pdf' ? 'pdf' : 'image' });
+        try {
+          const { url, type } = await fetchBlobUrl(doc);
+          setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, loading: false, blobUrl: url, mediaType: type } : p);
+        } catch {
+          setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, loading: false, error: "Could not load file." } : p);
+        }
+      }
+    } else {
+      setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: 'txt' });
+      try {
+        const res = await (api as any).getDocumentContent(doc.document_id);
+        setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, content: res.content, loading: false } : p);
+      } catch {
+        setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, loading: false, error: "Could not load document." } : p);
+      }
+    }
   };
 
   const openDocumentViewer = async (doc: Document, highlightText: string | null = null, highlightLines: string[] | null = null) => {
@@ -1172,35 +1217,40 @@ const Chat = () => {
   const openDocumentAtExcerpt = (filename: string, excerpt: string) => {
     const doc = documents.find(d => d.filename === filename);
     if (!doc) return;
-    openDocumentViewer(doc, excerpt, null);
+    openBubbleDoc(doc, excerpt, null);
   };
 
   const openDocumentAtExcerpts = (filename: string, excerpts: string[]) => {
     const doc = documents.find(d => d.filename === filename);
     if (!doc) return;
-    openDocumentViewer(doc, excerpts[0] ?? null, excerpts);
+    openBubbleDoc(doc, excerpts[0] ?? null, excerpts);
   };
 
   // Open viewer and highlight the line containing a specific number value
   const openDocumentAtNumber = async (filename: string, numValue: string, fallbackExcerpt: string) => {
     const doc = documents.find(d => d.filename === filename);
     if (!doc) return;
-    if (viewer && viewer.doc.document_id === doc.document_id && viewer.content) {
-      const line = findLineForNumber(viewer.content, numValue) ?? fallbackExcerpt;
-      setViewer(prev => prev ? { ...prev, highlightText: line, highlightLines: null, highlightKey: (prev.highlightKey ?? 0) + 1 } : prev);
+    // If same doc already loaded in bubble, find the right line and update highlight only
+    const current = bubbleViewerRef.current;
+    if (current && current.doc.document_id === doc.document_id && current.content) {
+      const line = findLineForNumber(current.content, numValue) ?? fallbackExcerpt;
+      setBubbleViewer(prev => prev ? { ...prev, highlightText: line, highlightLines: null, highlightKey: (prev.highlightKey ?? 0) + 1 } : prev);
       return;
     }
-    setViewer({ doc, content: null, loading: true, error: null, highlightText: fallbackExcerpt, highlightLines: null, highlightKey: 0 });
+    // Otherwise load fresh into bubble — different doc
+    setBubbleDoc(doc);
+    setDocsPanelOpen(true);
+    setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText: fallbackExcerpt, highlightLines: null, highlightKey: 0, mediaType: 'txt' });
     try {
       const res = await (api as any).getDocumentContent(doc.document_id);
       const fullContent = res.content as string;
       const line = findLineForNumber(fullContent, numValue) ?? fallbackExcerpt;
-      setViewer(p => p && p.doc.document_id === doc.document_id
+      setBubbleViewer(p => p && p.doc.document_id === doc.document_id
         ? { ...p, content: fullContent, loading: false, error: null, highlightText: line, highlightLines: null, highlightKey: (p.highlightKey ?? 0) + 1 }
         : p
       );
     } catch {
-      setViewer(p => p && p.doc.document_id === doc.document_id
+      setBubbleViewer(p => p && p.doc.document_id === doc.document_id
         ? { ...p, loading: false, error: "Could not load document content." }
         : p
       );
@@ -1242,11 +1292,31 @@ const Chat = () => {
     if (!docsPanelOpen) return;
     const handler = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest("[data-docs-panel]")) setDocsPanelOpen(false);
+      if (!target.closest("[data-docs-panel]")) { setDocsPanelOpen(false); setBubbleDoc(null); setBubbleViewer(null); }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [docsPanelOpen]);
+
+  // Scroll bubble text viewer to highlighted mark when highlight changes
+  useEffect(() => {
+    if (!bubbleHighlightRef.current || !bubbleScrollRef.current) return;
+    const el = bubbleHighlightRef.current;
+    const container = bubbleScrollRef.current;
+    const elTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTo({ top: container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2, behavior: "smooth" });
+  }, [bubbleViewer?.highlightKey]);
+
+  // Close convs panel when clicking outside
+  useEffect(() => {
+    if (!convsPanelOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest("[data-convs-panel]")) setConvsPanelOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [convsPanelOpen]);
 
   // Load documents on mount
   useEffect(() => {
@@ -1663,9 +1733,9 @@ const Chat = () => {
       return lines.find(l => norm(l).includes(needle)) ?? null;
     };
 
-    // First try: full document content already in viewer state
-    if (viewer && viewer.doc.filename === source?.filename && viewer.content) {
-      highlightSentence = findLineWithNumber(viewer.content, numValue);
+    // First try: full document content already in bubble viewer state
+    if (bubbleViewerRef.current && bubbleViewerRef.current.doc.filename === source?.filename && bubbleViewerRef.current.content) {
+      highlightSentence = findLineWithNumber(bubbleViewerRef.current.content, numValue);
     }
 
     // Second try: excerpt text
@@ -1736,118 +1806,6 @@ const Chat = () => {
         )}
       </AnimatePresence>
 
-      {/* Chat History Sidebar */}
-      <AnimatePresence>
-        {sidebarOpen && (
-          <motion.aside
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 280, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-            className="border-r border-border bg-background flex flex-col overflow-hidden shrink-0"
-          >
-            {/* Header */}
-            <div className="h-14 border-b border-border flex items-center gap-3 px-4 shrink-0">
-              <MessageSquare className="h-4 w-4 text-primary shrink-0" />
-              <span className="font-semibold text-sm text-foreground flex-1">Conversations</span>
-              <Button
-                variant="ghost" size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground shrink-0"
-                onClick={() => setSidebarOpen(false)}
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-
-            {/* New Chat button */}
-            <div className="px-3 pt-3 pb-2">
-              <button
-                onClick={startNewConversation}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-sm font-medium transition-colors group"
-              >
-                <Plus className="h-4 w-4" />
-                New conversation
-              </button>
-            </div>
-
-            {/* Search + Sort */}
-            <div className="px-3 pb-2 space-y-2">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/60 pointer-events-none" />
-                <input
-                  value={historySearch}
-                  onChange={e => setHistorySearch(e.target.value)}
-                  placeholder="Search conversations…"
-                  className="w-full pl-8 pr-3 py-2 text-xs bg-muted/50 rounded-lg border border-transparent focus:border-primary/30 focus:bg-background focus:outline-none text-foreground placeholder:text-muted-foreground/50 transition-all"
-                />
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setHistorySort(s => s === "newest" ? "oldest" : "newest")}
-                  className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/50 transition-colors"
-                >
-                  <Clock className="h-3 w-3" />
-                  {historySort === "newest" ? "Newest first" : "Oldest first"}
-                  <SortAsc className={`h-3 w-3 transition-transform ${historySort === "oldest" ? "rotate-180" : ""}`} />
-                </button>
-              </div>
-            </div>
-
-            {/* Conversation list */}
-            <div className="flex-1 overflow-y-auto px-2 pb-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
-              {conversations.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full gap-2 text-center py-12 px-4">
-                  <div className="h-10 w-10 rounded-2xl bg-muted/60 flex items-center justify-center mb-1">
-                    <MessageSquare className="h-5 w-5 text-muted-foreground/40" />
-                  </div>
-                  <p className="text-xs font-medium text-muted-foreground">No conversations yet</p>
-                  <p className="text-[11px] text-muted-foreground/60">Start chatting to build your history</p>
-                </div>
-              ) : (
-                <div className="space-y-0.5">
-                  {[...conversations]
-                    .filter(c => historySearch === "" || c.title.toLowerCase().includes(historySearch.toLowerCase()) || c.preview.toLowerCase().includes(historySearch.toLowerCase()))
-                    .sort((a, b) => historySort === "newest"
-                      ? b.timestamp.getTime() - a.timestamp.getTime()
-                      : a.timestamp.getTime() - b.timestamp.getTime()
-                    )
-                    .map(conv => (
-                      <motion.div
-                        key={conv.id}
-                        initial={{ opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        className={`group relative flex flex-col gap-0.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
-                          conv.id === activeConvId
-                            ? "bg-primary/10 text-foreground"
-                            : "hover:bg-muted/60 text-muted-foreground hover:text-foreground"
-                        }`}
-                        onClick={() => loadConversation(conv)}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
-                          <span className="text-[10px] text-muted-foreground/60 shrink-0 mt-0.5 tabular-nums">
-                            {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{conv.preview}</p>
-                        {/* Delete button — appears on hover */}
-                        <button
-                          onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
-                          className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-all"
-                          title="Delete conversation"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </motion.div>
-                    ))
-                  }
-                </div>
-              )}
-            </div>
-          </motion.aside>
-        )}
-      </AnimatePresence>
-
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
@@ -1857,25 +1815,139 @@ const Chat = () => {
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          {!sidebarOpen && (
-            <Button
-              variant="ghost" size="icon"
-              className="h-8 w-8 text-muted-foreground hover:text-foreground"
-              onClick={() => setSidebarOpen(true)}
-              title="Chat history"
-            >
-              <MessageSquare className="h-4 w-4" />
-            </Button>
-          )}
           <div className="flex items-center gap-2">
             <Logo className="h-7 w-7" />
             <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            {/* Documents bubble */}
+
+            {/* ── Conversations bubble ── */}
+            <div className="relative" data-convs-panel>
+              <button
+                onClick={() => setConvsPanelOpen(p => !p)}
+                className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+                  convsPanelOpen
+                    ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                    : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                }`}
+              >
+                <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+                <span>Conversations</span>
+                {conversations.length > 0 && (
+                  <span className={`inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-full text-[10px] font-bold ${
+                    convsPanelOpen ? "bg-primary-foreground/20 text-primary-foreground" : "bg-primary/15 text-primary"
+                  }`}>
+                    {conversations.length}
+                  </span>
+                )}
+              </button>
+
+              <AnimatePresence>
+                {convsPanelOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.9, y: -6 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.9, y: -6 }}
+                    transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                    className="absolute right-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
+                    style={{ transformOrigin: "top right", maxHeight: 480 }}
+                  >
+                    {/* Header */}
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+                      <div className="flex items-center gap-2">
+                        <MessageSquare className="h-4 w-4 text-primary" />
+                        <span className="text-sm font-semibold text-foreground">Conversations</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => { startNewConversation(); setConvsPanelOpen(false); }}
+                          className="flex items-center gap-1 text-[11px] text-primary hover:text-primary/80 px-2 py-1 rounded-lg hover:bg-primary/10 transition-colors font-medium"
+                        >
+                          <Plus className="h-3 w-3" /> New
+                        </button>
+                        <button onClick={() => setConvsPanelOpen(false)} className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Search + sort */}
+                    <div className="px-3 pt-2.5 pb-2 space-y-2 shrink-0">
+                      <div className="relative">
+                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50 pointer-events-none" />
+                        <input
+                          value={historySearch}
+                          onChange={e => setHistorySearch(e.target.value)}
+                          placeholder="Search conversations…"
+                          className="w-full pl-7 pr-3 py-1.5 text-xs bg-muted/50 rounded-lg border border-transparent focus:border-primary/30 focus:bg-background focus:outline-none text-foreground placeholder:text-muted-foreground/50 transition-all"
+                        />
+                      </div>
+                      <button
+                        onClick={() => setHistorySort(s => s === "newest" ? "oldest" : "newest")}
+                        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground px-1 py-0.5 rounded transition-colors"
+                      >
+                        <Clock className="h-3 w-3" />
+                        {historySort === "newest" ? "Newest first" : "Oldest first"}
+                        <SortAsc className={`h-3 w-3 transition-transform duration-200 ${historySort === "oldest" ? "rotate-180" : ""}`} />
+                      </button>
+                    </div>
+
+                    {/* List */}
+                    <div className="flex-1 overflow-y-auto px-2 pb-2 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
+                      {conversations.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-10 gap-2 text-center px-4">
+                          <div className="h-9 w-9 rounded-xl bg-muted/60 flex items-center justify-center">
+                            <MessageSquare className="h-4 w-4 text-muted-foreground/40" />
+                          </div>
+                          <p className="text-xs text-muted-foreground font-medium">No conversations yet</p>
+                          <p className="text-[11px] text-muted-foreground/60">Start chatting to build history</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-0.5">
+                          {[...conversations]
+                            .filter(c => historySearch === "" || c.title.toLowerCase().includes(historySearch.toLowerCase()) || c.preview.toLowerCase().includes(historySearch.toLowerCase()))
+                            .sort((a, b) => historySort === "newest"
+                              ? b.timestamp.getTime() - a.timestamp.getTime()
+                              : a.timestamp.getTime() - b.timestamp.getTime()
+                            )
+                            .map(conv => (
+                              <div
+                                key={conv.id}
+                                className={`group relative flex flex-col gap-0.5 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
+                                  conv.id === activeConvId
+                                    ? "bg-primary/10"
+                                    : "hover:bg-muted/60"
+                                }`}
+                                onClick={() => { loadConversation(conv); setConvsPanelOpen(false); }}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
+                                  <span className="text-[10px] text-muted-foreground/60 shrink-0 mt-0.5 tabular-nums">
+                                    {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2 pr-4">{conv.preview}</p>
+                                <button
+                                  onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
+                                  className="absolute right-2 top-2.5 opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ))
+                          }
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* ── Documents bubble ── */}
             <div className="relative" data-docs-panel>
               <button
-                onClick={() => setDocsPanelOpen(p => !p)}
+                onClick={() => { setDocsPanelOpen(p => !p); if (docsPanelOpen) { setBubbleDoc(null); setBubbleViewer(null); } }}
                 className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
                   docsPanelOpen
                     ? "bg-primary text-primary-foreground border-primary shadow-sm"
@@ -1894,103 +1966,153 @@ const Chat = () => {
                 )}
               </button>
 
-              {/* Messenger-style panel popping out from bubble */}
               <AnimatePresence>
                 {docsPanelOpen && (
                   <motion.div
-                    initial={{ opacity: 0, scale: 0.92, y: -8, transformOrigin: "top right" }}
-                    animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.92, y: -8 }}
-                    transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-                    className="absolute right-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-xl overflow-hidden z-50"
-                    style={{ transformOrigin: "top right" }}
+                    key={bubbleDoc ? "viewer" : "list"}
+                    initial={{ opacity: 0, scale: 0.9, y: -6 }}
+                    animate={{ opacity: 1, scale: 1, y: 0,
+                      width: bubbleDoc ? 520 : 288,
+                      height: bubbleDoc ? 640 : "auto",
+                    }}
+                    exit={{ opacity: 0, scale: 0.9, y: -6 }}
+                    transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+                    className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
+                    style={{ transformOrigin: "top right", minWidth: 288 }}
                   >
-                    {/* Panel header */}
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-                      <div className="flex items-center gap-2">
-                        <FolderOpen className="h-4 w-4 text-primary" />
-                        <span className="text-sm font-semibold text-foreground">Documents</span>
-                        <span className="text-xs text-muted-foreground">({documents.length})</span>
-                      </div>
-                      <button
-                        onClick={() => setDocsPanelOpen(false)}
-                        className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-
-                    {/* Document list */}
-                    <div className="max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-                      {documents.length === 0 && !isUploading ? (
-                        <div className="flex flex-col items-center justify-center py-10 gap-2 px-4 text-center">
-                          <div className="h-9 w-9 rounded-xl bg-muted/60 flex items-center justify-center">
-                            <FileText className="h-4 w-4 text-muted-foreground/40" />
+                    {/* ── Doc list view ── */}
+                    {!bubbleDoc && (
+                      <>
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+                          <div className="flex items-center gap-2">
+                            <FolderOpen className="h-4 w-4 text-primary" />
+                            <span className="text-sm font-semibold text-foreground">Documents</span>
+                            <span className="text-xs text-muted-foreground">({documents.length})</span>
                           </div>
-                          <p className="text-xs text-muted-foreground font-medium">No documents yet</p>
-                          <p className="text-[11px] text-muted-foreground/60">Upload PDFs, images or text files</p>
+                          <button onClick={() => setDocsPanelOpen(false)} className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
                         </div>
-                      ) : (
-                        <div className="p-2 space-y-1">
-                          {isUploading && (
-                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-primary/5">
-                              <Loader2 className="h-4 w-4 text-primary animate-spin shrink-0" />
-                              <span className="text-xs text-muted-foreground">Uploading…</span>
+
+                        <div className="max-h-80 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                          {documents.length === 0 && !isUploading ? (
+                            <div className="flex flex-col items-center justify-center py-10 gap-2 px-4 text-center">
+                              <div className="h-9 w-9 rounded-xl bg-muted/60 flex items-center justify-center">
+                                <FileText className="h-4 w-4 text-muted-foreground/40" />
+                              </div>
+                              <p className="text-xs text-muted-foreground font-medium">No documents yet</p>
+                              <p className="text-[11px] text-muted-foreground/60">Upload PDFs, images or text files</p>
+                            </div>
+                          ) : (
+                            <div className="p-2 space-y-0.5">
+                              {isUploading && (
+                                <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-primary/5">
+                                  <Loader2 className="h-4 w-4 text-primary animate-spin shrink-0" />
+                                  <span className="text-xs text-muted-foreground">Uploading…</span>
+                                </div>
+                              )}
+                              {documents.map(doc => {
+                                const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+                                const isImg = IMAGE_EXTS.includes(`.${ext}`);
+                                return (
+                                  <div
+                                    key={doc.document_id}
+                                    className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-muted/60 cursor-pointer transition-colors"
+                                    onClick={() => openBubbleDoc(doc)}
+                                  >
+                                    <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                      {isImg ? <ImageIcon className="h-3.5 w-3.5 text-primary" /> : <FileText className="h-3.5 w-3.5 text-primary" />}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-xs font-medium text-foreground truncate">{doc.filename}</p>
+                                      <p className="text-[10px] text-muted-foreground capitalize">{doc.doc_type}</p>
+                                    </div>
+                                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                                      <Eye className="h-3 w-3 text-muted-foreground/50" />
+                                      <button
+                                        onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
+                                        className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
+                                      >
+                                        <X className="h-3 w-3" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
-                          {documents.map(doc => {
-                            const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
-                            const isImg = IMAGE_EXTS.includes(`.${ext}`);
-                            return (
-                              <motion.div
-                                key={doc.document_id}
-                                initial={{ opacity: 0, y: 4 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-muted/60 cursor-pointer transition-colors"
-                                onClick={() => { openDocumentViewer(doc, null); setDocsPanelOpen(false); }}
-                              >
-                                <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                                  {isImg
-                                    ? <ImageIcon className="h-3.5 w-3.5 text-primary" />
-                                    : <FileText className="h-3.5 w-3.5 text-primary" />
-                                  }
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-medium text-foreground truncate">{doc.filename}</p>
-                                  <p className="text-[10px] text-muted-foreground capitalize">{doc.doc_type}</p>
-                                </div>
-                                <button
-                                  onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
-                                  className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/50 hover:text-destructive transition-all"
-                                >
-                                  <X className="h-3 w-3" />
-                                </button>
-                              </motion.div>
-                            );
-                          })}
                         </div>
-                      )}
-                    </div>
 
-                    {/* Upload button */}
-                    <div className="p-3 border-t border-border">
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif"
-                        className="hidden"
-                        onChange={handleFileUpload}
-                        disabled={isUploading}
-                      />
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading}
-                        className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-xs font-medium transition-colors disabled:opacity-50"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
-                        Upload document
-                      </button>
-                    </div>
+                        <div className="p-3 border-t border-border shrink-0">
+                          <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                          <button
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={isUploading}
+                            className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-xs font-medium transition-colors disabled:opacity-50"
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            Upload document
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    {/* ── Expanded document viewer ── */}
+                    {bubbleDoc && bubbleViewer && (
+                      <>
+                        {/* Viewer header */}
+                        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0">
+                          <button
+                            onClick={() => { setBubbleDoc(null); setBubbleViewer(null); }}
+                            className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0"
+                            title="Back to documents"
+                          >
+                            <ArrowLeft className="h-3.5 w-3.5" />
+                          </button>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-semibold text-foreground truncate">{bubbleDoc.filename}</p>
+                            <p className="text-[10px] text-muted-foreground capitalize">{bubbleDoc.doc_type}</p>
+                          </div>
+                          <button onClick={() => { setDocsPanelOpen(false); setBubbleDoc(null); setBubbleViewer(null); }} className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors shrink-0">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+
+                        {/* Viewer content */}
+                        <div className="flex-1 overflow-hidden">
+                          {bubbleViewer.loading && (
+                            <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+                              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                              <p className="text-xs">Loading…</p>
+                            </div>
+                          )}
+                          {bubbleViewer.error && (
+                            <div className="flex flex-col items-center justify-center h-full gap-2 px-6 text-center">
+                              <AlertCircle className="h-6 w-6 text-destructive/70" />
+                              <p className="text-xs text-muted-foreground">{bubbleViewer.error}</p>
+                            </div>
+                          )}
+                          {!bubbleViewer.loading && !bubbleViewer.error && (
+                            bubbleViewer.mediaType === 'image' ? (
+                              <div className="flex items-center justify-center h-full p-3">
+                                <img src={bubbleViewer.blobUrl} alt={bubbleDoc.filename} className="max-w-full max-h-full object-contain rounded-lg" />
+                              </div>
+                            ) : bubbleViewer.mediaType === 'pdf' && bubbleViewer.blobUrl ? (
+                              <PdfViewer
+                                blobUrl={bubbleViewer.blobUrl}
+                                highlightText={bubbleViewer.highlightText ?? null}
+                                highlightLines={bubbleViewer.highlightLines ?? null}
+                                highlightKey={bubbleViewer.highlightKey ?? 0}
+                              />
+                            ) : bubbleViewer.content !== null ? (
+                              <div ref={bubbleScrollRef} className="h-full overflow-y-auto p-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                                {renderDocumentContent(bubbleViewer.content, bubbleViewer.highlightText, bubbleHighlightRef, bubbleViewer.highlightKey ?? 0, bubbleViewer.highlightLines ?? null)}
+                              </div>
+                            ) : null
+                          )}
+                        </div>
+                      </>
+                    )}
                   </motion.div>
                 )}
               </AnimatePresence>
