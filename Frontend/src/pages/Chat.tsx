@@ -662,17 +662,50 @@ function loadPdfJs(): Promise<any> {
 const HIGHLIGHT_COLOR = "rgba(253, 224, 71, 0.45)"; // yellow-300 at 45%
 
 const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlightLines, highlightKey }) => {
-  const containerRef   = useRef<HTMLDivElement>(null);
-  const pdfDocRef      = useRef<any>(null);
+  const containerRef  = useRef<HTMLDivElement>(null);
+  const pdfDocRef     = useRef<any>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [zoom, setZoom]     = useState(1.0);
+  const [zoomMode, setZoomMode] = useState(false); // magnifier cursor mode
   const renderQueueRef = useRef<number[]>([]);
   const renderingRef   = useRef(false);
-  const viewportsRef   = useRef<Map<number, any>>(new Map());
-  // Always-fresh ref so drawOverlay never captures stale highlight values
-  const highlightsRef  = useRef<string[]>([]);
-  highlightsRef.current = [...new Set([...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean))];
+  const viewportsRef   = useRef<Map<number, { viewport: any; baseScale: number }>>(new Map());
+  const zoomRef        = useRef(1.0);
+  zoomRef.current      = zoom;
 
-  // Draw highlights onto the OVERLAY canvas only — never re-renders the page content
+  const highlightsRef = useRef<string[]>([]);
+  highlightsRef.current = [...new Set(
+    [...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean)
+  )];
+
+  const findMatchingItems = (
+    items: Array<{ str: string; transform: number[] }>,
+    needle: string
+  ): number[] => {
+    if (!needle.trim()) return [];
+    const hit = new Set<number>();
+    const needleLo = needle.toLowerCase().replace(/\s+/g, " ").trim();
+    for (const sep of [" ", ""]) {
+      const joined   = items.map(i => i.str).join(sep);
+      const joinedLo = joined.toLowerCase();
+      let from = 0, found = false;
+      while (true) {
+        const idx = joinedLo.indexOf(needleLo, from);
+        if (idx === -1) break;
+        found = true;
+        let charCount = 0;
+        for (let i = 0; i < items.length; i++) {
+          const start = charCount, end = charCount + items[i].str.length;
+          charCount += items[i].str.length + sep.length;
+          if (end > idx && start < idx + needleLo.length) hit.add(i);
+        }
+        from = idx + 1;
+      }
+      if (found) break;
+    }
+    return [...hit];
+  };
+
   const drawOverlay = useCallback(async (pageNum: number) => {
     const pdf = pdfDocRef.current;
     if (!pdf || !containerRef.current) return;
@@ -682,101 +715,78 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     if (!overlay) return;
     const ctx = overlay.getContext("2d")!;
     ctx.clearRect(0, 0, overlay.width, overlay.height);
-    const needles = highlightsRef.current;  // always fresh
-    if (needles.length === 0) return;
-    const viewport = viewportsRef.current.get(pageNum);
-    if (!viewport) return;
-    const page        = await pdf.getPage(pageNum);
-    const textContent = await page.getTextContent();
-    const items       = textContent.items as Array<{ str: string; transform: number[] }>;
-    const pageText    = items.map(i => i.str).join(" ");
-    const pageTextLo  = pageText.toLowerCase();
+    const needles = highlightsRef.current;
+    if (!needles.length) return;
+    const entry = viewportsRef.current.get(pageNum);
+    if (!entry) return;
+    const { viewport } = entry;
+    const page = await pdf.getPage(pageNum);
+    const tc   = await page.getTextContent();
+    const items = tc.items as Array<{ str: string; transform: number[] }>;
     ctx.save();
+    ctx.fillStyle = HIGHLIGHT_COLOR;
     for (const needle of needles) {
-      if (!needle.trim()) continue;
-      const needleLo = needle.toLowerCase();
-      let searchFrom = 0;
-      while (true) {
-        const idx = pageTextLo.indexOf(needleLo, searchFrom);
-        if (idx === -1) break;
-        let charCount = 0;
-        for (const item of items) {
-          const itemStart = charCount;
-          const itemEnd   = charCount + item.str.length;
-          charCount += item.str.length + 1;
-          if (itemEnd <= idx || itemStart >= idx + needleLo.length) continue;
-          const [sx, , , sy, tx, ty] = item.transform;
-          const [cx, cy] = viewport.convertToViewportPoint(tx, ty);
-          const width  = Math.abs(sx) * viewport.scale * (item.str.length * 0.55);
-          const height = Math.abs(sy) * viewport.scale;
-          ctx.fillStyle = HIGHLIGHT_COLOR;
-          ctx.fillRect(cx, cy - height, width, height * 1.15);
-        }
-        searchFrom = idx + 1;
+      for (const idx of findMatchingItems(items, needle)) {
+        const item = items[idx];
+        const [sx, , , sy, tx, ty] = item.transform;
+        const [cx, cy] = viewport.convertToViewportPoint(tx, ty);
+        const width  = Math.abs(sx) * viewport.scale * item.str.length * 0.62;
+        const height = Math.abs(sy) * viewport.scale;
+        ctx.fillRect(cx, cy - height * 0.9, width, height * 1.2);
       }
     }
     ctx.restore();
-  }, []); // no deps — reads from refs only
+  }, []);
 
-  // Render page content ONCE — two stacked canvases (page content + highlight overlay)
   const renderPage = useCallback(async (pageNum: number) => {
     const pdf = pdfDocRef.current;
     if (!pdf || !containerRef.current) return;
-    const container       = containerRef.current;
-    const existingWrapper = container.querySelector(`[data-page="${pageNum}"]`);
+    const container = containerRef.current;
+    const existing  = container.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
     try {
       const page           = await pdf.getPage(pageNum);
       const availableWidth = container.clientWidth - 32;
       const baseViewport   = page.getViewport({ scale: 1 });
-      const scale          = availableWidth / baseViewport.width;
-      const viewport       = page.getViewport({ scale: Math.max(scale, 0.5) });
-      viewportsRef.current.set(pageNum, viewport);
+      const baseScale      = availableWidth / baseViewport.width;
+      const scale          = Math.max(baseScale * zoomRef.current, 0.3);
+      const viewport       = page.getViewport({ scale });
+      viewportsRef.current.set(pageNum, { viewport, baseScale });
+      const w = Math.floor(viewport.width), h = Math.floor(viewport.height);
 
-      if (existingWrapper) {
-        // Resize only if dimensions actually changed — skip re-render otherwise
-        const wrapper    = existingWrapper as HTMLDivElement;
-        const pgCanvas   = wrapper.querySelector("canvas.pg-canvas") as HTMLCanvasElement;
-        const hlCanvas   = wrapper.querySelector("canvas.hl-overlay") as HTMLCanvasElement;
-        if (pgCanvas.width !== viewport.width || pgCanvas.height !== viewport.height) {
-          wrapper.style.width  = viewport.width + "px";
-          wrapper.style.height = viewport.height + "px";
-          pgCanvas.width  = viewport.width;
-          pgCanvas.height = viewport.height;
-          hlCanvas.width  = viewport.width;
-          hlCanvas.height = viewport.height;
-          const ctx = pgCanvas.getContext("2d")!;
-          await page.render({ canvasContext: ctx, viewport }).promise;
-        }
+      let pgCanvas: HTMLCanvasElement, hlCanvas: HTMLCanvasElement, wrapper: HTMLDivElement;
+      if (existing) {
+        wrapper  = existing;
+        pgCanvas = wrapper.querySelector("canvas.pg-canvas")!;
+        hlCanvas = wrapper.querySelector("canvas.hl-overlay")!;
+        if (pgCanvas.width === w && pgCanvas.height === h) { await drawOverlay(pageNum); return; }
+        wrapper.style.width  = w + "px";
+        wrapper.style.height = h + "px";
+        pgCanvas.width = hlCanvas.width  = w;
+        pgCanvas.height = hlCanvas.height = h;
       } else {
-        const wrapper         = document.createElement("div");
+        wrapper = document.createElement("div");
         wrapper.dataset.page  = String(pageNum);
-        wrapper.style.cssText = `position:relative;margin:0 auto 12px;box-shadow:0 1px 8px rgba(0,0,0,.25);background:#fff;width:${viewport.width}px;height:${viewport.height}px;`;
-
-        const pgCanvas         = document.createElement("canvas");
+        wrapper.style.cssText = `position:relative;margin:0 auto 12px;box-shadow:0 1px 8px rgba(0,0,0,.25);background:#fff;width:${w}px;height:${h}px;flex-shrink:0;`;
+        pgCanvas = document.createElement("canvas");
         pgCanvas.className     = "pg-canvas";
-        pgCanvas.width         = viewport.width;
-        pgCanvas.height        = viewport.height;
+        pgCanvas.width         = w; pgCanvas.height = h;
         pgCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;";
-        wrapper.appendChild(pgCanvas);
-
-        const hlCanvas         = document.createElement("canvas");
+        hlCanvas = document.createElement("canvas");
         hlCanvas.className     = "hl-overlay";
-        hlCanvas.width         = viewport.width;
-        hlCanvas.height        = viewport.height;
+        hlCanvas.width         = w; hlCanvas.height = h;
         hlCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;";
+        wrapper.appendChild(pgCanvas);
         wrapper.appendChild(hlCanvas);
-
         const siblings     = Array.from(container.querySelectorAll("[data-page]"));
         const insertBefore = siblings.find(s => Number((s as HTMLElement).dataset.page) > pageNum);
         if (insertBefore) container.insertBefore(wrapper, insertBefore);
         else container.appendChild(wrapper);
-
-        const ctx = pgCanvas.getContext("2d")!;
-        await page.render({ canvasContext: ctx, viewport }).promise;
       }
-      // Draw highlights on overlay after page is rendered
+      const ctx = pgCanvas.getContext("2d")!;
+      ctx.clearRect(0, 0, w, h);
+      await page.render({ canvasContext: ctx, viewport }).promise;
       await drawOverlay(pageNum);
-    } catch { /* skip silently */ }
+    } catch { /* skip */ }
   }, [drawOverlay]);
 
   const processQueue = useCallback(async () => {
@@ -796,10 +806,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     processQueue();
   }, [processQueue]);
 
-  // Load PDF once on mount
+  // Load PDF
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
+    setStatus("loading"); setZoom(1); setZoomMode(false);
     viewportsRef.current.clear();
     (async () => {
       try {
@@ -809,14 +819,12 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
         pdfDocRef.current = pdf;
         setStatus("ready");
         enqueuePages(Array.from({ length: pdf.numPages }, (_, i) => i + 1));
-      } catch {
-        if (!cancelled) setStatus("error");
-      }
+      } catch { if (!cancelled) setStatus("error"); }
     })();
     return () => { cancelled = true; };
   }, [blobUrl, enqueuePages]);
 
-  // Resize observer — re-render pages only when container width actually changes
+  // Resize
   useEffect(() => {
     if (!containerRef.current) return;
     const ro = new ResizeObserver(() => {
@@ -827,55 +835,129 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     return () => ro.disconnect();
   }, [status, enqueuePages]);
 
-  // Highlight change — ONLY update overlay canvases, page content untouched → zero flicker
+  // Zoom → re-render all pages
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
-    const n = pdfDocRef.current.numPages;
-    for (let i = 1; i <= n; i++) drawOverlay(i);
+    if (containerRef.current) containerRef.current.querySelectorAll("[data-page]").forEach(el => el.remove());
+    viewportsRef.current.clear();
+    enqueuePages(Array.from({ length: pdfDocRef.current.numPages }, (_, i) => i + 1));
+  }, [zoom, status, enqueuePages]);
+
+  // Highlight change
+  useEffect(() => {
+    if (status !== "ready" || !pdfDocRef.current) return;
+    for (let i = 1; i <= pdfDocRef.current.numPages; i++) drawOverlay(i);
   }, [highlightKey, status, drawOverlay]);
 
-  // Scroll to first page that contains the highlighted text
+  // Scroll to highlight
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
     const needles = highlightsRef.current;
     if (!needles.length || !containerRef.current) return;
     setTimeout(async () => {
-      const pdf      = pdfDocRef.current;
+      const pdf = pdfDocRef.current;
       if (!pdf || !containerRef.current) return;
       const wrappers = Array.from(containerRef.current.querySelectorAll("[data-page]")) as HTMLDivElement[];
       for (const wrapper of wrappers) {
         const pageNum = Number(wrapper.dataset.page);
         const page    = await pdf.getPage(pageNum);
         const tc      = await page.getTextContent();
-        const txt     = (tc.items as any[]).map((i: any) => i.str).join(" ").toLowerCase();
-        if (needles.some(n => txt.includes(n.toLowerCase()))) {
-          wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
-          break;
-        }
+        const spaced  = (tc.items as any[]).map((i: any) => i.str).join(" ").toLowerCase();
+        const nospace = (tc.items as any[]).map((i: any) => i.str).join("").toLowerCase();
+        const hit = needles.some(n => {
+          const nl = n.toLowerCase().replace(/\s+/g, " ").trim();
+          return spaced.includes(nl) || nospace.includes(nl.replace(/\s+/g, ""));
+        });
+        if (hit) { wrapper.scrollIntoView({ behavior: "smooth", block: "start" }); break; }
       }
-    }, 150);
+    }, 200);
   }, [highlightKey, status]);
 
+  // Ctrl+wheel zoom at mouse position — doesn't interfere with normal scroll
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return; // normal scroll passes through
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.15 : 0.15;
+      const rect = el.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const scrollXBefore = el.scrollLeft;
+      const scrollYBefore = el.scrollTop;
+      setZoom(z => {
+        const newZoom = Math.min(3, Math.max(0.5, +(z + delta).toFixed(2)));
+        const ratio = newZoom / z;
+        requestAnimationFrame(() => {
+          el.scrollLeft = (scrollXBefore + mouseX) * ratio - mouseX;
+          el.scrollTop  = (scrollYBefore + mouseY) * ratio - mouseY;
+        });
+        return newZoom;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [status]);
+
+  // Click-to-zoom when zoomMode active
+  const handleContainerClick = (e: React.MouseEvent) => {
+    if (!zoomMode) return;
+    if (e.altKey) {
+      setZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)));
+    } else {
+      setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full bg-muted/30">
+    <div className="flex flex-col h-full" style={{ minHeight: 0 }}>
       {status === "loading" && (
-        <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
+        <div className="flex flex-col items-center justify-center flex-1 gap-3 text-muted-foreground">
           <Loader2 className="h-7 w-7 animate-spin text-primary" />
           <p className="text-sm">Rendering PDF…</p>
         </div>
       )}
       {status === "error" && (
-        <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
+        <div className="flex flex-col items-center justify-center flex-1 gap-3 text-center px-6">
           <AlertCircle className="h-8 w-8 text-destructive/70" />
           <p className="text-sm text-muted-foreground">Could not render PDF.</p>
         </div>
       )}
       {status === "ready" && (
-        <div
-          ref={containerRef}
-          className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
-          style={{ background: "hsl(var(--muted)/0.3)" }}
-        />
+        <>
+          {/* Zoom toolbar */}
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-background/80 shrink-0 gap-2">
+            <span className="text-[11px] text-muted-foreground/60 hidden sm:block">Ctrl+scroll to zoom</span>
+            <div className="flex items-center gap-1 ml-auto">
+              <button
+                onClick={() => setZoomMode(m => !m)}
+                title={zoomMode ? "Exit zoom mode (click zooms in, Alt+click zooms out)" : "Enter zoom mode"}
+                className={`h-6 w-6 flex items-center justify-center rounded transition-colors ${zoomMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted"}`}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                  <circle cx="6" cy="6" r="4.5"/>
+                  <line x1="9.5" y1="9.5" x2="13" y2="13"/>
+                  {zoomMode ? <><line x1="4" y1="6" x2="8" y2="6"/><line x1="6" y1="4" x2="6" y2="8"/></> : <line x1="4" y1="6" x2="8" y2="6"/>}
+                </svg>
+              </button>
+              <button onClick={() => setZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)))} disabled={zoom <= 0.5} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">−</button>
+              <button onClick={() => setZoom(1)} className="px-1.5 h-6 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors tabular-nums min-w-[2.8rem] text-center">{Math.round(zoom * 100)}%</button>
+              <button onClick={() => setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)))} disabled={zoom >= 3} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">+</button>
+            </div>
+          </div>
+          {/* Scrollable page container */}
+          <div
+            ref={containerRef}
+            onClick={handleContainerClick}
+            className="flex-1 overflow-auto p-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
+            style={{
+              background: "hsl(var(--muted)/0.3)",
+              cursor: zoomMode ? (zoom >= 3 ? "zoom-out" : "zoom-in") : "default",
+              minHeight: 0,
+            }}
+          />
+        </>
       )}
     </div>
   );
@@ -1058,7 +1140,11 @@ const Chat = () => {
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
+  const docsPanelOpenRef = useRef(false);
+  docsPanelOpenRef.current = docsPanelOpen;
   const [convsPanelOpen, setConvsPanelOpen] = useState(false);
+  const convsPanelOpenRef = useRef(false);
+  convsPanelOpenRef.current = convsPanelOpen;
   const [bubbleDoc, setBubbleDoc] = useState<Document | null>(null);
   const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
   const bubbleViewerRef = useRef<ViewerState | null>(null);
@@ -1114,13 +1200,14 @@ const Chat = () => {
     // Read from ref — never stale, even in async callbacks
     const current = bubbleViewerRef.current;
 
-    // Same doc already open and loaded — just move the highlight, no panel touch at all
+    // Always ensure the panel is open (works whether panel was open or closed)
+    setDocsPanelOpen(true);
+
+    // Same doc already open and loaded — just move the highlight, no reload
     if (current && current.doc.document_id === doc.document_id && !current.loading && !current.error) {
       setBubbleViewer(prev => prev ? { ...prev, highlightText, highlightLines, highlightKey: (prev.highlightKey ?? 0) + 1 } : prev);
       return;
     }
-
-    setDocsPanelOpen(true);
 
     const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
     const isPdfOrImage = ext === 'pdf' || IMAGE_EXTS.includes(`.${ext}`);
@@ -1287,16 +1374,16 @@ const Chat = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Close docs panel when clicking outside
+  // Close docs panel when clicking outside — registered once, reads ref so never stale
   useEffect(() => {
-    if (!docsPanelOpen) return;
     const handler = (e: MouseEvent) => {
+      if (!docsPanelOpenRef.current) return;
       const target = e.target as HTMLElement;
-      if (!target.closest("[data-docs-panel]")) { setDocsPanelOpen(false); setBubbleDoc(null); setBubbleViewer(null); }
+      if (!target.closest("[data-docs-panel]") && !target.closest("[data-open-doc]")) setDocsPanelOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [docsPanelOpen]);
+  }, []); // empty deps — ref keeps it fresh
 
   // Scroll bubble text viewer to highlighted mark when highlight changes
   useEffect(() => {
@@ -1307,16 +1394,16 @@ const Chat = () => {
     container.scrollTo({ top: container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2, behavior: "smooth" });
   }, [bubbleViewer?.highlightKey]);
 
-  // Close convs panel when clicking outside
+  // Close convs panel when clicking outside — registered once, reads ref so never stale
   useEffect(() => {
-    if (!convsPanelOpen) return;
     const handler = (e: MouseEvent) => {
+      if (!convsPanelOpenRef.current) return;
       const target = e.target as HTMLElement;
       if (!target.closest("[data-convs-panel]")) setConvsPanelOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [convsPanelOpen]);
+  }, []);
 
   // Load documents on mount
   useEffect(() => {
@@ -1947,7 +2034,7 @@ const Chat = () => {
             {/* ── Documents bubble ── */}
             <div className="relative" data-docs-panel>
               <button
-                onClick={() => { setDocsPanelOpen(p => !p); if (docsPanelOpen) { setBubbleDoc(null); setBubbleViewer(null); } }}
+                onClick={() => { const next = !docsPanelOpenRef.current; docsPanelOpenRef.current = next; setDocsPanelOpen(next); }}
                 className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
                   docsPanelOpen
                     ? "bg-primary text-primary-foreground border-primary shadow-sm"
@@ -1966,20 +2053,22 @@ const Chat = () => {
                 )}
               </button>
 
-              <AnimatePresence>
-                {docsPanelOpen && (
-                  <motion.div
-                    key={bubbleDoc ? "viewer" : "list"}
-                    initial={{ opacity: 0, scale: 0.9, y: -6 }}
-                    animate={{ opacity: 1, scale: 1, y: 0,
-                      width: bubbleDoc ? 520 : 288,
-                      height: bubbleDoc ? 640 : "auto",
-                    }}
-                    exit={{ opacity: 0, scale: 0.9, y: -6 }}
-                    transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-                    className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
-                    style={{ transformOrigin: "top right", minWidth: 288 }}
-                  >
+              {/* Always-mounted — CSS transitions only, React state inside never destroyed */}
+              <div
+                className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-50 flex flex-col"
+                style={{
+                  transformOrigin: "top right",
+                  width: bubbleDoc ? 520 : 288,
+                  height: bubbleDoc ? 640 : "auto",
+                  maxHeight: bubbleDoc ? 640 : 400,
+                  overflow: bubbleDoc ? "hidden" : "visible",
+                  transition: "width 0.22s cubic-bezier(0.4,0,0.2,1), height 0.22s cubic-bezier(0.4,0,0.2,1), opacity 0.18s, transform 0.18s",
+                  opacity: docsPanelOpen ? 1 : 0,
+                  transform: docsPanelOpen ? "scale(1) translateY(0)" : "scale(0.92) translateY(-6px)",
+                  pointerEvents: docsPanelOpen ? "auto" : "none",
+                  minHeight: 0,
+                }}
+              >
                     {/* ── Doc list view ── */}
                     {!bubbleDoc && (
                       <>
@@ -2079,7 +2168,7 @@ const Chat = () => {
                         </div>
 
                         {/* Viewer content */}
-                        <div className="flex-1 overflow-hidden">
+                        <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
                           {bubbleViewer.loading && (
                             <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
                               <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -2113,9 +2202,7 @@ const Chat = () => {
                         </div>
                       </>
                     )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                </div>
             </div>
             <ThemeToggle />
           </div>
@@ -2301,7 +2388,8 @@ const Chat = () => {
                                     <span className="text-[12px] font-semibold text-foreground truncate">{cardTitle}</span>
                                     <ExternalLink
                                       className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
-                                      onClick={(e) => {
+                                      data-open-doc
+                                    onClick={(e) => {
                                         e.stopPropagation();
                                         // Open viewer and highlight all excerpts as separate spans
                                         openDocumentAtExcerpts(source.filename, excerpts.length > 0 ? excerpts : [source.excerpt ?? ""]);
@@ -2331,6 +2419,7 @@ const Chat = () => {
                                         <button
                                           key={li}
                                           className="w-full text-left px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
+                                          data-open-doc
                                           onClick={() => openDocumentAtExcerpt(source.filename, excerpt)}
                                         >
                                           <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
@@ -2496,6 +2585,9 @@ const Chat = () => {
               </div>
             </div>
           </div>
+          <p className="text-center text-[11px] text-muted-foreground/50 mt-2 select-none">
+            This agent can make mistakes — be sure to verify results.
+          </p>
         </div>
       </div>
 
