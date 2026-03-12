@@ -662,22 +662,22 @@ function loadPdfJs(): Promise<any> {
 const HIGHLIGHT_COLOR = "rgba(253, 224, 71, 0.45)"; // yellow-300 at 45%
 
 const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlightLines, highlightKey }) => {
-  const containerRef  = useRef<HTMLDivElement>(null);
-  const pdfDocRef     = useRef<any>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [zoom, setZoom]     = useState(1.0);
-  const [zoomMode, setZoomMode] = useState(false); // magnifier cursor mode
-  const renderQueueRef = useRef<number[]>([]);
-  const renderingRef   = useRef(false);
-  const viewportsRef   = useRef<Map<number, { viewport: any; baseScale: number }>>(new Map());
-  const zoomRef        = useRef(1.0);
-  zoomRef.current      = zoom;
+  // outerRef: the scrollable viewport div
+  // innerRef: the CSS-transformed content div (never re-rendered on zoom)
+  const outerRef   = useRef<HTMLDivElement>(null);
+  const innerRef   = useRef<HTMLDivElement>(null);
+  const pdfDocRef  = useRef<any>(null);
+  const [status, setStatus]   = useState<"loading" | "ready" | "error">("loading");
+  const [zoom, setZoom]       = useState(1.0);   // React state only for toolbar display
+  const [zoomMode, setZoomMode] = useState(false);
+  const zoomRef    = useRef(1.0);  // always-current zoom, no closure staleness
 
   const highlightsRef = useRef<string[]>([]);
   highlightsRef.current = [...new Set(
     [...(highlightLines ?? []), ...(highlightText ? [highlightText] : [])].filter(Boolean)
   )];
 
+  // ── Text-match helper ──────────────────────────────────────────────────────
   const findMatchingItems = (
     items: Array<{ str: string; transform: number[] }>,
     needle: string
@@ -706,10 +706,14 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     return [...hit];
   };
 
+  // ── Draw highlight overlay for one page ───────────────────────────────────
+  const viewportsRef = useRef<Map<number, any>>(new Map());
+
   const drawOverlay = useCallback(async (pageNum: number) => {
     const pdf = pdfDocRef.current;
-    if (!pdf || !containerRef.current) return;
-    const wrapper = containerRef.current.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
+    const inner = innerRef.current;
+    if (!pdf || !inner) return;
+    const wrapper = inner.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
     if (!wrapper) return;
     const overlay = wrapper.querySelector("canvas.hl-overlay") as HTMLCanvasElement | null;
     if (!overlay) return;
@@ -717,9 +721,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     ctx.clearRect(0, 0, overlay.width, overlay.height);
     const needles = highlightsRef.current;
     if (!needles.length) return;
-    const entry = viewportsRef.current.get(pageNum);
-    if (!entry) return;
-    const { viewport } = entry;
+    const viewport = viewportsRef.current.get(pageNum);
+    if (!viewport) return;
     const page = await pdf.getPage(pageNum);
     const tc   = await page.getTextContent();
     const items = tc.items as Array<{ str: string; transform: number[] }>;
@@ -738,79 +741,87 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     ctx.restore();
   }, []);
 
+  // ── Render a single page (canvas at 2× for crisp text) ────────────────────
   const renderPage = useCallback(async (pageNum: number) => {
-    const pdf = pdfDocRef.current;
-    if (!pdf || !containerRef.current) return;
-    const container = containerRef.current;
-    const existing  = container.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
-    try {
-      const page           = await pdf.getPage(pageNum);
-      const availableWidth = container.clientWidth - 32;
-      const baseViewport   = page.getViewport({ scale: 1 });
-      const baseScale      = availableWidth / baseViewport.width;
-      const scale          = Math.max(baseScale * zoomRef.current, 0.3);
-      const viewport       = page.getViewport({ scale });
-      viewportsRef.current.set(pageNum, { viewport, baseScale });
-      const w = Math.floor(viewport.width), h = Math.floor(viewport.height);
+    const pdf   = pdfDocRef.current;
+    const inner = innerRef.current;
+    const outer = outerRef.current;
+    if (!pdf || !inner || !outer) return;
 
-      let pgCanvas: HTMLCanvasElement, hlCanvas: HTMLCanvasElement, wrapper: HTMLDivElement;
-      if (existing) {
-        wrapper  = existing;
-        pgCanvas = wrapper.querySelector("canvas.pg-canvas")!;
-        hlCanvas = wrapper.querySelector("canvas.hl-overlay")!;
-        if (pgCanvas.width === w && pgCanvas.height === h) { await drawOverlay(pageNum); return; }
-        wrapper.style.width  = w + "px";
-        wrapper.style.height = h + "px";
-        pgCanvas.width = hlCanvas.width  = w;
-        pgCanvas.height = hlCanvas.height = h;
-      } else {
+    try {
+      const page     = await pdf.getPage(pageNum);
+      const DPR      = Math.min(window.devicePixelRatio || 1, 2); // 2× max
+      const availW   = outer.clientWidth - 32;
+      const baseVP   = page.getViewport({ scale: 1 });
+      const baseScale = availW / baseVP.width;
+      // Render at base scale × DPR for crispness; CSS will scale back down via width/height
+      const viewport = page.getViewport({ scale: baseScale * DPR });
+      viewportsRef.current.set(pageNum, viewport);
+
+      const cssW = Math.floor(baseScale * baseVP.width);
+      const cssH = Math.floor(baseScale * baseVP.height);
+      const pxW  = Math.floor(viewport.width);
+      const pxH  = Math.floor(viewport.height);
+
+      // Build or reuse wrapper
+      let wrapper = inner.querySelector(`[data-page="${pageNum}"]`) as HTMLDivElement | null;
+      let pgCanvas: HTMLCanvasElement;
+      let hlCanvas: HTMLCanvasElement;
+
+      if (!wrapper) {
         wrapper = document.createElement("div");
         wrapper.dataset.page  = String(pageNum);
-        wrapper.style.cssText = `position:relative;margin:0 auto 12px;box-shadow:0 1px 8px rgba(0,0,0,.25);background:#fff;width:${w}px;height:${h}px;flex-shrink:0;`;
+        wrapper.style.cssText = `position:relative;margin:0 auto 12px;box-shadow:0 1px 8px rgba(0,0,0,.25);background:#fff;flex-shrink:0;`;
         pgCanvas = document.createElement("canvas");
-        pgCanvas.className     = "pg-canvas";
-        pgCanvas.width         = w; pgCanvas.height = h;
-        pgCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;";
+        pgCanvas.className = "pg-canvas";
+        pgCanvas.style.cssText = "position:absolute;top:0;left:0;";
         hlCanvas = document.createElement("canvas");
-        hlCanvas.className     = "hl-overlay";
-        hlCanvas.width         = w; hlCanvas.height = h;
-        hlCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;";
+        hlCanvas.className = "hl-overlay";
+        hlCanvas.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;";
         wrapper.appendChild(pgCanvas);
         wrapper.appendChild(hlCanvas);
-        const siblings     = Array.from(container.querySelectorAll("[data-page]"));
+        const siblings     = Array.from(inner.querySelectorAll("[data-page]"));
         const insertBefore = siblings.find(s => Number((s as HTMLElement).dataset.page) > pageNum);
-        if (insertBefore) container.insertBefore(wrapper, insertBefore);
-        else container.appendChild(wrapper);
+        if (insertBefore) inner.insertBefore(wrapper, insertBefore);
+        else inner.appendChild(wrapper);
+      } else {
+        pgCanvas = wrapper.querySelector("canvas.pg-canvas")!;
+        hlCanvas = wrapper.querySelector("canvas.hl-overlay")!;
       }
+
+      // Set CSS size (layout size — zoom via CSS transform on innerRef, not here)
+      wrapper.style.width  = cssW + "px";
+      wrapper.style.height = cssH + "px";
+      // Canvas pixel size = CSS size × DPR for sharpness
+      pgCanvas.width  = pxW;  pgCanvas.height  = pxH;
+      pgCanvas.style.width  = cssW + "px"; pgCanvas.style.height = cssH + "px";
+      hlCanvas.width  = pxW;  hlCanvas.height  = pxH;
+      hlCanvas.style.width  = cssW + "px"; hlCanvas.style.height = cssH + "px";
+
       const ctx = pgCanvas.getContext("2d")!;
-      ctx.clearRect(0, 0, w, h);
+      ctx.clearRect(0, 0, pxW, pxH);
       await page.render({ canvasContext: ctx, viewport }).promise;
       await drawOverlay(pageNum);
     } catch { /* skip */ }
   }, [drawOverlay]);
 
-  const processQueue = useCallback(async () => {
-    if (renderingRef.current) return;
-    renderingRef.current = true;
-    while (renderQueueRef.current.length > 0) {
-      const next = renderQueueRef.current.shift()!;
-      await renderPage(next);
-    }
-    renderingRef.current = false;
-  }, [renderPage]);
-
-  const enqueuePages = useCallback((pages: number[]) => {
-    for (const p of pages) {
-      if (!renderQueueRef.current.includes(p)) renderQueueRef.current.push(p);
-    }
-    processQueue();
-  }, [processQueue]);
-
-  // Load PDF
+  // ── Load PDF — render all pages once, never again ─────────────────────────
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading"); setZoom(1); setZoomMode(false);
+    setStatus("loading");
+    zoomRef.current = 1.0;
+    setZoom(1.0);
+    setZoomMode(false);
+    naturalSizeRef.current = null;
+    translateRef.current   = { x: 0, y: 0 };
+    // Reset inner transform
+    if (innerRef.current) {
+      innerRef.current.style.transform = "";
+      innerRef.current.style.width     = "";
+      innerRef.current.style.height    = "";
+    }
     viewportsRef.current.clear();
+
     (async () => {
       try {
         const lib = await loadPdfJs();
@@ -818,46 +829,56 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
         if (cancelled) return;
         pdfDocRef.current = pdf;
         setStatus("ready");
-        enqueuePages(Array.from({ length: pdf.numPages }, (_, i) => i + 1));
+        // Render pages sequentially
+        for (let i = 1; i <= pdf.numPages; i++) {
+          if (cancelled) return;
+          await renderPage(i);
+        }
       } catch { if (!cancelled) setStatus("error"); }
     })();
     return () => { cancelled = true; };
-  }, [blobUrl, enqueuePages]);
+  }, [blobUrl, renderPage]);
 
-  // Resize
+  // ── Resize — re-render pages (layout width changed) ───────────────────────
   useEffect(() => {
-    if (!containerRef.current) return;
+    const el = outerRef.current;
+    if (!el) return;
     const ro = new ResizeObserver(() => {
       if (status !== "ready" || !pdfDocRef.current) return;
-      enqueuePages(Array.from({ length: pdfDocRef.current.numPages }, (_, i) => i + 1));
+      // Reset zoom transform first so available width is accurate
+      if (innerRef.current) {
+        innerRef.current.style.transform = "";
+        innerRef.current.style.width     = "";
+        innerRef.current.style.height    = "";
+      }
+      naturalSizeRef.current = null;
+      translateRef.current   = { x: 0, y: 0 };
+      zoomRef.current = 1.0;
+      setZoom(1.0);
+      const pdf = pdfDocRef.current;
+      (async () => {
+        for (let i = 1; i <= pdf.numPages; i++) await renderPage(i);
+      })();
     });
-    ro.observe(containerRef.current);
+    ro.observe(el);
     return () => ro.disconnect();
-  }, [status, enqueuePages]);
+  }, [status, renderPage]);
 
-  // Zoom → re-render all pages
-  useEffect(() => {
-    if (status !== "ready" || !pdfDocRef.current) return;
-    if (containerRef.current) containerRef.current.querySelectorAll("[data-page]").forEach(el => el.remove());
-    viewportsRef.current.clear();
-    enqueuePages(Array.from({ length: pdfDocRef.current.numPages }, (_, i) => i + 1));
-  }, [zoom, status, enqueuePages]);
-
-  // Highlight change
+  // ── Highlight change ───────────────────────────────────────────────────────
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
     for (let i = 1; i <= pdfDocRef.current.numPages; i++) drawOverlay(i);
   }, [highlightKey, status, drawOverlay]);
 
-  // Scroll to highlight
+  // ── Scroll to highlight ────────────────────────────────────────────────────
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
     const needles = highlightsRef.current;
-    if (!needles.length || !containerRef.current) return;
+    if (!needles.length || !innerRef.current) return;
     setTimeout(async () => {
       const pdf = pdfDocRef.current;
-      if (!pdf || !containerRef.current) return;
-      const wrappers = Array.from(containerRef.current.querySelectorAll("[data-page]")) as HTMLDivElement[];
+      if (!pdf || !innerRef.current) return;
+      const wrappers = Array.from(innerRef.current.querySelectorAll("[data-page]")) as HTMLDivElement[];
       for (const wrapper of wrappers) {
         const pageNum = Number(wrapper.dataset.page);
         const page    = await pdf.getPage(pageNum);
@@ -873,41 +894,149 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     }, 200);
   }, [highlightKey, status]);
 
-  // Ctrl+wheel zoom at mouse position — doesn't interfere with normal scroll
+  // ── Core zoom function ────────────────────────────────────────────────────
+  // Use translate+scale so the focal point stays exactly under the mouse.
+  // No scroll math — we track a cumulative translate offset instead.
+  const naturalSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const translateRef   = useRef({ x: 0, y: 0 });
+
+  const applyZoom = useCallback((newZoom: number, focalX: number, focalY: number) => {
+    const outer = outerRef.current;
+    const inner = innerRef.current;
+    if (!outer || !inner) return;
+
+    const oldZoom = zoomRef.current;
+    const ratio   = newZoom / oldZoom;
+
+    if (!naturalSizeRef.current) {
+      naturalSizeRef.current = { w: inner.offsetWidth, h: inner.offsetHeight };
+    }
+    const { w: natW, h: natH } = naturalSizeRef.current;
+
+    // Current translate
+    const tx = translateRef.current.x;
+    const ty = translateRef.current.y;
+
+    // Focal point relative to the scaled+translated content origin
+    const originX = focalX - tx;
+    const originY = focalY - ty;
+
+    // New translate: scale around the focal point
+    const newTx = focalX - originX * ratio;
+    const newTy = focalY - originY * ratio;
+
+    translateRef.current = { x: newTx, y: newTy };
+    zoomRef.current = newZoom;
+
+    inner.style.transformOrigin = "0 0";
+    inner.style.transform       = `translate(${newTx}px, ${newTy}px) scale(${newZoom})`;
+    inner.style.width           = `${natW}px`;
+    inner.style.height          = `${natH}px`;
+
+    setZoom(newZoom);
+  }, []);
+
+  // ── All wheel events handled manually — no native overflow scroll ──────────
+  // We use overflow-hidden on the outer div so the browser NEVER gets a chance
+  // to scroll natively. Every wheel event (plain scroll OR ctrl+zoom) goes
+  // through our handler, eliminating the scroll-then-zoom race entirely.
+  const applyZoomRef = useRef(applyZoom);
+  useEffect(() => { applyZoomRef.current = applyZoom; }, [applyZoom]);
+
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return; // normal scroll passes through
-      e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.15 : 0.15;
-      const rect = el.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      const scrollXBefore = el.scrollLeft;
-      const scrollYBefore = el.scrollTop;
-      setZoom(z => {
-        const newZoom = Math.min(3, Math.max(0.5, +(z + delta).toFixed(2)));
-        const ratio = newZoom / z;
-        requestAnimationFrame(() => {
-          el.scrollLeft = (scrollXBefore + mouseX) * ratio - mouseX;
-          el.scrollTop  = (scrollYBefore + mouseY) * ratio - mouseY;
-        });
-        return newZoom;
-      });
+    const el = outerRef.current;
+    if (!el || status !== "ready") return;
+
+    // rAF-batched state so multiple wheel events per frame collapse into one DOM write
+    let pending: { deltaY: number; deltaX: number; clientX: number; clientY: number; isZoom: boolean } | null = null;
+    let rafId = 0;
+
+    const flush = () => {
+      if (!pending) return;
+      const { deltaY, deltaX, clientX, clientY, isZoom } = pending;
+      pending = null;
+
+      if (isZoom) {
+        const factor  = deltaY > 0 ? 0.88 : 1.0 / 0.88;
+        const newZoom = Math.min(4, Math.max(0.3, zoomRef.current * factor));
+        const rect    = el.getBoundingClientRect();
+        applyZoomRef.current(newZoom, clientX - rect.left, clientY - rect.top);
+      } else {
+        // Plain scroll — shift the translate
+        const inner = innerRef.current;
+        if (!inner) return;
+        // Snapshot natural size on demand if reset cleared it
+        if (!naturalSizeRef.current) {
+          naturalSizeRef.current = { w: inner.offsetWidth, h: inner.offsetHeight };
+        }
+        const { w: natW, h: natH } = naturalSizeRef.current;
+        const z = zoomRef.current;
+        const maxX = -(natW * z - el.clientWidth);
+        const maxY = -(natH * z - el.clientHeight);
+        const newTx = Math.min(0, Math.max(maxX, translateRef.current.x - deltaX));
+        const newTy = Math.min(0, Math.max(maxY, translateRef.current.y - deltaY));
+        translateRef.current = { x: newTx, y: newTy };
+        inner.style.transform = `translate(${newTx}px, ${newTy}px) scale(${z})`;
+      }
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const isZoom = e.ctrlKey || e.metaKey;
+      if (pending && pending.isZoom !== isZoom) {
+        // Mode switched mid-batch — flush immediately before accumulating
+        cancelAnimationFrame(rafId);
+        flush();
+      }
+      pending = {
+        deltaY:  (pending?.deltaY  ?? 0) + e.deltaY,
+        deltaX:  (pending?.deltaX  ?? 0) + e.deltaX,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        isZoom,
+      };
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(flush);
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => {
+      el.removeEventListener("wheel", onWheel, { capture: true } as any);
+      cancelAnimationFrame(rafId);
+    };
   }, [status]);
 
-  // Click-to-zoom when zoomMode active
+  // ── Toolbar buttons ────────────────────────────────────────────────────────
+  const toolbarZoom = useCallback((newZoom: number) => {
+    const outer = outerRef.current;
+    const inner = innerRef.current;
+    if (!outer || !inner) return;
+
+    if (newZoom === 1) {
+      // Full reset — wipe transform and all offsets back to initial fit
+      translateRef.current   = { x: 0, y: 0 };
+      naturalSizeRef.current = null;
+      zoomRef.current        = 1;
+      inner.style.transform  = "";
+      inner.style.width      = "";
+      inner.style.height     = "";
+      setZoom(1);
+      return;
+    }
+
+    applyZoom(newZoom, outer.clientWidth / 2, outer.clientHeight / 2);
+  }, [applyZoom]);
+
+  // ── Click-to-zoom ──────────────────────────────────────────────────────────
   const handleContainerClick = (e: React.MouseEvent) => {
     if (!zoomMode) return;
-    if (e.altKey) {
-      setZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)));
-    } else {
-      setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
-    }
+    const outer = outerRef.current;
+    if (!outer) return;
+    const rect  = outer.getBoundingClientRect();
+    const factor = e.altKey ? 0.8 : 1.25;
+    const newZoom = Math.min(4, Math.max(0.3, zoomRef.current * factor));
+    applyZoom(newZoom, e.clientX - rect.left, e.clientY - rect.top);
   };
 
   return (
@@ -932,7 +1061,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
             <div className="flex items-center gap-1 ml-auto">
               <button
                 onClick={() => setZoomMode(m => !m)}
-                title={zoomMode ? "Exit zoom mode (click zooms in, Alt+click zooms out)" : "Enter zoom mode"}
+                title={zoomMode ? "Exit zoom mode" : "Click-to-zoom mode"}
                 className={`h-6 w-6 flex items-center justify-center rounded transition-colors ${zoomMode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-muted"}`}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
@@ -941,22 +1070,28 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
                   {zoomMode ? <><line x1="4" y1="6" x2="8" y2="6"/><line x1="6" y1="4" x2="6" y2="8"/></> : <line x1="4" y1="6" x2="8" y2="6"/>}
                 </svg>
               </button>
-              <button onClick={() => setZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)))} disabled={zoom <= 0.5} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">−</button>
-              <button onClick={() => setZoom(1)} className="px-1.5 h-6 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors tabular-nums min-w-[2.8rem] text-center">{Math.round(zoom * 100)}%</button>
-              <button onClick={() => setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)))} disabled={zoom >= 3} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">+</button>
+              <button onClick={() => toolbarZoom(Math.max(0.3, zoomRef.current / 1.25))} disabled={zoom <= 0.3} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">−</button>
+              <button onClick={() => toolbarZoom(1)} className="px-1.5 h-6 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors tabular-nums min-w-[2.8rem] text-center">{Math.round(zoom * 100)}%</button>
+              <button onClick={() => toolbarZoom(Math.min(4, zoomRef.current * 1.25))} disabled={zoom >= 4} className="h-6 w-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 transition-colors font-bold text-sm select-none">+</button>
             </div>
           </div>
-          {/* Scrollable page container */}
+          {/* Scrollable outer viewport */}
           <div
-            ref={containerRef}
+            ref={outerRef}
             onClick={handleContainerClick}
-            className="flex-1 overflow-auto p-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
+            className="flex-1 overflow-hidden scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
             style={{
               background: "hsl(var(--muted)/0.3)",
-              cursor: zoomMode ? (zoom >= 3 ? "zoom-out" : "zoom-in") : "default",
+              cursor: zoomMode ? (zoom >= 4 ? "zoom-out" : "zoom-in") : "default",
               minHeight: 0,
             }}
-          />
+          >
+            {/* Inner div — CSS scaled, never wiped during zoom */}
+            <div
+              ref={innerRef}
+              style={{ transformOrigin: "0 0", display: "flex", flexDirection: "column", alignItems: "center", padding: "16px" }}
+            />
+          </div>
         </>
       )}
     </div>
@@ -2009,17 +2144,19 @@ const Chat = () => {
                               >
                                 <div className="flex items-start justify-between gap-2">
                                   <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
-                                  <span className="text-[10px] text-muted-foreground/60 shrink-0 mt-0.5 tabular-nums">
-                                    {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
-                                  </span>
+                                  <div className="shrink-0 flex items-center mt-0.5">
+                                    <span className="text-[10px] text-muted-foreground/60 tabular-nums group-hover:hidden">
+                                      {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
+                                    </span>
+                                    <button
+                                      onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
+                                      className="hidden group-hover:flex items-center justify-center p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </div>
                                 </div>
-                                <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2 pr-4">{conv.preview}</p>
-                                <button
-                                  onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
-                                  className="absolute right-2 top-2.5 opacity-0 group-hover:opacity-100 p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all"
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
+                                <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{conv.preview}</p>
                               </div>
                             ))
                           }
