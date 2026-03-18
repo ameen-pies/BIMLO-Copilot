@@ -665,11 +665,13 @@ class RAGEngine:
         routing_prompt = f"""You are a router. Pick exactly one route for this query.
 
 ROUTES:
-- direct: greetings, small talk, thanks, casual chat
+- direct: greetings, small talk, thanks, casual chat, questions about the conversation itself (e.g. "what did I just say", "what is my name", "do you remember", "what was your last answer"), corrections or clarifications about the conversation (e.g. "no that's wrong", "I meant X", "ur name not mine"), any question that can be answered from the conversation history WITHOUT looking up documents
 - transform: the user wants to produce a NEW VERSION of document content in a different form — e.g. translate the document to another language, rewrite or paraphrase the whole document, reformat the entire document. The output IS the transformed document. No sources needed.
 - rag: the user wants to LEARN from documents — ask a question, get a summary with cited facts, understand what is in the documents, extract specific information. Sources and citations are expected.
 - iterative_rag: like rag but requires looking across multiple documents (comparisons, differences)
 - analytics: aggregated statistics across ALL documents (totals, counts, averages across the whole set)
+
+KEY RULE: If the query can be answered from the conversation history alone — without looking at any document — always pick "direct". Do NOT route to rag just because no document-keyword is present.
 
 TO DECIDE BETWEEN transform AND rag, ask yourself:
 - Would the user be satisfied with a cited, structured answer that explains the content? → rag
@@ -721,14 +723,30 @@ Reply with ONE word only — the route name."""
             print("transform (fallback)")
             return {**state, "route": "transform"}
 
-        # Direct answer - expanded keywords for casual messages
+        # Direct answer — casual messages and anything that references the
+        # conversation itself rather than the documents.
+        # The fallback heuristic: if there are NO document-domain signals and
+        # NO comparison/transform signals, treat as direct.  This is intentionally
+        # broad — the LLM router handles nuance; the fallback just needs to avoid
+        # misrouting obvious non-document queries to RAG.
         casual_keywords = [
             "hello", "hi", "hey", "yo", "wassup", "sup", "what's up", "whats up",
             "thanks", "thank you", "who are you", "bonjour", "merci", "salut",
-            "how are you", "how's it going", "hows it going", "what's good", "whats good"
+            "how are you", "how's it going", "hows it going", "what's good", "whats good",
         ]
         if any(kw in query for kw in casual_keywords):
             print("direct (fallback)")
+            return {**state, "route": "direct"}
+
+        # If the query is short and contains no document-search signals,
+        # default to direct rather than RAG.
+        doc_signals = ["document", "file", "show", "find", "what does", "according",
+                       "tell me about", "explain", "summarize", "summary", "report"]
+        is_short = len(query.split()) <= 8
+        has_doc_signal = any(kw in query for kw in doc_signals)
+        has_question_word = any(query.startswith(w) for w in ["what", "who", "when", "where", "how", "why", "which"])
+        if is_short and has_question_word and not has_doc_signal:
+            print("direct (fallback — short conversational question)")
             return {**state, "route": "direct"}
 
         # Iterative RAG for complex queries
@@ -763,24 +781,30 @@ Reply with ONE word only — the route name."""
         }
     
     def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None) -> str:
-        """Generate a direct answer following the judge's plan, with conversation history."""
-        
-        messages: List[Dict] = []
+        """Generate a direct answer using conversation history as the primary context."""
 
-        # Inject history so the model remembers previous turns
+        messages: List[Dict] = [
+            {
+                "role": "system",
+                "content": (
+                    f"You are Bimlo Copilot, a helpful AI document assistant. "
+                    f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
+                    f"Use the conversation history to answer questions about what was said earlier — "
+                    f"names, corrections, prior answers. Keep replies brief and natural."
+                ),
+            }
+        ]
+
+        # Inject the real conversation history so memory recall works correctly.
+        # We use the raw history messages directly — this preserves the natural
+        # conversation structure so the model can reference any prior turn.
         if history:
-            messages.extend(history[-10:])  # cap at last 10 turns
+            for msg in history[-10:]:  # cap at last 10 turns
+                messages.append({"role": msg["role"], "content": msg["content"]})
 
-        prompt = f"""Respond to this query in {plan.target_language} using a {plan.target_tone} tone.
+        # Current query as the final user turn
+        messages.append({"role": "user", "content": query})
 
-User Query: {query}
-
-Approach: {plan.approach}
-
-Keep it brief and friendly. Respond ONLY in {plan.target_language}."""
-
-        messages.append({"role": "user", "content": prompt})
-        
         if self.llm.enabled:
             return self.llm.chat(messages)
         else:

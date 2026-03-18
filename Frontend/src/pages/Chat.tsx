@@ -1226,10 +1226,12 @@ function serializeError(err: unknown): string {
  * Direct POST to /query with a correctly-formed JSON body.
  * Falls back gracefully if api.query() has a broken serialisation or
  * wrong field name — this always sends { "query": "...", "top_k": 5 }.
+ * Passes conversation_history so the backend can use prior turns as context.
  */
 async function queryBackend(
   question: string,
   signal?: AbortSignal,
+  conversationHistory?: Array<{ role: string; content: string }>,
 ): Promise<{ answer: string; raw_answer?: string; sources: Source[]; confidence: number }> {
   // Derive base URL the same way api.ts does (VITE env var → localhost fallback)
   const base =
@@ -1240,7 +1242,11 @@ async function queryBackend(
   const res = await fetch(`${base}/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query: question, top_k: 5 }),
+    body: JSON.stringify({
+      query: question,
+      top_k: 5,
+      conversation_history: conversationHistory ?? [],
+    }),
     signal,
   });
 
@@ -1754,9 +1760,14 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
+      // Build conversation history so the backend has prior context for follow-up queries
+      const historyForBackend = messages
+        .filter(m => !m.id.startsWith("welcome"))
+        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
+
       // Query the RAG system — use direct fetch to guarantee correct payload format
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(trimmedInput, abortControllerRef.current.signal);
+      const response = await queryBackend(trimmedInput, abortControllerRef.current.signal, historyForBackend);
 
       // Create assistant message with sources
       const assistantMsg: Message = {
@@ -1844,8 +1855,14 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
+      // Only pass history up to the edited message for clean context
+      const editHistoryForBackend = messages
+        .slice(0, msgIndex)
+        .filter(m => !m.id.startsWith("welcome"))
+        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
+
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(newContent, abortControllerRef.current.signal);
+      const response = await queryBackend(newContent, abortControllerRef.current.signal, editHistoryForBackend);
 
       const assistantMsg: Message = {
         id: Date.now().toString(),
@@ -1886,8 +1903,13 @@ const Chat = () => {
     setMessages(prev => prev.filter(m => m.id !== msgId));
     setIsLoading(true);
     try {
+      // Pass history excluding the message being redone
+      const redoHistoryForBackend = messages
+        .filter(m => m.id !== msgId && !m.id.startsWith("welcome"))
+        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
+
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(prevUserMsg.content, abortControllerRef.current.signal);
+      const response = await queryBackend(prevUserMsg.content, abortControllerRef.current.signal, redoHistoryForBackend);
       const redoMsg: Message = {
         id: Date.now().toString(),
         role: "assistant",
