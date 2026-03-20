@@ -561,31 +561,36 @@ interface DocumentViewerProps {
 
 function findExcerptRange(content: string, excerpt: string): [number, number] | null {
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const exactRe = new RegExp(excerpt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i');
+  const clean = (s: string) => s.replace(/\*\*/g, '').replace(/\[\d+\]/g, '').trim();
+  const needle = clean(excerpt);
+  if (!needle) return null;
+
+  // Strategy 1: exact match with flexible whitespace
+  const exactRe = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i');
   const exactM = exactRe.exec(content);
-  if (exactM) {
-    const ls = content.lastIndexOf('\n', exactM.index) + 1;
-    const le = content.indexOf('\n', exactM.index + exactM[0].length);
-    return [ls, le === -1 ? content.length : le];
+  if (exactM) return [exactM.index, exactM.index + exactM[0].length];
+
+  // Strategy 2: sliding window of 5 consecutive words — finds partial matches
+  const words = needle.split(/\s+/).filter(Boolean);
+  const windowSize = Math.min(5, words.length);
+  for (let start = 0; start <= words.length - windowSize; start++) {
+    const probe = words.slice(start, start + windowSize);
+    const re = new RegExp('(' + probe.map(esc).join('[\\s.,;:-]{0,6}') + ')', 'i');
+    const m = re.exec(content);
+    if (m) return [m.index, m.index + m[0].length];
   }
-  const words = excerpt.trim().split(/\s+/).filter(Boolean);
-  if (words.length >= 2) {
-    const m = new RegExp(`(${words.map(esc).join('[\\s\\S]{0,8}')})`, 'i').exec(content);
-    if (m) {
-      const ls = content.lastIndexOf('\n', m.index) + 1;
-      const le = content.indexOf('\n', m.index + m[0].length);
-      return [ls, le === -1 ? content.length : le];
-    }
+
+  // Strategy 3: two longest significant words together
+  const stop = new Set(['the','and','for','are','was','with','this','that','from','have','been','they','will','has']);
+  const sig = words.filter(w => w.length >= 4 && !stop.has(w.toLowerCase())).sort((a,b) => b.length - a.length);
+  if (sig.length >= 2) {
+    const re = new RegExp('(' + esc(sig[0]) + '[\\s\\S]{0,30}' + esc(sig[1]) + '|'  + esc(sig[1]) + '[\\s\\S]{0,30}' + esc(sig[0]) + ')', 'i');
+    const m = re.exec(content);
+    if (m) return [m.index, m.index + m[0].length];
   }
-  const stop = new Set(['the','and','for','are','was','with','this','that','from','have','been','they']);
-  const longest = words.filter(w => w.length >= 4 && !stop.has(w.toLowerCase())).sort((a,b) => b.length - a.length)[0];
-  if (longest) {
-    const fm = new RegExp(esc(longest), 'i').exec(content);
-    if (fm) {
-      const ls = content.lastIndexOf('\n', fm.index) + 1;
-      const le = content.indexOf('\n', fm.index + fm[0].length);
-      return [ls, le === -1 ? content.length : le];
-    }
+  if (sig.length >= 1) {
+    const fm = new RegExp(esc(sig[0]), 'i').exec(content);
+    if (fm) return [fm.index, fm.index + fm[0].length];
   }
   return null;
 }
@@ -692,25 +697,25 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     needle: string
   ): number[] => {
     if (!needle.trim()) return [];
+    // Clean markdown artifacts from the needle before searching
+    const cleanNeedle = needle.replace(/\*\*/g, '').replace(/\[\d+\]/g, '').trim();
+    const needleLo = cleanNeedle.toLowerCase().replace(/\s+/g, " ");
+    // Try first 60 chars of needle for tighter matching — long excerpts rarely match verbatim
+    const probe = needleLo.slice(0, 60).trim();
     const hit = new Set<number>();
-    const needleLo = needle.toLowerCase().replace(/\s+/g, " ").trim();
     for (const sep of [" ", ""]) {
       const joined   = items.map(i => i.str).join(sep);
       const joinedLo = joined.toLowerCase();
-      let from = 0, found = false;
-      while (true) {
-        const idx = joinedLo.indexOf(needleLo, from);
-        if (idx === -1) break;
-        found = true;
-        let charCount = 0;
-        for (let i = 0; i < items.length; i++) {
-          const start = charCount, end = charCount + items[i].str.length;
-          charCount += items[i].str.length + sep.length;
-          if (end > idx && start < idx + needleLo.length) hit.add(i);
-        }
-        from = idx + 1;
+      // Only use the FIRST occurrence — avoids highlighting every mention on the page
+      const idx = joinedLo.indexOf(probe);
+      if (idx === -1) continue;
+      let charCount = 0;
+      for (let i = 0; i < items.length; i++) {
+        const start = charCount, end = charCount + items[i].str.length;
+        charCount += items[i].str.length + sep.length;
+        if (end > idx && start < idx + probe.length) hit.add(i);
       }
-      if (found) break;
+      if (hit.size > 0) break;
     }
     return [...hit];
   };
@@ -739,12 +744,17 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
     ctx.fillStyle = HIGHLIGHT_COLOR;
     for (const needle of needles) {
       for (const idx of findMatchingItems(items, needle)) {
-        const item = items[idx];
+        const item = items[idx] as any;
         const [sx, , , sy, tx, ty] = item.transform;
+        // Convert bottom-left corner of item from PDF coords to canvas pixel coords
         const [cx, cy] = viewport.convertToViewportPoint(tx, ty);
-        const width  = Math.abs(sx) * viewport.scale * item.str.length * 0.62;
+        // item.width is the actual text run width in PDF user units (most reliable)
+        // fall back to font-size-based estimate if not present
+        const itemW = typeof item.width === "number" && item.width > 0
+          ? item.width * viewport.scale
+          : Math.abs(sx) * viewport.scale;
         const height = Math.abs(sy) * viewport.scale;
-        ctx.fillRect(cx, cy - height * 0.9, width, height * 1.2);
+        ctx.fillRect(cx, cy - height * 0.9, itemW, height * 1.1);
       }
     }
     ctx.restore();
@@ -880,14 +890,19 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
   }, [highlightKey, status, drawOverlay]);
 
   // ── Scroll to highlight ────────────────────────────────────────────────────
+  // scrollIntoView is broken here because outerRef uses overflow-hidden + CSS transform.
+  // Instead: find the matching page wrapper, compute its offsetTop inside innerRef,
+  // then animate translateRef so that page is centered in the viewport.
   useEffect(() => {
     if (status !== "ready" || !pdfDocRef.current) return;
     const needles = highlightsRef.current;
-    if (!needles.length || !innerRef.current) return;
+    if (!needles.length || !innerRef.current || !outerRef.current) return;
     setTimeout(async () => {
-      const pdf = pdfDocRef.current;
-      if (!pdf || !innerRef.current) return;
-      const wrappers = Array.from(innerRef.current.querySelectorAll("[data-page]")) as HTMLDivElement[];
+      const pdf   = pdfDocRef.current;
+      const inner = innerRef.current;
+      const outer = outerRef.current;
+      if (!pdf || !inner || !outer) return;
+      const wrappers = Array.from(inner.querySelectorAll("[data-page]")) as HTMLDivElement[];
       for (const wrapper of wrappers) {
         const pageNum = Number(wrapper.dataset.page);
         const page    = await pdf.getPage(pageNum);
@@ -898,9 +913,34 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
           const nl = n.toLowerCase().replace(/\s+/g, " ").trim();
           return spaced.includes(nl) || nospace.includes(nl.replace(/\s+/g, ""));
         });
-        if (hit) { wrapper.scrollIntoView({ behavior: "smooth", block: "start" }); break; }
+        if (!hit) continue;
+
+        // Compute the page wrapper's top offset relative to innerRef
+        const z = zoomRef.current;
+        const pageOffsetTop = wrapper.offsetTop * z + (translateRef.current.y % 1); // scaled
+        // We want the page centered in the outer viewport
+        const targetTy = -(wrapper.offsetTop * z) + outer.clientHeight / 2 - (wrapper.offsetHeight * z) / 2;
+        const maxTy = 0;
+        const minTy = -(inner.scrollHeight * z - outer.clientHeight);
+        const clampedTy = Math.min(maxTy, Math.max(minTy, targetTy));
+
+        // Animate smoothly by stepping toward target
+        const startTy = translateRef.current.y;
+        const startTx = translateRef.current.x;
+        const duration = 350;
+        const startTime = performance.now();
+        const animate = (now: number) => {
+          const t = Math.min(1, (now - startTime) / duration);
+          const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+          const newTy = startTy + (clampedTy - startTy) * ease;
+          translateRef.current = { x: startTx, y: newTy };
+          if (inner) inner.style.transform = `translate(${startTx}px, ${newTy}px) scale(${z})`;
+          if (t < 1) requestAnimationFrame(animate);
+        };
+        requestAnimationFrame(animate);
+        break;
       }
-    }, 200);
+    }, 250);
   }, [highlightKey, status]);
 
   // ── Core zoom function ────────────────────────────────────────────────────
@@ -1165,13 +1205,17 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Scroll to highlighted passage whenever it changes
+  // rAF ensures the ref is painted before we read its position
   useEffect(() => {
-    if (!highlightRef.current || !scrollContainerRef.current) return;
-    const container = scrollContainerRef.current;
-    const el = highlightRef.current;
-    const elTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
-    const targetScroll = container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2;
-    container.scrollTo({ top: targetScroll, behavior: "smooth" });
+    const raf = requestAnimationFrame(() => {
+      if (!highlightRef.current || !scrollContainerRef.current) return;
+      const container = scrollContainerRef.current;
+      const el = highlightRef.current;
+      const elTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      const targetScroll = container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2;
+      container.scrollTo({ top: targetScroll, behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(raf);
   }, [state.highlightKey, state.content]);
 
   return (
@@ -1361,7 +1405,7 @@ const Chat = () => {
   const [dragDepth, setDragDepth] = useState(0);
   const [isDraggingInput, setIsDraggingInput] = useState(false);
   const [inputDragDepth, setInputDragDepth] = useState(0);
-  const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
+  const [openSourceKey, setOpenSourceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
   const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" }>>(new Map());
@@ -1587,11 +1631,14 @@ const Chat = () => {
 
   // Scroll bubble text viewer to highlighted mark when highlight changes
   useEffect(() => {
-    if (!bubbleHighlightRef.current || !bubbleScrollRef.current) return;
-    const el = bubbleHighlightRef.current;
-    const container = bubbleScrollRef.current;
-    const elTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
-    container.scrollTo({ top: container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2, behavior: "smooth" });
+    const raf = requestAnimationFrame(() => {
+      if (!bubbleHighlightRef.current || !bubbleScrollRef.current) return;
+      const el = bubbleHighlightRef.current;
+      const container = bubbleScrollRef.current;
+      const elTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      container.scrollTo({ top: container.scrollTop + elTop - container.clientHeight / 2 + el.offsetHeight / 2, behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(raf);
   }, [bubbleViewer?.highlightKey]);
 
   // Close convs panel when clicking outside — registered once, reads ref so never stale
@@ -1795,7 +1842,7 @@ const Chat = () => {
     if (!trimmedInput || isLoading) return;
 
     // Collapse all sources when sending new message
-    setExpandedSources({});
+    setOpenSourceKey(null);
 
     // Create user message
     const userMsg: Message = {
@@ -1995,7 +2042,7 @@ const Chat = () => {
    */
   const handleNumberClick = (sourceNum: number, msgId: string, numValue: string) => {
     // 1. Expand the sources panel and scroll to the right source card
-    setExpandedSources((prev) => ({ ...prev, [`${msgId}-${sourceNum}`]: true }));
+    setOpenSourceKey(`${msgId}-${sourceNum}`);
 
     const msg = messages.find(m => m.id === msgId);
     const source = msg?.sources?.find(s => s.source_number === sourceNum);
@@ -2547,9 +2594,14 @@ const Chat = () => {
                   </div>
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
-                    const citedSources = msg.sources.filter(s =>
-                      (s as any).cited_facts?.length > 0
-                    );
+                    // Deduplicate by source_number — backend may emit dupes if same chunk cited multiple times
+                    const seenNums = new Set<number>();
+                    const citedSources = msg.sources.filter(s => {
+                      if (!(s as any).cited_facts?.length) return false;
+                      if (seenNums.has(s.source_number)) return false;
+                      seenNums.add(s.source_number);
+                      return true;
+                    });
                     if (citedSources.length === 0) return null;
 
                     return (
@@ -2576,7 +2628,8 @@ const Chat = () => {
                           });
                           const sections = Array.from(sectionsMap.entries()).map(([title, v]) => ({ title, ...v }));
                           const docExcerpt: string = (source as any).excerpt ?? "";
-                          const isExpanded = expandedSources[`${msg.id}-${source.source_number}`];
+                          const sourceKey = `${msg.id}-${source.source_number}`;
+                          const isExpanded = openSourceKey === sourceKey;
 
                           return (
                             <div
@@ -2587,17 +2640,16 @@ const Chat = () => {
                               {/* Card header */}
                               <div
                                 className="flex items-center gap-2 px-3 py-2 bg-primary/8 hover:bg-primary/12 transition-colors cursor-pointer"
-                                onClick={() => setExpandedSources(prev => ({
-                                  ...prev,
-                                  [`${msg.id}-${source.source_number}`]: !prev[`${msg.id}-${source.source_number}`]
-                                }))}
+                                onClick={() => setOpenSourceKey(k => k === sourceKey ? null : sourceKey)}
                               >
                                 <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary/20 text-primary font-bold text-[10px] shrink-0">
                                   {source.source_number}
                                 </span>
                                 <span className="flex-1 min-w-0">
                                   <span className="flex items-center gap-1.5">
-                                    <span className="text-[12px] font-semibold text-foreground truncate">{source.filename}</span>
+                                    <span className="text-[12px] font-semibold text-foreground truncate">
+                                      {sections[0]?.title || source.filename}
+                                    </span>
                                     <ExternalLink
                                       className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
                                       data-open-doc
@@ -2628,17 +2680,13 @@ const Chat = () => {
                                     <div className="bg-background/60">
                                       {sections.filter(s => s.lines.length > 0).map((sec, si) => (
                                         <div key={si} className="border-t border-primary/10">
-                                          {/* Section title = exact ## heading from the output */}
-                                          <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-primary/70 uppercase tracking-wide">
-                                            {sec.title}
-                                          </div>
                                           {/* Lines cited under this heading */}
                                           {sec.lines.map((line, li) => (
                                             <button
                                               key={li}
                                               className="w-full text-left px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
                                               data-open-doc
-                                              onClick={() => openDocumentAtExcerpt(source.filename, sec.excerpt)}
+                                              onClick={() => openDocumentAtExcerpt(source.filename, line)}
                                             >
                                               <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
                                               <span className="leading-relaxed">{line}</span>

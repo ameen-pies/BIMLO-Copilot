@@ -392,7 +392,14 @@ def _build_sources_from_brackets(
             "cited_facts":   all_lines[:10],
         })
 
-    return sources
+    # Deduplicate by source_number — shouldn't happen but guard anyway
+    seen = set()
+    deduped = []
+    for s in sources:
+        if s['source_number'] not in seen:
+            seen.add(s['source_number'])
+            deduped.append(s)
+    return deduped
 
 
 def _find_section_in_doc(full_text: str, section_title: str) -> str:
@@ -725,15 +732,20 @@ class RAGEngine:
                         break
                 break
 
-        # Include the previous route so the LLM can apply context inheritance
-        prev_route = state.get("_prev_route", "")
+        # Build session route history so the model can see the full intent chain,
+        # not just the immediately previous turn (which may itself be a direct/conversational hop)
+        route_log = state.get("_route_log", [])
         prior_context = ""
-        if last_assistant:
-            route_hint = f"\nPREVIOUS ROUTE USED: {prev_route}" if prev_route else ""
+        if last_assistant or route_log:
+            route_history = ""
+            if route_log:
+                route_history = "\nSESSION ROUTE HISTORY (oldest → newest): " + " → ".join(
+                    f"[{e['route']}]" for e in route_log[-6:]
+                )
             prior_context = (
-                f"\n\nMOST RECENT EXCHANGE:{route_hint}"
-                f"\nUSER SAID: {last_user_before[:300]}"
-                f"\nASSISTANT REPLIED: {last_assistant[:300]}"
+                f"\n\nCONVERSATION CONTEXT:{route_history}"
+                f"\nLAST USER MESSAGE: {last_user_before[:300]}"
+                f"\nLAST ASSISTANT REPLY: {last_assistant[:300]}"
             )
 
         routing_prompt = f"""You are a query router. Pick exactly one route for the CURRENT QUERY.
@@ -959,8 +971,14 @@ Reply with ONE word only — the route name."""
         is_good = _is_good_retrieval(chunks)
 
         if not chunks:
-            print("⚠️  No documents in store — will use direct answer")
-            return {**state, "query": f"__NO_DOCS__:{state['query']}"}
+            # Distinguish: is the store empty, or did the query just not match anything?
+            # Only flag __NO_DOCS__ if the store itself has nothing — not for bad queries.
+            store_stats = self.vs.get_collection_stats()
+            if store_stats.get("total_chunks", 0) == 0:
+                print("⚠️  Vector store is empty — redirecting to direct answer")
+                return {**state, "query": f"__NO_DOCS__:{state['query']}"}
+            else:
+                print("⚠️  Retrieval found nothing for this query — proceeding to synthesis with no context")
         elif is_good:
             print("✅ Retrieval quality: good")
         else:
