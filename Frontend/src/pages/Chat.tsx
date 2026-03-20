@@ -2375,7 +2375,7 @@ const Chat = () => {
                     className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
                         ? "bg-primary text-primary-foreground rounded-br-md w-fit"
-                        : "bg-secondary text-secondary-foreground rounded-bl-md"
+                        : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
                     {msg.role === "assistant" && msg.id === typingMessageId ? (
