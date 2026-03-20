@@ -376,19 +376,19 @@ function renderContent(
   sources: Source[] | undefined,
   onSourceClick: (sourceNum: number, msgId: string) => void,
 ): React.ReactNode {
-  const citedNums = Array.from(new Set(
-    Array.from(text.matchAll(/\[(\d+)\](?!\()/g)).map(m => parseInt(m[1]))
-  ));
-  const hasSources = sources && sources.length > 0 && citedNums.length > 0;
-
-  // Strip orphan bullets: lines whose ENTIRE content after the dash is only [N] markers or whitespace.
-  // Regex: line starts with optional space + bullet char + space, then ONLY [N] tokens (no real words).
-  // Valid bullets like '- **Label**: text [1]' are kept because they have real words before [N].
+  // Strip orphan bullets FIRST — lines whose only content after the dash is [N] markers or whitespace.
+  // Must happen before citedNums so we don't count markers that only existed on orphan lines.
   text = text
     .replace(/(?:^|\n)[ \t]*[-*+][ \t]*(\[\d+\][ \t]*)*(?=\n|$)/gm, '')
     .replace(/(?:^|\n)[ \t]*(\[\d+\][ \t]*)+(?=\n|$)/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+  // Compute citedNums from the CLEANED text so hasSources reflects what actually renders
+  const citedNums = Array.from(new Set(
+    Array.from(text.matchAll(/\[(\d+)\](?!\()/g)).map(m => parseInt(m[1]))
+  ));
+  const hasSources = sources && sources.length > 0 && citedNums.length > 0;
 
   // No sources — plain markdown render
   if (!hasSources) {
@@ -2495,23 +2495,21 @@ const Chat = () => {
                   </div>
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
-                    const citationBase = msg.rawAnswer ?? msg.content;
-                    const citedNums = new Set(
-                      Array.from(citationBase.matchAll(/\[(\d+)\](?!\()/g)).map(m => parseInt(m[1]))
+                    // cited_facts = the exact output sentences that referenced this source
+                    // excerpt     = the matching passage found in the raw document
+                    // Only show sources that have both real cited content AND a document excerpt
+                    const citedSources = msg.sources.filter(s =>
+                      (s as any).cited_facts?.length > 0
                     );
-                    // Only show sources that are actually cited in the answer
-                    const citedSources = msg.sources.filter(s => citedNums.has(s.source_number));
                     if (citedSources.length === 0) return null;
 
                     return (
                       <div className="mt-3 space-y-2">
                         {citedSources.map((source) => {
-                          // sections = verbatim doc sentences from source agent, one per cited bullet
-                          const sections: Array<{ title: string; excerpt: string }> = (source as any).sections ?? [];
-                          // Deduplicate titles — the shared ## heading appears on every section
-                          const uniqueTitles = Array.from(new Set(sections.map(s => s.title).filter(Boolean)));
-                          const cardTitle = uniqueTitles[0] ?? source.filename;
-                          const excerpts = sections.map(s => s.excerpt).filter(Boolean);
+                          // cited_facts: what the LLM actually said about this source (output sentences)
+                          const citedFacts: string[] = (source as any).cited_facts ?? [];
+                          // excerpt: the matching passage in the raw document
+                          const docExcerpt: string = (source as any).excerpt ?? "";
                           const isExpanded = expandedSources[`${msg.id}-${source.source_number}`];
 
                           return (
@@ -2520,7 +2518,7 @@ const Chat = () => {
                               id={`source-${msg.id}-${source.source_number}`}
                               className="rounded-xl border border-primary/20 overflow-hidden scroll-mt-4"
                             >
-                              {/* Pill header — expand/collapse only, no document highlight */}
+                              {/* Card header */}
                               <div
                                 className="flex items-center gap-2 px-3 py-2 bg-primary/8 hover:bg-primary/12 transition-colors cursor-pointer"
                                 onClick={() => setExpandedSources(prev => ({
@@ -2533,14 +2531,14 @@ const Chat = () => {
                                 </span>
                                 <span className="flex-1 min-w-0">
                                   <span className="flex items-center gap-1.5">
-                                    <span className="text-[12px] font-semibold text-foreground truncate">{cardTitle}</span>
+                                    <span className="text-[12px] font-semibold text-foreground truncate">{source.filename}</span>
                                     <ExternalLink
                                       className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
                                       data-open-doc
-                                    onClick={(e) => {
+                                      onClick={(e) => {
                                         e.stopPropagation();
-                                        // Open viewer and highlight all excerpts as separate spans
-                                        openDocumentAtExcerpts(source.filename, excerpts.length > 0 ? excerpts : [source.excerpt ?? ""]);
+                                        // Highlight the doc excerpt (the raw doc passage) in the viewer
+                                        openDocumentAtExcerpt(source.filename, docExcerpt);
                                       }}
                                     />
                                   </span>
@@ -2552,9 +2550,9 @@ const Chat = () => {
                                 </span>
                               </div>
 
-                              {/* Expandable excerpts — each is a verbatim doc sentence */}
+                              {/* Expandable section — shows what the LLM said + links to doc passage */}
                               <AnimatePresence>
-                                {isExpanded && excerpts.length > 0 && (
+                                {isExpanded && (
                                   <motion.div
                                     initial={{ height: 0, opacity: 0 }}
                                     animate={{ height: "auto", opacity: 1 }}
@@ -2563,15 +2561,16 @@ const Chat = () => {
                                     className="overflow-hidden"
                                   >
                                     <div className="divide-y divide-primary/10 bg-background/60">
-                                      {excerpts.map((excerpt, li) => (
+                                      {/* Each cited fact = what was said in the output about this source */}
+                                      {citedFacts.map((fact, li) => (
                                         <button
                                           key={li}
                                           className="w-full text-left px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
                                           data-open-doc
-                                          onClick={() => openDocumentAtExcerpt(source.filename, excerpt)}
+                                          onClick={() => openDocumentAtExcerpt(source.filename, docExcerpt)}
                                         >
                                           <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
-                                          <span className="leading-relaxed">{excerpt}</span>
+                                          <span className="leading-relaxed">{fact}</span>
                                         </button>
                                       ))}
                                     </div>

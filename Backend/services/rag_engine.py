@@ -301,21 +301,20 @@ def _extract_best_excerpt(chunk_text: str, answer_sentences: List[str], max_len:
 def _build_sources_from_brackets(
     answer: str,
     chunks: List[Dict],
-) -> tuple:
+) -> List[Dict]:
     """
-    New citation system: LLM uses [1], [2], [3] inline markers.
-    This function:
-      1. Finds all [N] markers in the answer
-      2. Maps each to the corresponding chunk (chunk index = N-1)
-      3. Extracts the answer sentences that cite each source
-      4. Finds the most relevant excerpt from that chunk
-      5. Returns (sources_list, answer_unchanged)
+    Build source cards strictly — only for [N] markers that appear next to real content.
 
-    No LLM calls. Pure Python text matching.
+    For each cited [N]:
+      - Collects the exact output lines that contain [N] and have real text
+      - Those cleaned lines become cited_facts (what the LLM said about this source)
+      - Finds the matching passage in the raw chunk via word-overlap
+      - Skips sources where the LLM wrote no meaningful content
+
+    Result: one card per actually-cited source, no phantom cards.
     """
     import re
 
-    # Find all unique source numbers cited
     cited_nums = sorted(set(int(m) for m in re.findall(r'\[(\d+)\]', answer)))
 
     sources = []
@@ -328,15 +327,26 @@ def _build_sources_from_brackets(
         metadata = chunk.get('metadata', {})
         chunk_text = chunk.get('text', '')
 
-        # Collect sentences from answer that cite this source
-        # Split answer into sentences, keep those containing [N]
-        all_sentences = re.split(r'(?<=[.!?])\s+', answer)
-        cited_sentences = [s for s in all_sentences if f'[{num}]' in s]
-        # Clean up the [N] markers from the sentences for matching
-        clean_sentences = [re.sub(r'\[\d+\]', '', s).strip() for s in cited_sentences]
+        # Collect every line in the answer that cites this source and has real content
+        cited_lines = []
+        for line in answer.split('\n'):
+            if f'[{num}]' not in line:
+                continue
+            clean = re.sub(r'\[\d+\]', '', line)
+            clean = re.sub(r'^\s*[-*•#]+\s*', '', clean)
+            clean = re.sub(r'\*\*', '', clean).strip()
+            if len(clean) > 10:
+                cited_lines.append(clean)
 
-        # Find best excerpt from chunk
-        excerpt = _extract_best_excerpt(chunk_text, clean_sentences)
+        # Skip this source if no meaningful content was written for it
+        if not cited_lines:
+            continue
+
+        # Find the best matching passage in the raw doc chunk
+        excerpt = _extract_best_excerpt(chunk_text, cited_lines)
+
+        # Each cited line becomes a section — drives the expandable card content
+        sections = [{'title': line[:80], 'excerpt': excerpt} for line in cited_lines[:3]]
 
         sources.append({
             'source_number': num,
@@ -344,8 +354,8 @@ def _build_sources_from_brackets(
             'doc_type': metadata.get('doc_type', 'unknown'),
             'project_ref': metadata.get('project_ref'),
             'excerpt': excerpt,
-            'sections': [{'title': f'Source {num}', 'excerpt': excerpt}],
-            'cited_facts': clean_sentences[:3],  # first 3 cited sentences as "facts"
+            'sections': sections,
+            'cited_facts': cited_lines[:5],
         })
 
     return sources
@@ -1027,17 +1037,12 @@ Respond with ONLY the rewritten query, nothing else."""
         print(f"   Answer preview: {answer[:160]!r}")
         print(f"   {len(answer)} chars")
 
-        # If LLM produced zero citations, inject [1] [2] [3] based on paragraph order
-        if not cited_nums:
-            print("⚠️  No [N] citations — injecting by paragraph")
-            paragraphs = [p.strip() for p in answer.split('\n\n') if p.strip()]
-            new_paras = []
-            for i, para in enumerate(paragraphs):
-                src = min(i + 1, len(chunks))
-                new_paras.append(f"{para} [{src}]")
-            answer = '\n\n'.join(new_paras)
-            cited_nums = sorted(set(int(m) for m in _re.findall(r'\[(\d+)\]', answer)))
-            print(f"   Injected: {cited_nums}")
+        # If LLM produced zero citations, add a single [1] at the end only —
+        # do NOT stamp every paragraph, that creates false sources.
+        if not cited_nums and chunks:
+            answer = answer.rstrip() + " [1]"
+            cited_nums = [1]
+            print("⚠️  No [N] citations — appended single [1]")
 
         # Clean the answer first — needed by both source paths below
         clean_answer = _clean_answer(answer)
