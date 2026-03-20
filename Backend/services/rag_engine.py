@@ -97,6 +97,9 @@ class AgentState(TypedDict):
     confidence: float
     analytics: Optional[Dict]
 
+    # routing context from previous turn
+    _prev_route: str
+
     # error
     error: Optional[str]
 
@@ -464,10 +467,14 @@ def _clean_answer(text: str) -> str:
     # NOTE: Rules 6+7 removed — they were collapsing \n before ** and headings,
     # turning structured markdown output into a wall of text.
 
-    # 6. Remove orphan bullets
-    text = re.sub(r'(?m)^\s*[-*+]\s*$', '', text)
+    # 6. Remove orphan bullets — marker with no real content.
+    # Catches: '-', '- ', '- [1]', '- [1][2]', '* [1]', etc.
+    text = re.sub(r'(?m)^\s*[-*+]\s*(\[\d+\]\s*)*$', '', text)
 
-    # 7. Collapse 3+ blank lines
+    # 7. Remove lines that are only citation markers e.g. a lone '[1]'
+    text = re.sub(r'(?m)^\s*(\[\d+\]\s*)+$', '', text)
+
+    # 8. Collapse 3+ blank lines (catches gaps left by removals above)
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()
@@ -511,12 +518,13 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """Main entry point. conversation_history is managed by main.py session store."""
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "") -> Dict[str, Any]:
+        """Main entry point. conversation_history and prev_route managed by main.py session store."""
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
             "conversation_history": conversation_history or [],
+            "_prev_route": prev_route,
             "route": None,
             "retrieved_chunks": [],
             "retrieval_iterations": 0,
@@ -672,24 +680,30 @@ class RAGEngine:
                         break
                 break
 
+        # Include the previous route so the LLM can apply context inheritance
+        prev_route = state.get("_prev_route", "")
         prior_context = ""
         if last_assistant:
+            route_hint = f"\nPREVIOUS ROUTE USED: {prev_route}" if prev_route else ""
             prior_context = (
-                f"\n\nMOST RECENT EXCHANGE (for follow-up detection only):"
+                f"\n\nMOST RECENT EXCHANGE:{route_hint}"
                 f"\nUSER SAID: {last_user_before[:300]}"
                 f"\nASSISTANT REPLIED: {last_assistant[:300]}"
             )
 
-        routing_prompt = f"""You are a query router. Your only job is to pick the right route for the CURRENT QUERY.
+        routing_prompt = f"""You are a query router. Pick exactly one route for the CURRENT QUERY.
 
 ROUTES:
-- direct: the query is about the conversation itself — greetings, memory recall ("what is my name"), follow-up edits to the last answer ("make it shorter", "say it differently"), small talk, thanks. No documents needed.
-- rag: the user wants information FROM the uploaded documents. Any question about document content, facts, specs, clauses, data in the files → rag.
-- iterative_rag: like rag but explicitly compares or contrasts multiple documents.
-- transform: the user wants the document reproduced in a new form — full translation, rewrite, reformat. Output IS the transformed document.
-- analytics: aggregated stats across ALL documents (totals, averages, counts).
+- direct: purely conversational — greetings, memory/name recall, edits to the previous answer ("shorter", "in french"), small talk, thanks. No documents needed.
+- rag: user wants information from uploaded documents — questions, summaries, facts, specs, extraction.
+- iterative_rag: like rag but explicitly comparing or contrasting across multiple documents.
+- transform: reproduce a document in a new form — translate the whole thing, rewrite, reformat.
+- analytics: aggregated statistics across all documents (totals, averages, counts).
 
-PRIORITY ORDER: rag > direct. If the query could plausibly need document content, pick rag. Only pick direct if the query is clearly conversational with no document intent whatsoever.
+CONTEXT INHERITANCE RULE:
+If the previous assistant turn used documents (rag/iterative_rag/analytics/transform), and the current query is a short continuation or reference that makes no sense without that prior context — e.g. "again", "do the same for the other one", "what about X", "and Y?", "ok now summarize it" — inherit the previous route. The query does not need to mention documents explicitly.
+
+PRIORITY: When in doubt between rag and direct, pick rag.
 {prior_context}
 
 CURRENT QUERY: {query}
@@ -1078,13 +1092,15 @@ OUTPUT STRUCTURE — follow this exactly:
 - Break the answer into sections using ## headings for each major topic
 - Under each heading: 2-3 short sentences MAX, or a bullet list — not both
 - Use bullet points (- item) when listing 3 or more items
-- Each bullet: **Label**: short description [N]
+- Each bullet MUST have real text content: **Label**: description [N]
+- NEVER output a bullet with no text — if you have nothing to say, omit the bullet entirely
+- NEVER output a line that is only a citation marker like "- [1]" or just "-"
 - Never write a wall of text — if a paragraph exceeds 3 sentences, split it or use bullets
 - Leave a blank line between every section
 - Use **bold** for key terms, numbers, technical standards
 - NEVER label sections "Source 1" or "Document 2" — use the actual subject matter
 
-EXAMPLE of correct output format (topic headings adapt to whatever the documents are about):
+EXAMPLE of correct output format:
 ## [Main Topic from Documents]
 One or two sentences summarising the key point [1].
 

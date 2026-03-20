@@ -55,6 +55,8 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 MAX_HISTORY_TURNS = 20
 # session_id -> deque of {role, content} dicts
 _sessions: Dict[str, deque] = {}
+# session_id -> last route used (for context inheritance in router)
+_session_routes: Dict[str, str] = {}
 
 def get_history(session_id: str) -> List[dict]:
     return list(_sessions.get(session_id, []))
@@ -158,10 +160,12 @@ async def query_documents(request: QueryRequest):
         print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns]")
 
         # Run the RAG engine with server-side history
+        prev_route = _session_routes.get(session_id, "")
         result = rag_engine.query(
             request.query,
             top_k=request.top_k,
             conversation_history=history,
+            prev_route=prev_route,
         )
 
         # Store this turn in server-side history (clean, no [N] citation markers)
@@ -169,6 +173,8 @@ async def query_documents(request: QueryRequest):
         clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
         append_turn(session_id, "user",      request.query)
         append_turn(session_id, "assistant", clean_answer)
+        if result.get("route"):
+            _session_routes[session_id] = result["route"]
 
         print(f"✅ Done (route={result.get('route')}, confidence={result['confidence']})")
 

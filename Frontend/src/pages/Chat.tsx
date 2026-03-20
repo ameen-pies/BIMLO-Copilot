@@ -381,6 +381,15 @@ function renderContent(
   ));
   const hasSources = sources && sources.length > 0 && citedNums.length > 0;
 
+  // Strip orphan bullets: lines whose ENTIRE content after the dash is only [N] markers or whitespace.
+  // Regex: line starts with optional space + bullet char + space, then ONLY [N] tokens (no real words).
+  // Valid bullets like '- **Label**: text [1]' are kept because they have real words before [N].
+  text = text
+    .replace(/(?:^|\n)[ \t]*[-*+][ \t]*(\[\d+\][ \t]*)*(?=\n|$)/gm, '')
+    .replace(/(?:^|\n)[ \t]*(\[\d+\][ \t]*)+(?=\n|$)/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
   // No sources — plain markdown render
   if (!hasSources) {
     const cleanText = text.replace(/\s*\[\d+\](?!\()/g, '').replace(/  +/g, ' ').trim();
