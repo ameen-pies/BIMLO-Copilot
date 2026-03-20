@@ -305,59 +305,91 @@ def _build_sources_from_brackets(
     chunks: List[Dict],
 ) -> List[Dict]:
     """
-    Build source cards strictly — only for [N] markers that appear next to real content.
+    Build source cards grouped by the ## section headings in the answer.
 
-    For each cited [N]:
-      - Collects the exact output lines that contain [N] and have real text
-      - Those cleaned lines become cited_facts (what the LLM said about this source)
-      - Finds the matching passage in the raw chunk via word-overlap
-      - Skips sources where the LLM wrote no meaningful content
+    Walk the answer line by line, tracking the current ## heading.
+    For each source [N], collect:
+      - sections: list of { title (exact ## heading text), lines (cited lines under it), excerpt }
+      - cited_facts: all cited lines across all sections (for the flat expandable list)
+      - excerpt: best matching passage in the raw chunk (used when clicking into the doc viewer)
 
-    Result: one card per actually-cited source, no phantom cards.
+    One card per source number. Sections mirror the output structure exactly.
     """
     import re
 
-    cited_nums = sorted(set(int(m) for m in re.findall(r'\[(\d+)\]', answer)))
+    # ── Step 1: Walk the answer and group cited lines by heading ──────────────
+    # Structure: { source_num: { heading: [line, ...] } }
+    by_source: Dict[int, Dict[str, List[str]]] = {}
+    current_heading = ""
 
+    for line in answer.split("\n"):
+        # Track ## headings — these become section titles verbatim
+        heading_match = re.match(r"^#{1,3}\s+(.+)", line)
+        if heading_match:
+            current_heading = heading_match.group(1).strip()
+            continue
+
+        # Find every [N] cited on this line
+        nums_on_line = [int(m) for m in re.findall(r"\[(\d+)\]", line)]
+        if not nums_on_line:
+            continue
+
+        # Clean the line: strip [N] markers, bullets, bold markers
+        clean = re.sub(r"\[\d+\]", "", line)
+        clean = re.sub(r"^\s*[-*•]+\s*", "", clean)
+        clean = re.sub(r"\*\*", "", clean).strip()
+        if len(clean) < 8:          # skip lines with no real content
+            continue
+
+        for num in nums_on_line:
+            if num not in by_source:
+                by_source[num] = {}
+            heading = current_heading or "General"
+            if heading not in by_source[num]:
+                by_source[num][heading] = []
+            if clean not in by_source[num][heading]:
+                by_source[num][heading].append(clean)
+
+    # ── Step 2: Build one source card per cited [N] ───────────────────────────
     sources = []
-    for num in cited_nums:
+    for num in sorted(by_source.keys()):
         idx = num - 1
         if idx < 0 or idx >= len(chunks):
             continue
 
-        chunk = chunks[idx]
-        metadata = chunk.get('metadata', {})
-        chunk_text = chunk.get('text', '')
+        chunk    = chunks[idx]
+        metadata = chunk.get("metadata", {})
+        chunk_text = chunk.get("text", "")
 
-        # Collect every line in the answer that cites this source and has real content
-        cited_lines = []
-        for line in answer.split('\n'):
-            if f'[{num}]' not in line:
-                continue
-            clean = re.sub(r'\[\d+\]', '', line)
-            clean = re.sub(r'^\s*[-*•#]+\s*', '', clean)
-            clean = re.sub(r'\*\*', '', clean).strip()
-            if len(clean) > 10:
-                cited_lines.append(clean)
+        headings_map = by_source[num]   # { heading: [lines] }
 
-        # Skip this source if no meaningful content was written for it
-        if not cited_lines:
+        # All cited lines across all sections (for excerpt search and flat list)
+        all_lines = [line for lines in headings_map.values() for line in lines]
+        if not all_lines:
             continue
 
-        # Find the best matching passage in the raw doc chunk
-        excerpt = _extract_best_excerpt(chunk_text, cited_lines)
+        # Find best matching passage in the raw doc chunk
+        excerpt = _extract_best_excerpt(chunk_text, all_lines)
 
-        # Each cited line becomes a section — drives the expandable card content
-        sections = [{'title': line[:80], 'excerpt': excerpt} for line in cited_lines[:3]]
+        # Build sections: title = exact heading from output, lines = cited lines under it
+        # Each line gets its own doc excerpt so clicking it opens the right passage
+        sections = []
+        for heading, lines in headings_map.items():
+            line_excerpt = _extract_best_excerpt(chunk_text, lines)
+            sections.append({
+                "title":   heading,
+                "lines":   lines,
+                "excerpt": line_excerpt,
+            })
 
         sources.append({
-            'source_number': num,
-            'filename': metadata.get('filename', 'Unknown'),
-            'doc_type': metadata.get('doc_type', 'unknown'),
-            'project_ref': metadata.get('project_ref'),
-            'excerpt': excerpt,
-            'sections': sections,
-            'cited_facts': cited_lines[:5],
+            "source_number": num,
+            "filename":      metadata.get("filename", "Unknown"),
+            "doc_type":      metadata.get("doc_type", "unknown"),
+            "project_ref":   metadata.get("project_ref"),
+            "excerpt":       excerpt,
+            "sections":      sections,
+            "cited_facts":   all_lines[:10],
         })
 
     return sources

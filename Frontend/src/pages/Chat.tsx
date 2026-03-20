@@ -2495,9 +2495,6 @@ const Chat = () => {
                   </div>
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
-                    // cited_facts = the exact output sentences that referenced this source
-                    // excerpt     = the matching passage found in the raw document
-                    // Only show sources that have both real cited content AND a document excerpt
                     const citedSources = msg.sources.filter(s =>
                       (s as any).cited_facts?.length > 0
                     );
@@ -2506,9 +2503,14 @@ const Chat = () => {
                     return (
                       <div className="mt-3 space-y-2">
                         {citedSources.map((source) => {
-                          // cited_facts: what the LLM actually said about this source (output sentences)
-                          const citedFacts: string[] = (source as any).cited_facts ?? [];
-                          // excerpt: the matching passage in the raw document
+                          // sections: [{ title, lines, excerpt }] — grouped by ## heading from the output
+                          // Cast via 'any' because Source type predates the new shape
+                          const sections: Array<{ title: string; lines: string[]; excerpt: string }> =
+                            ((source as any).sections ?? []).map((s: any) => ({
+                              title:   s.title   ?? "",
+                              lines:   Array.isArray(s.lines) ? s.lines : (s.excerpt ? [s.excerpt] : []),
+                              excerpt: s.excerpt ?? "",
+                            }));
                           const docExcerpt: string = (source as any).excerpt ?? "";
                           const isExpanded = expandedSources[`${msg.id}-${source.source_number}`];
 
@@ -2537,7 +2539,6 @@ const Chat = () => {
                                       data-open-doc
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        // Highlight the doc excerpt (the raw doc passage) in the viewer
                                         openDocumentAtExcerpt(source.filename, docExcerpt);
                                       }}
                                     />
@@ -2550,9 +2551,9 @@ const Chat = () => {
                                 </span>
                               </div>
 
-                              {/* Expandable section — shows what the LLM said + links to doc passage */}
+                              {/* Expandable — sections mirror ## headings from the output exactly */}
                               <AnimatePresence>
-                                {isExpanded && (
+                                {isExpanded && sections.filter(s => s.lines.length > 0).length > 0 && (
                                   <motion.div
                                     initial={{ height: 0, opacity: 0 }}
                                     animate={{ height: "auto", opacity: 1 }}
@@ -2560,18 +2561,26 @@ const Chat = () => {
                                     transition={{ duration: 0.18 }}
                                     className="overflow-hidden"
                                   >
-                                    <div className="divide-y divide-primary/10 bg-background/60">
-                                      {/* Each cited fact = what was said in the output about this source */}
-                                      {citedFacts.map((fact, li) => (
-                                        <button
-                                          key={li}
-                                          className="w-full text-left px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
-                                          data-open-doc
-                                          onClick={() => openDocumentAtExcerpt(source.filename, docExcerpt)}
-                                        >
-                                          <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
-                                          <span className="leading-relaxed">{fact}</span>
-                                        </button>
+                                    <div className="bg-background/60">
+                                      {sections.filter(s => s.lines.length > 0).map((sec, si) => (
+                                        <div key={si} className="border-t border-primary/10">
+                                          {/* Section title = exact ## heading from the output */}
+                                          <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-primary/70 uppercase tracking-wide">
+                                            {sec.title}
+                                          </div>
+                                          {/* Lines cited under this heading */}
+                                          {sec.lines.map((line, li) => (
+                                            <button
+                                              key={li}
+                                              className="w-full text-left px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
+                                              data-open-doc
+                                              onClick={() => openDocumentAtExcerpt(source.filename, sec.excerpt)}
+                                            >
+                                              <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
+                                              <span className="leading-relaxed">{line}</span>
+                                            </button>
+                                          ))}
+                                        </div>
                                       ))}
                                     </div>
                                   </motion.div>
