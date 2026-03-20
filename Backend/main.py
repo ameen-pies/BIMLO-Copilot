@@ -57,17 +57,32 @@ MAX_HISTORY_TURNS = 20
 _sessions: Dict[str, deque] = {}
 # session_id -> last route used (for context inheritance in router)
 _session_routes: Dict[str, str] = {}
+# session_id -> list of {route, query} for each turn (capped at 10)
+_session_route_log: Dict[str, list] = {}
 
 def get_history(session_id: str) -> List[dict]:
     return list(_sessions.get(session_id, []))
+
+def get_route_log(session_id: str) -> list:
+    return list(_session_route_log.get(session_id, []))
 
 def append_turn(session_id: str, role: str, content: str):
     if session_id not in _sessions:
         _sessions[session_id] = deque(maxlen=MAX_HISTORY_TURNS)
     _sessions[session_id].append({"role": role, "content": content})
 
+def log_route(session_id: str, route: str, query: str):
+    if session_id not in _session_route_log:
+        _session_route_log[session_id] = []
+    log = _session_route_log[session_id]
+    log.append({"route": route, "query": query[:120]})
+    if len(log) > 10:  # keep last 10 turns
+        _session_route_log[session_id] = log[-10:]
+
 def clear_history(session_id: str):
     _sessions.pop(session_id, None)
+    _session_routes.pop(session_id, None)
+    _session_route_log.pop(session_id, None)
 
 
 # ============================================================================
@@ -161,11 +176,13 @@ async def query_documents(request: QueryRequest):
 
         # Run the RAG engine with server-side history
         prev_route = _session_routes.get(session_id, "")
+        route_log  = get_route_log(session_id)
         result = rag_engine.query(
             request.query,
             top_k=request.top_k,
             conversation_history=history,
             prev_route=prev_route,
+            route_log=route_log,
         )
 
         # Store this turn in server-side history (clean, no [N] citation markers)
@@ -175,6 +192,7 @@ async def query_documents(request: QueryRequest):
         append_turn(session_id, "assistant", clean_answer)
         if result.get("route"):
             _session_routes[session_id] = result["route"]
+            log_route(session_id, result["route"], request.query)
 
         print(f"✅ Done (route={result.get('route')}, confidence={result['confidence']})")
 

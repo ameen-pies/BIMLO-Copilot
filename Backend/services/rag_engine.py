@@ -99,6 +99,8 @@ class AgentState(TypedDict):
 
     # routing context from previous turn
     _prev_route: str
+    # full log of {route, query} for this session
+    _route_log: List[Dict]
 
     # error
     error: Optional[str]
@@ -528,13 +530,14 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "") -> Dict[str, Any]:
-        """Main entry point. conversation_history and prev_route managed by main.py session store."""
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None) -> Dict[str, Any]:
+        """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
             "conversation_history": conversation_history or [],
             "_prev_route": prev_route,
+            "_route_log": route_log or [],
             "route": None,
             "retrieved_chunks": [],
             "retrieval_iterations": 0,
@@ -805,8 +808,9 @@ Reply with ONE word only — the route name."""
 
     def direct_answer(self, state: AgentState) -> AgentState:
         """Handle direct questions without retrieval. Uses fallback plan — no LLM judge call needed."""
-        query = state["query"]
-        history = state.get("conversation_history", [])
+        query    = state["query"]
+        history  = state.get("conversation_history", [])
+        route_log = state.get("_route_log", [])
 
         # Detect no-docs redirect from check_retrieval
         no_docs = query.startswith("__NO_DOCS__:")
@@ -817,7 +821,7 @@ Reply with ONE word only — the route name."""
 
         print(f"💬 Direct answer (language: {plan.target_language}, tone: {plan.target_tone}, no_docs={no_docs})")
 
-        answer = self._generate_direct_answer(query, plan, history, no_docs=no_docs)
+        answer = self._generate_direct_answer(query, plan, history, no_docs=no_docs, route_log=route_log)
 
         return {
             **state,
@@ -827,7 +831,7 @@ Reply with ONE word only — the route name."""
             "confidence": 1.0,
         }
     
-    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False) -> str:
+    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False, route_log: Optional[List[Dict]] = None) -> str:
         """Generate a direct answer using conversation history as the primary context."""
 
         if no_docs:
@@ -839,13 +843,26 @@ Reply with ONE word only — the route name."""
                 f"Be brief, friendly, and encourage them to upload a document so you can help."
             )
         else:
+            # Serialize the route log as plain text and give it directly to the LLM.
+            # The LLM understands context — no need to hardcode what each route means.
+            session_context = ""
+            if route_log:
+                log_lines = "\n".join(
+                    f"- [{e['route']}] {e['query']}" for e in route_log
+                )
+                session_context = (
+                    f"\n\nThis session's action log (what you did and how):\n{log_lines}\n"
+                    f"Use this to understand what has already happened in the conversation, "
+                    f"regardless of which internal mechanism produced each answer."
+                )
+
             system_content = (
-                f"You are Bimlo Copilot, a helpful AI document assistant. "
+                f"You are Bimlo Copilot, a unified AI document assistant. "
                 f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
-                f"You have full access to the conversation history. Use it to: "
-                f"recall anything said by the user, reference or modify your own previous answers, "
-                f"and handle follow-up requests naturally. "
-                f"If the user asks you to change or refine a previous answer, output the modified version directly."
+                f"You are one single assistant — the conversation history and action log below "
+                f"are all yours. Use them freely to answer follow-up questions, recall what was "
+                f"said or done, and modify previous answers when asked."
+                f"{session_context}"
             )
 
         messages: List[Dict] = [{"role": "system", "content": system_content}]
