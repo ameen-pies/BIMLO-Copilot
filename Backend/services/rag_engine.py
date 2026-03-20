@@ -739,16 +739,23 @@ class RAGEngine:
         routing_prompt = f"""You are a query router. Pick exactly one route for the CURRENT QUERY.
 
 ROUTES:
-- direct: purely conversational — greetings, memory/name recall, edits to the previous answer ("shorter", "in french"), small talk, thanks. No documents needed.
-- rag: user wants information from uploaded documents — questions, summaries, facts, specs, extraction.
-- iterative_rag: like rag but explicitly comparing or contrasting across multiple documents.
-- transform: reproduce a document in a new form — translate the whole thing, rewrite, reformat.
-- analytics: aggregated statistics across all documents (totals, averages, counts).
+- direct: purely conversational — greetings, small talk, memory recall, edits/modifications to a previous answer. No document lookup needed.
+- rag: the user wants to read, understand, or extract content from one or more documents — summaries, explanations, specific facts, questions answered from the docs.
+- iterative_rag: like rag, but the user explicitly wants to compare or contrast information across multiple different documents.
+- transform: the user wants the document content reproduced in a completely different form — e.g. full translation to another language, or a total rewrite/reformat of the entire document. The output IS the transformed document.
+- analytics: the user wants numerical aggregations computed across ALL documents — counts, totals, averages, statistics. NOT a summary of content.
+
+DECISION GUIDE:
+- "summarize", "what does it say", "explain", "tell me about" → rag
+- "compare doc A and doc B" → iterative_rag
+- "translate the whole document to French" → transform
+- "how many documents mention X", "total count of Y across all files" → analytics
+- anything conversational with no document intent → direct
 
 CONTEXT INHERITANCE RULE:
-If the previous assistant turn used documents (rag/iterative_rag/analytics/transform), and the current query is a short continuation or reference that makes no sense without that prior context — e.g. "again", "do the same for the other one", "what about X", "and Y?", "ok now summarize it" — inherit the previous route. The query does not need to mention documents explicitly.
+If the previous turn used documents and the current query is a short follow-up that only makes sense in that context, inherit the previous route.
 
-PRIORITY: When in doubt between rag and direct, pick rag.
+PRIORITY: When in doubt between rag and anything else, pick rag.
 {prior_context}
 
 CURRENT QUERY: {query}
@@ -766,7 +773,7 @@ Reply with ONE word only — the route name."""
             ).strip().lower()
 
             # Validate — rag checked BEFORE transform so ambiguous responses default safely
-            valid_routes = ["direct", "iterative_rag", "analytics", "transform", "rag"]
+            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
