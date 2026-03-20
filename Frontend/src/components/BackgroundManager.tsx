@@ -1,74 +1,85 @@
-import React, { useState } from 'react';
-import NetworkBackground from '@/components/NetworkBackground';
-import LiquidEther from '@/components/LiquidEther';
-
-/**
- * BackgroundManager — re-rolls on every full page load.
- * Stores the pick in sessionStorage so SPA navigation (going to /chat
- * and back) keeps the same background without re-rolling.
- *
- * How: on mount we check if this React tree was just freshly mounted
- * (module-level flag `didInit` is false on first mount after a page load).
- * If fresh → roll a new id and save it. If re-mount (HMR / StrictMode
- * double-invoke) → reuse the saved id.
- */
-
-const BACKGROUND_IDS = ['network', 'liquid-ether'] as const;
-type BgId = typeof BACKGROUND_IDS[number];
-
-const SESSION_KEY = 'bimlo_bg';
-
-// Module-level: reset to false on every true page load (JS module re-evaluation)
-let pickedThisLoad = false;
-
-function getOrRoll(): BgId {
-  if (!pickedThisLoad) {
-    // First mount after a real page load — always pick fresh
-    pickedThisLoad = true;
-    const idx = Math.floor(Math.random() * BACKGROUND_IDS.length);
-    const id = BACKGROUND_IDS[idx];
-    sessionStorage.setItem(SESSION_KEY, id);
-    return id;
-  }
-  // Re-mount (StrictMode, HMR, SPA nav) — reuse stored pick
-  const stored = sessionStorage.getItem(SESSION_KEY) as BgId | null;
-  if (stored && BACKGROUND_IDS.includes(stored)) return stored;
-  return BACKGROUND_IDS[0];
-}
-
-function renderBg(id: BgId): React.ReactNode {
-  if (id === 'liquid-ether') {
-    return (
-      <div
-        className="fixed inset-0 pointer-events-none"
-        style={{ zIndex: 0, opacity: 0.6 }}
-      >
-        <LiquidEther
-          colors={['#5227FF', '#FF9FFC', '#B19EEF']}
-          mouseForce={9}
-          cursorSize={120}
-          isViscous
-          viscous={30}
-          iterationsViscous={32}
-          iterationsPoisson={32}
-          resolution={0.5}
-          isBounce
-          autoDemo
-          autoSpeed={0.5}
-          autoIntensity={2.2}
-          takeoverDuration={0.25}
-          autoResumeDelay={3000}
-          autoRampDuration={0.6}
-        />
-      </div>
-    );
-  }
-  return <NetworkBackground />;
-}
+import React, { useState, useEffect } from 'react';
+import LineWaves from '@/components/LineWaves';
 
 const BackgroundManager = () => {
-  const [id] = useState<BgId>(getOrRoll);
-  return <>{renderBg(id)}</>;
+  const [opacity, setOpacity] = useState(0);
+  const [isDark, setIsDark] = useState(
+    () => document.documentElement.classList.contains('dark')
+  );
+
+  useEffect(() => {
+    let r1: number, r2: number;
+    r1 = requestAnimationFrame(() => {
+      r2 = requestAnimationFrame(() => setOpacity(1));
+    });
+    return () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2); };
+  }, []);
+
+  // Track theme changes
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains('dark'));
+    });
+    observer.observe(document.documentElement, { attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const forwardMove = (e: MouseEvent) => {
+      const canvas = document.querySelector<HTMLCanvasElement>('.line-waves-container canvas');
+      if (!canvas) return;
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        bubbles: true,
+      }));
+    };
+    window.addEventListener('mousemove', forwardMove);
+    return () => window.removeEventListener('mousemove', forwardMove);
+  }, []);
+
+  // Dark mode: light blues on dark bg
+  // Light mode: deeper blues/indigos on white bg, lower brightness so they're visible but not garish
+  const colors = isDark
+    ? { c1: '#3b82f6', c2: '#60a5fa', c3: '#93c5fd', brightness: 0.18, vignette: 0.75 }
+    : { c1: '#1d4ed8', c2: '#2563eb', c3: '#3b82f6', brightness: 0.12, vignette: 0.55 };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 0,
+        pointerEvents: 'none',
+        willChange: 'opacity',
+        opacity: opacity * 0.85,
+        transition: 'opacity 0.8s ease-out',
+      }}
+    >
+      {/* Softens center behind hero text */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        background: `radial-gradient(ellipse 70% 50% at 50% 40%, hsl(var(--background) / ${colors.vignette}) 0%, transparent 100%)`,
+        zIndex: 1,
+      }} />
+      <LineWaves
+        speed={0.25}
+        innerLineCount={28}
+        outerLineCount={32}
+        warpIntensity={0.9}
+        rotation={-45}
+        edgeFadeWidth={0}
+        colorCycleSpeed={0.6}
+        brightness={colors.brightness}
+        color1={colors.c1}
+        color2={colors.c2}
+        color3={colors.c3}
+        enableMouseInteraction
+        mouseInfluence={1.6}
+      />
+    </div>
+  );
 };
 
 export default BackgroundManager;

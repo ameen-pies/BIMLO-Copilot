@@ -62,12 +62,26 @@ const Index = () => {
 
 
   return (
-    <div className="min-h-screen bg-background">
+    <>
+      <style>{`
+        @keyframes bgFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes liquidFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 0.5; }
+        }
+        .animate-fade-in {
+          animation: liquidFadeIn 1.2s ease-out 0.3s both;
+        }
+      `}</style>
+    <div className="min-h-screen bg-background" style={{ animation: "bgFadeIn 0.6s ease-out both" }}>
       <BackgroundManager />
       <Navbar />
 
       {/* Hero */}
-      <section className="relative pt-40 pb-24 px-6 overflow-hidden min-h-screen flex items-center">
+      <section className="relative pt-40 pb-24 px-6 min-h-screen flex items-center">
         {/* Subtle gradient orbs */}
         <div className="absolute top-20 left-1/4 w-[500px] h-[500px] rounded-full bg-primary/5 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] rounded-full bg-primary/8 blur-3xl pointer-events-none" />
@@ -241,6 +255,7 @@ const Index = () => {
         </div>
       </footer>
     </div>
+    </>
   );
 };
 

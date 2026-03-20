@@ -6,7 +6,9 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import Chat from "./pages/Chat";
 import NotFound from "./pages/NotFound";
+import ClickSpark from "@/components/ClickSpark";
 import './scrollbar.css';
+
 const queryClient = new QueryClient();
 
 const App = () => (
@@ -15,12 +17,22 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          <Route path="/chat" element={<Chat />} />
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+        <ClickSpark
+          sparkColor="#60a5fa"
+          sparkSize={8}
+          sparkRadius={18}
+          sparkCount={8}
+          duration={380}
+        >
+          <div style={{ minHeight: '100vh' }}>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              <Route path="/chat" element={<Chat />} />
+              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </div>
+        </ClickSpark>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

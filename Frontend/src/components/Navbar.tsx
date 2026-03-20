@@ -5,7 +5,12 @@ import Logo from "@/components/Logo";
 
 const Navbar = () => {
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 glass-surface">
+    <nav className="fixed top-0 left-0 right-0 z-50" style={{
+      backdropFilter: 'blur(12px)',
+      WebkitBackdropFilter: 'blur(12px)',
+      backgroundColor: 'hsl(var(--background) / 0.55)',
+      borderBottom: '1px solid hsl(var(--border) / 0.3)',
+    }}>
       <div className="container mx-auto flex items-center justify-between h-16 px-6">
         <Link to="/" className="flex items-center gap-2">
           <Logo className="h-8 w-8" />
