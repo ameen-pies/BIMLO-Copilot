@@ -4,7 +4,7 @@ import { ArrowRight, Zap, FileText, MessageSquare, Network } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
 import RotatingWords from "@/components/RotatingWords";
-import NetworkBackground from "@/components/NetworkBackground";
+import BackgroundManager from "@/components/BackgroundManager";
 import { useState, useEffect } from "react";
 
 const features = [
@@ -63,7 +63,7 @@ const Index = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      <NetworkBackground />
+      <BackgroundManager />
       <Navbar />
 
       {/* Hero */}
