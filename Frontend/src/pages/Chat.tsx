@@ -2360,16 +2360,21 @@ const Chat = () => {
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`flex ${msg.role === "user" ? "justify-end" : "gap-3"}`}
+                className={`flex items-start ${msg.role === "user" ? "justify-end gap-2" : "gap-3"}`}
               >
                 {msg.role === "assistant" && (
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
-                <div className={`space-y-2 ${msg.role === "user" ? "flex flex-row-reverse items-start gap-2" : "max-w-[80%]"}`}>
+                {msg.role === "user" && (
+                  <div className="order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
+                    <User className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                )}
+                <div className={`space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
                   <div
                     className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? "bg-primary text-primary-foreground rounded-br-md"
+                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
                         : "bg-secondary text-secondary-foreground rounded-bl-md"
                     }`}
                   >
@@ -2594,11 +2599,6 @@ const Chat = () => {
                 <Logo className="h-8 w-8 shrink-0" />
                 <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3">
                   <TypingIndicator />
-                  {msg.role === "user" && (
-                    <div className="h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
-                      <User className="h-4 w-4 text-muted-foreground" />
-                    </div>
-                  )}
                 </div>
               </motion.div>
             )}
