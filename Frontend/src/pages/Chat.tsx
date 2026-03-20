@@ -949,8 +949,13 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
   // We use overflow-hidden on the outer div so the browser NEVER gets a chance
   // to scroll natively. Every wheel event (plain scroll OR ctrl+zoom) goes
   // through our handler, eliminating the scroll-then-zoom race entirely.
-  const applyZoomRef = useRef(applyZoom);
+  const applyZoomRef   = useRef(applyZoom);
   useEffect(() => { applyZoomRef.current = applyZoom; }, [applyZoom]);
+
+  // ── Mouse pan state ────────────────────────────────────────────────────
+  const isPanningRef   = useRef(false);
+  const panStartRef    = useRef({ x: 0, y: 0 });
+  const panTranslateRef = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     const el = outerRef.current;
@@ -1015,6 +1020,53 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
       cancelAnimationFrame(rafId);
     };
   }, [status]);
+
+  // ── Mouse pan (click + drag) ───────────────────────────────────────────────
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el || status !== "ready") return;
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;           // left button only
+      if ((e.target as HTMLElement).closest("button")) return; // don't hijack toolbar
+      isPanningRef.current = true;
+      panStartRef.current  = { x: e.clientX, y: e.clientY };
+      panTranslateRef.current = { ...translateRef.current };
+      el.style.cursor = "grabbing";
+      e.preventDefault();
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isPanningRef.current) return;
+      const inner = innerRef.current;
+      if (!inner || !naturalSizeRef.current) return;
+      const dx = e.clientX - panStartRef.current.x;
+      const dy = e.clientY - panStartRef.current.y;
+      const z = zoomRef.current;
+      const { w: natW, h: natH } = naturalSizeRef.current;
+      const maxX = -(natW * z - el.clientWidth);
+      const maxY = -(natH * z - el.clientHeight);
+      const newTx = Math.min(0, Math.max(maxX, panTranslateRef.current.x + dx));
+      const newTy = Math.min(0, Math.max(maxY, panTranslateRef.current.y + dy));
+      translateRef.current = { x: newTx, y: newTy };
+      inner.style.transform = `translate(${newTx}px, ${newTy}px) scale(${z})`;
+    };
+
+    const onMouseUp = () => {
+      if (!isPanningRef.current) return;
+      isPanningRef.current = false;
+      el.style.cursor = zoomMode ? (zoomRef.current >= 4 ? "zoom-out" : "zoom-in") : "grab";
+    };
+
+    el.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup",   onMouseUp);
+    return () => {
+      el.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup",   onMouseUp);
+    };
+  }, [status, zoomMode]);
 
   // ── Toolbar buttons ────────────────────────────────────────────────────────
   const toolbarZoom = useCallback((newZoom: number) => {
@@ -1091,7 +1143,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, highlight
             className="flex-1 overflow-hidden scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40"
             style={{
               background: "hsl(var(--muted)/0.3)",
-              cursor: zoomMode ? (zoom >= 4 ? "zoom-out" : "zoom-in") : "default",
+              cursor: zoomMode ? (zoom >= 4 ? "zoom-out" : "zoom-in") : "grab",
               minHeight: 0,
             }}
           >
@@ -2504,13 +2556,25 @@ const Chat = () => {
                       <div className="mt-3 space-y-2">
                         {citedSources.map((source) => {
                           // sections: [{ title, lines, excerpt }] — grouped by ## heading from the output
-                          // Cast via 'any' because Source type predates the new shape
-                          const sections: Array<{ title: string; lines: string[]; excerpt: string }> =
+                          // Normalize shape, then merge sections with the same title
+                          const rawSections: Array<{ title: string; lines: string[]; excerpt: string }> =
                             ((source as any).sections ?? []).map((s: any) => ({
                               title:   s.title   ?? "",
                               lines:   Array.isArray(s.lines) ? s.lines : (s.excerpt ? [s.excerpt] : []),
                               excerpt: s.excerpt ?? "",
                             }));
+                          // Merge duplicate titles: combine their lines, keep first excerpt
+                          const sectionsMap = new Map<string, { lines: string[]; excerpt: string }>();
+                          rawSections.forEach(sec => {
+                            const key = sec.title.trim();
+                            if (!sectionsMap.has(key)) {
+                              sectionsMap.set(key, { lines: [...sec.lines], excerpt: sec.excerpt });
+                            } else {
+                              const existing = sectionsMap.get(key)!;
+                              sec.lines.forEach(l => { if (!existing.lines.includes(l)) existing.lines.push(l); });
+                            }
+                          });
+                          const sections = Array.from(sectionsMap.entries()).map(([title, v]) => ({ title, ...v }));
                           const docExcerpt: string = (source as any).excerpt ?? "";
                           const isExpanded = expandedSources[`${msg.id}-${source.source_number}`];
 
