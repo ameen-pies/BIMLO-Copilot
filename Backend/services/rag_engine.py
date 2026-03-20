@@ -512,7 +512,7 @@ class RAGEngine:
     # ------------------------------------------------------------------ #
 
     def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """Main entry point. Pass conversation_history for context-aware responses."""
+        """Main entry point. conversation_history is managed by main.py session store."""
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
@@ -537,7 +537,7 @@ class RAGEngine:
         print(f"🔍 Query: {user_query}")
         
         final_state = self.graph.invoke(initial_state)
-        
+
         # Build response
         response = {
             "answer": final_state["answer"],
@@ -651,47 +651,51 @@ class RAGEngine:
             # Fallback to simple routing if LLM unavailable
             return self._fallback_router(state)
         
-        # Pass recent history to the router so it can detect follow-up intent —
-        # e.g. "make it shorter" needs the prior assistant answer to route correctly.
-        history_hint = ""
-        if history:
-            recent = history[-6:]  # last 3 exchanges
-            history_hint = "\n\nRECENT CONVERSATION:\n" + "\n".join(
-                f"{m['role'].upper()}: {m['content']}" for m in recent
+        # Summarise the last assistant answer (if any) so the router can detect
+        # follow-up intent ("make it shorter", "translate that") without being
+        # confused by the full conversation — we only need the last exchange.
+        last_assistant = next(
+            (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
+        )
+        last_user_before = ""
+        for i in range(len(history) - 1, -1, -1):
+            if history[i]["role"] == "assistant":
+                for j in range(i - 1, -1, -1):
+                    if history[j]["role"] == "user":
+                        last_user_before = history[j]["content"]
+                        break
+                break
+
+        prior_context = ""
+        if last_assistant:
+            prior_context = (
+                f"\n\nMOST RECENT EXCHANGE (for follow-up detection only):"
+                f"\nUSER SAID: {last_user_before[:300]}"
+                f"\nASSISTANT REPLIED: {last_assistant[:300]}"
             )
 
-        routing_prompt = f"""You are a router. Pick exactly one route for this query.
+        routing_prompt = f"""You are a query router. Your only job is to pick the right route for the CURRENT QUERY.
 
 ROUTES:
-- direct: greetings, small talk, thanks, casual chat, questions about the conversation itself (e.g. "what did I just say", "what is my name", "do you remember", "what was your last answer"), corrections or clarifications about the conversation (e.g. "no that's wrong", "I meant X", "ur name not mine"), any question that can be answered from the conversation history WITHOUT looking up documents
-- transform: the user wants to produce a NEW VERSION of document content in a different form — e.g. translate the document to another language, rewrite or paraphrase the whole document, reformat the entire document. The output IS the transformed document. No sources needed.
-- rag: the user wants to LEARN from documents — ask a question, get a summary with cited facts, understand what is in the documents, extract specific information. Sources and citations are expected.
-- iterative_rag: like rag but requires looking across multiple documents (comparisons, differences)
-- analytics: aggregated statistics across ALL documents (totals, counts, averages across the whole set)
+- direct: the query is about the conversation itself — greetings, memory recall ("what is my name"), follow-up edits to the last answer ("make it shorter", "say it differently"), small talk, thanks. No documents needed.
+- rag: the user wants information FROM the uploaded documents. Any question about document content, facts, specs, clauses, data in the files → rag.
+- iterative_rag: like rag but explicitly compares or contrasts multiple documents.
+- transform: the user wants the document reproduced in a new form — full translation, rewrite, reformat. Output IS the transformed document.
+- analytics: aggregated stats across ALL documents (totals, averages, counts).
 
-KEY RULE: If the query can be answered from the conversation history alone — without looking at any document — always pick "direct". This includes follow-up modifications to a previous answer ("make it shorter", "say it differently", "add more detail", "translate your last answer"). Do NOT route to rag just because no document-keyword is present.
+PRIORITY ORDER: rag > direct. If the query could plausibly need document content, pick rag. Only pick direct if the query is clearly conversational with no document intent whatsoever.
+{prior_context}
 
-TO DECIDE BETWEEN transform AND rag, ask yourself:
-- Would the user be satisfied with a cited, structured answer that explains the content? → rag
-- Does the user want the document itself reproduced in a new language or form, with no citation needed? → transform
-{history_hint}
-
-QUERY: {query}
+CURRENT QUERY: {query}
 
 Reply with ONE word only — the route name."""
 
         try:
-            # Pass conversation history as real messages so the routing LLM
-            # sees the actual prior turns — not just a pasted text block.
-            # This is what lets it detect "this is a follow-up / memory question".
-            router_messages = []
-            if history:
-                for m in history[-6:]:
-                    router_messages.append({"role": m["role"], "content": m["content"]})
-            router_messages.append({"role": "user", "content": routing_prompt})
-
+            # Router gets NO history messages — only the routing prompt.
+            # Passing history here biases the model toward "direct" because it
+            # sees the prior conversational turns and thinks the whole session is casual.
             route = self.llm.chat(
-                router_messages,
+                [{"role": "user", "content": routing_prompt}],
                 temperature=0.0,
                 max_tokens=50,
             ).strip().lower()
