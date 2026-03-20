@@ -52,7 +52,7 @@ const BackgroundManager = () => {
         zIndex: 0,
         pointerEvents: 'none',
         willChange: 'opacity',
-        opacity: opacity * 0.85,
+        opacity: opacity * 0.8,
         transition: 'opacity 0.8s ease-out',
       }}
     >
