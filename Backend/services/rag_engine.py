@@ -596,16 +596,22 @@ class RAGEngine:
         workflow.add_edge("direct_answer", END)
 
         # Retrieval flow
+        def _check_retrieval_route(s):
+            if not s["retrieved_chunks"]:
+                return "no_docs"   # nothing in the store → direct answer explains this
+            if s["route"] == "transform":
+                return "transform"
+            if (s["route"] == "iterative_rag"
+                    and s["retrieval_iterations"] < MAX_ITER
+                    and not _is_good_retrieval(s["retrieved_chunks"])):
+                return "rewrite"
+            return "done"
+
         workflow.add_conditional_edges(
             "check_retrieval",
-            lambda s: "transform" if s["route"] == "transform" else (
-                "rewrite" if (
-                    s["route"] == "iterative_rag" and
-                    s["retrieval_iterations"] < MAX_ITER and
-                    not _is_good_retrieval(s["retrieved_chunks"])
-                ) else "done"
-            ),
-            {"rewrite": "rewrite_query", "done": "judge_plan", "transform": "transform_node"}
+            _check_retrieval_route,
+            {"rewrite": "rewrite_query", "done": "judge_plan",
+             "transform": "transform_node", "no_docs": "direct_answer"},
         )
 
         workflow.add_edge("retrieve", "check_retrieval")
@@ -777,45 +783,54 @@ Reply with ONE word only — the route name."""
         """Handle direct questions without retrieval. Uses fallback plan — no LLM judge call needed."""
         query = state["query"]
         history = state.get("conversation_history", [])
-        
+
+        # Detect no-docs redirect from check_retrieval
+        no_docs = query.startswith("__NO_DOCS__:")
+        if no_docs:
+            query = query[len("__NO_DOCS__:"):]
+
         plan = self.judge._fallback_plan(query)
-        
-        print(f"💬 Direct answer (language: {plan.target_language}, tone: {plan.target_tone})")
-        
-        answer = self._generate_direct_answer(query, plan, history)
-        
+
+        print(f"💬 Direct answer (language: {plan.target_language}, tone: {plan.target_tone}, no_docs={no_docs})")
+
+        answer = self._generate_direct_answer(query, plan, history, no_docs=no_docs)
+
         return {
             **state,
+            "query": query,   # restore clean query without flag
             "answer": answer,
             "response_plan": plan,
             "confidence": 1.0,
         }
     
-    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None) -> str:
+    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False) -> str:
         """Generate a direct answer using conversation history as the primary context."""
 
-        messages: List[Dict] = [
-            {
-                "role": "system",
-                "content": (
-                    f"You are Bimlo Copilot, a helpful AI document assistant. "
-                    f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
-                    f"You have full access to the conversation history. Use it to: "
-                    f"recall anything said by the user, reference or modify your own previous answers, "
-                    f"and handle follow-up requests naturally. "
-                    f"If the user asks you to change or refine a previous answer, output the modified version directly."
-                ),
-            }
-        ]
+        if no_docs:
+            system_content = (
+                f"You are Bimlo Copilot, a helpful AI document assistant. "
+                f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
+                f"The user asked a question that requires documents, but no documents have been uploaded yet. "
+                f"Let them know naturally — match their tone and language exactly. "
+                f"Be brief, friendly, and encourage them to upload a document so you can help."
+            )
+        else:
+            system_content = (
+                f"You are Bimlo Copilot, a helpful AI document assistant. "
+                f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
+                f"You have full access to the conversation history. Use it to: "
+                f"recall anything said by the user, reference or modify your own previous answers, "
+                f"and handle follow-up requests naturally. "
+                f"If the user asks you to change or refine a previous answer, output the modified version directly."
+            )
 
-        # Inject the real conversation history so memory recall works correctly.
-        # We use the raw history messages directly — this preserves the natural
-        # conversation structure so the model can reference any prior turn.
+        messages: List[Dict] = [{"role": "system", "content": system_content}]
+
+        # Inject conversation history so memory recall works correctly
         if history:
-            for msg in history[-10:]:  # cap at last 10 turns
+            for msg in history[-10:]:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
-        # Current query as the final user turn
         messages.append({"role": "user", "content": query})
 
         if self.llm.enabled:
@@ -862,12 +877,15 @@ Reply with ONE word only — the route name."""
         """Check if retrieval quality is good enough."""
         chunks = state["retrieved_chunks"]
         is_good = _is_good_retrieval(chunks)
-        
-        if is_good:
-            print(f"✅ Retrieval quality: good")
+
+        if not chunks:
+            print("⚠️  No documents in store — will use direct answer")
+            return {**state, "query": f"__NO_DOCS__:{state['query']}"}
+        elif is_good:
+            print("✅ Retrieval quality: good")
         else:
-            print(f"⚠️  Retrieval quality: low (will retry if iterative)")
-        
+            print("⚠️  Retrieval quality: low (will retry if iterative)")
+
         return state
 
     def rewrite_query(self, state: AgentState) -> AgentState:

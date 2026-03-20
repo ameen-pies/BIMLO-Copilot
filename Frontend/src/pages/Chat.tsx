@@ -1733,16 +1733,6 @@ const Chat = () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
-    // Check if documents are uploaded
-    if (documents.length === 0) {
-      toast({
-        title: "No documents uploaded",
-        description: "Please upload at least one document before asking questions",
-        variant: "destructive",
-      });
-      return;
-    }
-
     // Collapse all sources when sending new message
     setExpandedSources({});
 
