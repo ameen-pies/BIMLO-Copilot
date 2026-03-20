@@ -1230,10 +1230,9 @@ function serializeError(err: unknown): string {
  */
 async function queryBackend(
   question: string,
+  sessionId: string | null,
   signal?: AbortSignal,
-  conversationHistory?: Array<{ role: string; content: string }>,
-): Promise<{ answer: string; raw_answer?: string; sources: Source[]; confidence: number }> {
-  // Derive base URL the same way api.ts does (VITE env var → localhost fallback)
+): Promise<{ answer: string; raw_answer?: string; sources: Source[]; confidence: number; session_id: string }> {
   const base =
     (typeof import.meta !== "undefined" && (import.meta as Record<string, unknown>).env
       ? ((import.meta as Record<string, { VITE_API_URL?: string }>).env.VITE_API_URL ?? "")
@@ -1245,7 +1244,7 @@ async function queryBackend(
     body: JSON.stringify({
       query: question,
       top_k: 5,
-      conversation_history: conversationHistory ?? [],
+      ...(sessionId ? { session_id: sessionId } : {}),
     }),
     signal,
   });
@@ -1255,9 +1254,7 @@ async function queryBackend(
     try {
       const body = await res.json();
       detail = serializeError(body);
-    } catch {
-      // ignore parse failure
-    }
+    } catch { /* ignore */ }
     throw new Error(detail);
   }
 
@@ -1278,6 +1275,7 @@ const Chat = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string>("default");
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
@@ -1712,6 +1710,7 @@ const Chat = () => {
   const startNewConversation = () => {
     const newId = Date.now().toString();
     setActiveConvId(newId);
+    setSessionId(null);
     setMessages([{
       id: "welcome-" + newId,
       role: "assistant",
@@ -1760,14 +1759,9 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
-      // Build conversation history so the backend has prior context for follow-up queries
-      const historyForBackend = messages
-        .filter(m => !m.id.startsWith("welcome"))
-        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
-
-      // Query the RAG system — use direct fetch to guarantee correct payload format
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(trimmedInput, abortControllerRef.current.signal, historyForBackend);
+      const response = await queryBackend(trimmedInput, sessionId, abortControllerRef.current.signal);
+      if (response.session_id) setSessionId(response.session_id);
 
       // Create assistant message with sources
       const assistantMsg: Message = {
@@ -1790,7 +1784,7 @@ const Chat = () => {
           if (existing) {
             return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
           }
-          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated }, ...convs];
+          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
         });
         return updated;
       });
@@ -1855,14 +1849,9 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
-      // Only pass history up to the edited message for clean context
-      const editHistoryForBackend = messages
-        .slice(0, msgIndex)
-        .filter(m => !m.id.startsWith("welcome"))
-        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
-
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(newContent, abortControllerRef.current.signal, editHistoryForBackend);
+      const response = await queryBackend(newContent, sessionId, abortControllerRef.current.signal);
+      if (response.session_id) setSessionId(response.session_id);
 
       const assistantMsg: Message = {
         id: Date.now().toString(),
@@ -1903,13 +1892,9 @@ const Chat = () => {
     setMessages(prev => prev.filter(m => m.id !== msgId));
     setIsLoading(true);
     try {
-      // Pass history excluding the message being redone
-      const redoHistoryForBackend = messages
-        .filter(m => m.id !== msgId && !m.id.startsWith("welcome"))
-        .map(m => ({ role: m.role, content: m.rawAnswer ?? m.content }));
-
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(prevUserMsg.content, abortControllerRef.current.signal, redoHistoryForBackend);
+      const response = await queryBackend(prevUserMsg.content, sessionId, abortControllerRef.current.signal);
+      if (response.session_id) setSessionId(response.session_id);
       const redoMsg: Message = {
         id: Date.now().toString(),
         role: "assistant",
@@ -2375,12 +2360,12 @@ const Chat = () => {
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}
+                className={`flex ${msg.role === "user" ? "justify-end" : "gap-3"}`}
               >
                 {msg.role === "assistant" && (
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
-                <div className="max-w-[80%] space-y-2">
+                <div className={`space-y-2 ${msg.role === "user" ? "flex flex-row-reverse items-start gap-2" : "max-w-[80%]"}`}>
                   <div
                     className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
@@ -2596,11 +2581,7 @@ const Chat = () => {
                     );
                   })()}
                 </div>
-                {msg.role === "user" && (
-                  <div className="h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
-                    <User className="h-4 w-4 text-muted-foreground" />
-                  </div>
-                )}
+
               </motion.div>
             ))}
 
@@ -2613,6 +2594,11 @@ const Chat = () => {
                 <Logo className="h-8 w-8 shrink-0" />
                 <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3">
                   <TypingIndicator />
+                  {msg.role === "user" && (
+                    <div className="h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
+                      <User className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}

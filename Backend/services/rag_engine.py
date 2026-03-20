@@ -168,16 +168,16 @@ class CloudflareClient:
         task: str = "synthesise",
     ) -> str:
         """
-        Accept messages[] and decompose into the worker format:
-          system role   -> systemPrompt
-          prior turns   -> history[]
-          last user msg -> prompt
-        task hint is forwarded so the worker can pick the right model/budget.
+        Send messages[] to the CF worker.
+        The worker expects: { prompt, systemPrompt, history[], max_tokens }
+          - system role  → systemPrompt
+          - prior turns  → history[]  (worker caps at MAX_HISTORY=10)
+          - last user msg → prompt
         """
         if not self.enabled:
             return ""
 
-        system_prompt: str = ""
+        system_prompt = ""
         history: List[Dict] = []
 
         for msg in messages:
@@ -188,15 +188,12 @@ class CloudflareClient:
             elif role in ("user", "assistant"):
                 history.append({"role": role, "content": content})
 
-        # Last user message is the live prompt; everything before is history
-        if history and history[-1]["role"] == "user":
-            prompt  = history[-1]["content"]
-            history = history[:-1]
-        elif history:
-            prompt  = history[-1]["content"]
-            history = history[:-1]
-        else:
+        if not history:
             return ""
+
+        # Last user message → prompt; everything before → history
+        prompt  = history[-1]["content"]
+        history = history[:-1]
 
         payload = {
             "prompt":       prompt,
@@ -654,12 +651,13 @@ class RAGEngine:
             # Fallback to simple routing if LLM unavailable
             return self._fallback_router(state)
         
-        # Include last 2 turns of history so the router understands follow-up context
+        # Pass recent history to the router so it can detect follow-up intent —
+        # e.g. "make it shorter" needs the prior assistant answer to route correctly.
         history_hint = ""
         if history:
-            recent = history[-4:]  # last 2 exchanges
-            history_hint = "\n\nRECENT CONVERSATION (for context):\n" + "\n".join(
-                f"{m['role'].upper()}: {m['content'][:200]}" for m in recent
+            recent = history[-6:]  # last 3 exchanges
+            history_hint = "\n\nRECENT CONVERSATION:\n" + "\n".join(
+                f"{m['role'].upper()}: {m['content']}" for m in recent
             )
 
         routing_prompt = f"""You are a router. Pick exactly one route for this query.
@@ -671,7 +669,7 @@ ROUTES:
 - iterative_rag: like rag but requires looking across multiple documents (comparisons, differences)
 - analytics: aggregated statistics across ALL documents (totals, counts, averages across the whole set)
 
-KEY RULE: If the query can be answered from the conversation history alone — without looking at any document — always pick "direct". Do NOT route to rag just because no document-keyword is present.
+KEY RULE: If the query can be answered from the conversation history alone — without looking at any document — always pick "direct". This includes follow-up modifications to a previous answer ("make it shorter", "say it differently", "add more detail", "translate your last answer"). Do NOT route to rag just because no document-keyword is present.
 
 TO DECIDE BETWEEN transform AND rag, ask yourself:
 - Would the user be satisfied with a cited, structured answer that explains the content? → rag
@@ -683,8 +681,17 @@ QUERY: {query}
 Reply with ONE word only — the route name."""
 
         try:
+            # Pass conversation history as real messages so the routing LLM
+            # sees the actual prior turns — not just a pasted text block.
+            # This is what lets it detect "this is a follow-up / memory question".
+            router_messages = []
+            if history:
+                for m in history[-6:]:
+                    router_messages.append({"role": m["role"], "content": m["content"]})
+            router_messages.append({"role": "user", "content": routing_prompt})
+
             route = self.llm.chat(
-                [{"role": "user", "content": routing_prompt}],
+                router_messages,
                 temperature=0.0,
                 max_tokens=50,
             ).strip().lower()
@@ -789,8 +796,10 @@ Reply with ONE word only — the route name."""
                 "content": (
                     f"You are Bimlo Copilot, a helpful AI document assistant. "
                     f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
-                    f"Use the conversation history to answer questions about what was said earlier — "
-                    f"names, corrections, prior answers. Keep replies brief and natural."
+                    f"You have full access to the conversation history. Use it to: "
+                    f"recall anything said by the user, reference or modify your own previous answers, "
+                    f"and handle follow-up requests naturally. "
+                    f"If the user asks you to change or refine a previous answer, output the modified version directly."
                 ),
             }
         ]
@@ -953,12 +962,13 @@ Respond with ONLY the rewritten query, nothing else."""
         # Build prompt that FOLLOWS the plan
         prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction)
         
-        # Build messages — prepend last few history turns so model has context
+        # Build messages — prepend conversation history so the model can handle
+        # modification requests ("make it shorter", "change X to Y") by seeing
+        # what it previously said. No truncation — the frontend already caps history.
         history = state.get("conversation_history", [])
         history_msgs: List[Dict] = []
         if history:
-            # Last 3 exchanges (6 messages) for context — don't bloat the prompt
-            history_msgs = [{"role": m["role"], "content": m["content"][:300]} for m in history[-6:]]
+            history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
         # Generate answer
         if self.llm.enabled:

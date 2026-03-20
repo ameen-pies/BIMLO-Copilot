@@ -2,10 +2,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
-from typing import List, Optional, Any
-import os, mimetypes
+from typing import List, Optional, Any, Dict
+import os, mimetypes, uuid
 from datetime import datetime
 from dotenv import load_dotenv
+from collections import deque
 
 load_dotenv()
 print(f"🔑 GROQ_API_KEY loaded: {'Yes' if os.getenv('GROQ_API_KEY') else 'No'}")
@@ -45,22 +46,45 @@ REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
+# ============================================================================
+# SERVER-SIDE CONVERSATION MEMORY
+# Each session keeps the last 20 turns (user + assistant) in a deque.
+# The frontend only needs to send a session_id — the backend owns history.
+# ============================================================================
+
+MAX_HISTORY_TURNS = 20
+# session_id -> deque of {role, content} dicts
+_sessions: Dict[str, deque] = {}
+
+def get_history(session_id: str) -> List[dict]:
+    return list(_sessions.get(session_id, []))
+
+def append_turn(session_id: str, role: str, content: str):
+    if session_id not in _sessions:
+        _sessions[session_id] = deque(maxlen=MAX_HISTORY_TURNS)
+    _sessions[session_id].append({"role": role, "content": content})
+
+def clear_history(session_id: str):
+    _sessions.pop(session_id, None)
+
 
 # ============================================================================
 # MODELS
 # ============================================================================
 
 class QueryRequest(BaseModel):
-    query: str
-    top_k: Optional[int] = 5
+    query:      str
+    top_k:      Optional[int] = 5
+    session_id: Optional[str] = None   # omit → new session created automatically
 
 
 class QueryResponse(BaseModel):
     answer:     str
     sources:    List[dict]
     confidence: float
-    route:      Optional[str] = None   # which LangGraph branch was taken
-    analytics:  Optional[Any] = None   # populated for analytics queries
+    route:      Optional[str] = None
+    analytics:  Optional[Any] = None
+    session_id: str                    # always returned so frontend can reuse it
 
 
 # ============================================================================
@@ -82,7 +106,7 @@ async def root():
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    """Upload and index a telecom document (PDF, DOCX, TXT)."""
+    """Upload and index a document (PDF, DOCX, TXT)."""
     try:
         allowed = ['.pdf', '.docx', '.doc', '.txt']
         ext = os.path.splitext(file.filename)[1].lower()
@@ -119,22 +143,53 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
     """
-    Agentic RAG query endpoint.
+    Agentic RAG query — now session-aware.
 
-    The LangGraph agent automatically selects the best strategy:
-    - **direct**        – no retrieval needed (greetings, meta)
-    - **rag**           – single retrieval pass
-    - **iterative_rag** – multi-round retrieval with query rewriting
-    - **analytics**     – structured analytics from documents
+    Pass session_id to continue a conversation; omit it to start a new one.
+    The server stores and manages the full conversation history.
     """
     try:
-        print(f"\n🔍 Query: {request.query}")
-        result = rag_engine.query(request.query, top_k=request.top_k)
+        # Resolve or create session
+        session_id = request.session_id or str(uuid.uuid4())
+
+        # Get history accumulated so far for this session
+        history = get_history(session_id)
+
+        print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns]")
+
+        # Run the RAG engine with server-side history
+        result = rag_engine.query(
+            request.query,
+            top_k=request.top_k,
+            conversation_history=history,
+        )
+
+        # Store this turn in server-side history (clean, no [N] citation markers)
+        import re as _re
+        clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
+        append_turn(session_id, "user",      request.query)
+        append_turn(session_id, "assistant", clean_answer)
+
         print(f"✅ Done (route={result.get('route')}, confidence={result['confidence']})")
-        return QueryResponse(**result)
+
+        return QueryResponse(
+            answer=result["answer"],
+            sources=result["sources"],
+            confidence=result["confidence"],
+            route=result.get("route"),
+            analytics=result.get("analytics"),
+            session_id=session_id,
+        )
     except Exception as e:
         print(f"❌ Query error: {e}")
         raise HTTPException(500, f"Error processing query: {e}")
+
+
+@app.delete("/sessions/{session_id}")
+async def clear_session(session_id: str):
+    """Clear conversation history for a session (e.g. when user starts a new chat)."""
+    clear_history(session_id)
+    return {"status": "success", "message": f"Session {session_id} cleared"}
 
 
 @app.post("/generate-report")
@@ -275,11 +330,12 @@ async def health_check():
     try:
         stats = vector_store.get_collection_stats()
         return {
-            "status":     "healthy",
-            "timestamp":  datetime.now().isoformat(),
+            "status":       "healthy",
+            "timestamp":    datetime.now().isoformat(),
             "vector_store": "connected",
-            "graph":      "LangGraph agentic RAG",
-            "statistics": stats,
+            "graph":        "LangGraph agentic RAG",
+            "statistics":   stats,
+            "active_sessions": len(_sessions),
         }
     except Exception as e:
         return {"status": "degraded", "timestamp": datetime.now().isoformat(), "error": str(e)}
