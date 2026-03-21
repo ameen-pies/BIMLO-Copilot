@@ -196,7 +196,7 @@ const Index = () => {
                   Built for telecom professionals
                 </motion.h2>
                 <motion.p
-                  className="max-w-xl mb-8" style={{ color: "rgba(255,255,255,0.85)" }}
+                  className="text-foreground/75 max-w-xl mb-8"
                   initial="hidden"
                   whileInView="visible"
                   viewport={{ once: true }}
