@@ -2728,17 +2728,16 @@ const Chat = () => {
         </div>
 
         {/* Input */}
-        <div className="border-t border-border p-4">
+        <div className="border-t border-border p-4 overflow-hidden">
           <div className="max-w-3xl mx-auto">
             <BorderGlow
               edgeSensitivity={30}
               glowColor="214 100 65"
               backgroundColor="transparent"
               borderRadius={16}
-              glowRadius={70}
-              glowIntensity={2.5}
-              coneSpread={45}
-              fillOpacity={0.9}
+              glowRadius={40}
+              glowIntensity={1.5}
+              coneSpread={25}
               animated={false}
               colors={['#60a5fa', '#3b82f6', '#93c5fd']}
               className="w-full"

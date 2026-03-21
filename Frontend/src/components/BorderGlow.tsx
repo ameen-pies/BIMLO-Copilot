@@ -1,180 +1,47 @@
-import { useRef, useCallback, useEffect } from 'react';
-import { useTheme } from '@/hooks/use-theme';
+import { useRef, useCallback } from 'react';
 import './BorderGlow.css';
-
-function parseHSL(hslStr) {
-  const match = hslStr.match(/([\d.]+)\s*([\d.]+)%?\s*([\d.]+)%?/);
-  if (!match) return { h: 40, s: 80, l: 80 };
-  return { h: parseFloat(match[1]), s: parseFloat(match[2]), l: parseFloat(match[3]) };
-}
-
-function buildGlowVars(glowColor, intensity) {
-  const { h, s, l } = parseHSL(glowColor);
-  const base = `${h}deg ${s}% ${l}%`;
-  const opacities = [100, 60, 50, 40, 30, 20, 10];
-  const keys = ['', '-60', '-50', '-40', '-30', '-20', '-10'];
-  const vars = {};
-  for (let i = 0; i < opacities.length; i++) {
-    vars[`--glow-color${keys[i]}`] = `hsl(${base} / ${Math.min(opacities[i] * intensity, 100)}%)`;
-  }
-  return vars;
-}
-
-const GRADIENT_POSITIONS = ['80% 55%', '69% 34%', '8% 6%', '41% 38%', '86% 85%', '82% 18%', '51% 4%'];
-const GRADIENT_KEYS = ['--gradient-one', '--gradient-two', '--gradient-three', '--gradient-four', '--gradient-five', '--gradient-six', '--gradient-seven'];
-const COLOR_MAP = [0, 1, 2, 0, 1, 2, 1];
-
-function buildGradientVars(colors) {
-  const vars = {};
-  for (let i = 0; i < 7; i++) {
-    const c = colors[Math.min(COLOR_MAP[i], colors.length - 1)];
-    vars[GRADIENT_KEYS[i]] = `radial-gradient(at ${GRADIENT_POSITIONS[i]}, ${c} 0px, transparent 50%)`;
-  }
-  vars['--gradient-base'] = `linear-gradient(${colors[0]} 0 100%)`;
-  return vars;
-}
-
-function easeOutCubic(x) { return 1 - Math.pow(1 - x, 3); }
-function easeInCubic(x) { return x * x * x; }
-
-function animateValue({ start = 0, end = 100, duration = 1000, delay = 0, ease = easeOutCubic, onUpdate, onEnd }) {
-  const t0 = performance.now() + delay;
-  function tick() {
-    const elapsed = performance.now() - t0;
-    const t = Math.min(elapsed / duration, 1);
-    onUpdate(start + (end - start) * ease(t));
-    if (t < 1) requestAnimationFrame(tick);
-    else if (onEnd) onEnd();
-  }
-  setTimeout(() => requestAnimationFrame(tick), delay);
-}
-
-// Shortest angular distance between two angles, returns delta in -180..180
-function shortestAngleDelta(from, to) {
-  let delta = ((to - from) % 360 + 360) % 360;
-  if (delta > 180) delta -= 360;
-  return delta;
-}
 
 const BorderGlow = ({
   children,
   className = '',
-  edgeSensitivity = 30,
-  glowColor = '40 80 80',
-  backgroundColor = '#060010',
-  borderRadius = 28,
-  glowRadius = 40,
-  glowIntensity = 1.0,
-  coneSpread = 25,
-  animated = false,
-  colors = ['#c084fc', '#f472b6', '#38bdf8'],
-  fillOpacity = 0.5,
+  glowColor = '214 100 65',
+  backgroundColor = 'transparent',
+  borderRadius = 16,
+  glowIntensity = 1.5,
+  colors = ['#60a5fa', '#3b82f6', '#93c5fd'],
+  // kept for API compatibility, unused
+  edgeSensitivity,
+  glowRadius,
+  coneSpread,
+  animated,
+  fillOpacity,
 }) => {
   const cardRef = useRef(null);
-  const { theme } = useTheme();
-  const isDark = theme === 'dark';
-  // In light mode: boost intensity and use a slightly stronger border
-  const effectiveIntensity = isDark ? glowIntensity : glowIntensity * 1.8;
-  const effectiveFillOpacity = isDark ? fillOpacity : fillOpacity * 0.6;
-  const currentAngleRef = useRef(0);   // tracks the real running angle (unbounded, no wrap)
 
-  const handlePointerMove = useCallback((e) => {
-    const card = cardRef.current;
-    if (!card) return;
-
-    const rect = card.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const { width, height } = rect;
-
-    // Map cursor to a continuous 0–360° angle by walking the perimeter clockwise:
-    // top edge: 0° (left) → 90° (right)
-    // right edge: 90° (top) → 180° (bottom)
-    // bottom edge: 180° (right) → 270° (left)
-    // left edge: 270° (bottom) → 360° (top)
-    // This is a continuous loop with no jumps anywhere.
-    const perimeter = 2 * (width + height);
-    const dTop    = y;
-    const dBottom = height - y;
-    const dLeft   = x;
-    const dRight  = width - x;
-    const minDist = Math.min(dTop, dBottom, dLeft, dRight);
-
-    // Find the nearest point on the border and its perimeter distance
-    let perimPos = 0;
-    if (minDist === dTop) {
-      perimPos = x; // 0 → width along top
-    } else if (minDist === dRight) {
-      perimPos = width + y; // width → width+height along right
-    } else if (minDist === dBottom) {
-      perimPos = width + height + (width - x); // along bottom (right→left)
-    } else {
-      perimPos = width + height + width + (height - y); // along left (bottom→top)
-    }
-
-    const rawTarget = (perimPos / perimeter) * 360;
-
-    // Shortest path from current accumulated angle to avoid jumps
-    const current = currentAngleRef.current;
-    const delta = shortestAngleDelta(((current % 360) + 360) % 360, rawTarget);
-    const target = current + delta;
-    currentAngleRef.current = target;
-
-    // Proximity: stronger at the edge
-    const shortHalf = Math.min(width, height) / 2;
-    const proximity = Math.min(Math.max(1 - minDist / shortHalf, 0), 1);
-
-    card.style.setProperty('--cursor-angle', `${target.toFixed(3)}deg`);
-    card.style.setProperty('--edge-proximity', `${(proximity * 100).toFixed(3)}`);
-    card.style.setProperty('--cursor-x', `${((x / width) * 100).toFixed(2)}%`);
-    card.style.setProperty('--cursor-y', `${((y / height) * 100).toFixed(2)}%`);
-  }, []);
-
-  useEffect(() => {
-    if (!animated || !cardRef.current) return;
-    const card = cardRef.current;
-    const angleStart = 110;
-    const angleEnd = 465;
-    card.classList.add('sweep-active');
-    card.style.setProperty('--cursor-angle', `${angleStart}deg`);
-    card.style.setProperty('--cursor-x', '50%');
-    card.style.setProperty('--cursor-y', '50%');
-
-    animateValue({ duration: 500, onUpdate: v => card.style.setProperty('--edge-proximity', v) });
-    animateValue({ ease: easeInCubic, duration: 1500, end: 50, onUpdate: v => {
-      card.style.setProperty('--cursor-angle', `${(angleEnd - angleStart) * (v / 100) + angleStart}deg`);
-    }});
-    animateValue({ ease: easeOutCubic, delay: 1500, duration: 2250, start: 50, end: 100, onUpdate: v => {
-      card.style.setProperty('--cursor-angle', `${(angleEnd - angleStart) * (v / 100) + angleStart}deg`);
-    }});
-    animateValue({ ease: easeInCubic, delay: 2500, duration: 1500, start: 100, end: 0,
-      onUpdate: v => card.style.setProperty('--edge-proximity', v),
-      onEnd: () => card.classList.remove('sweep-active'),
-    });
-  }, [animated]);
-
-  const glowVars = buildGlowVars(glowColor, effectiveIntensity);
+  const buildGlowColor = (opacity) => {
+    const [h, s, l] = glowColor.split(' ');
+    return `hsl(${h}deg ${s}% ${l}% / ${Math.min(opacity * glowIntensity, 100)}%)`;
+  };
 
   return (
     <div
       ref={cardRef}
-      onPointerMove={handlePointerMove}
-      className={`border-glow-card ${className}`}
+      className={`simple-glow-card ${className}`}
       style={{
+        '--glow-color':    buildGlowColor(100),
+        '--glow-color-60': buildGlowColor(60),
+        '--glow-color-40': buildGlowColor(40),
+        '--glow-color-20': buildGlowColor(20),
+        '--glow-color-10': buildGlowColor(10),
         '--card-bg': backgroundColor,
-        '--edge-sensitivity': edgeSensitivity,
         '--border-radius': `${borderRadius}px`,
-        '--glow-padding': `${glowRadius}px`,
-        '--cone-spread': coneSpread,
-        '--fill-opacity': effectiveFillOpacity,
-        '--cursor-x': '50%',
-        '--cursor-y': '50%',
-        ...glowVars,
-        ...buildGradientVars(colors),
-      }}
+        '--gradient-base': `linear-gradient(${colors[0]} 0 100%)`,
+        '--gradient-one':  `radial-gradient(at 20% 50%, ${colors[0]} 0px, transparent 60%)`,
+        '--gradient-two':  `radial-gradient(at 80% 50%, ${colors[1]} 0px, transparent 60%)`,
+        '--gradient-three':`radial-gradient(at 50% 50%, ${colors[2]} 0px, transparent 60%)`,
+      } as React.CSSProperties}
     >
-      <span className="edge-light" />
-      <div className="border-glow-inner">
+      <div className="simple-glow-inner">
         {children}
       </div>
     </div>
