@@ -11,6 +11,7 @@ import Logo from "@/components/Logo";
 import api, { Document, Source } from "@/services/api";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import BorderGlow from "@/components/BorderGlow";
 
 interface Message {
   id: string;
@@ -2729,8 +2730,21 @@ const Chat = () => {
         {/* Input */}
         <div className="border-t border-border p-4">
           <div className="max-w-3xl mx-auto">
+            <BorderGlow
+              edgeSensitivity={30}
+              glowColor="214 100 65"
+              backgroundColor="transparent"
+              borderRadius={16}
+              glowRadius={70}
+              glowIntensity={2.5}
+              coneSpread={45}
+              fillOpacity={0.9}
+              animated={false}
+              colors={['#60a5fa', '#3b82f6', '#93c5fd']}
+              className="w-full"
+            >
             <div
-              className="relative rounded-2xl border border-input bg-card focus-within:ring-2 focus-within:ring-ring focus-within:border-transparent transition-all"
+              className="relative rounded-2xl bg-card"
               onDragEnter={handleInputDragEnter}
               onDragOver={handleInputDragOver}
               onDragLeave={handleInputDragLeave}
@@ -2848,6 +2862,7 @@ const Chat = () => {
                 )}
               </div>
             </div>
+            </BorderGlow>
           </div>
           <p className="text-center text-[11px] text-muted-foreground/50 mt-2 select-none">
             This agent can make mistakes — be sure to verify results.
