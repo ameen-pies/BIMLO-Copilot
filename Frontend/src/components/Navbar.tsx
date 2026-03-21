@@ -28,7 +28,7 @@ const Navbar = () => {
               if (element) {
                 const navbarHeight = 64; // h-16 = 64px
                 const elementPosition = element.getBoundingClientRect().top + window.pageYOffset;
-                const offsetPosition = elementPosition - navbarHeight - 160; // Extra 160px padding
+                const offsetPosition = elementPosition - navbarHeight - 30; // Extra 110px padding
                 window.scrollTo({
                   top: offsetPosition,
                   behavior: 'smooth'

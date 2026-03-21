@@ -2728,7 +2728,7 @@ const Chat = () => {
         </div>
 
         {/* Input */}
-        <div className="border-t border-border p-4 overflow-hidden">
+        <div className="border-t border-border p-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto">
             <BorderGlow
               edgeSensitivity={30}
@@ -2743,7 +2743,7 @@ const Chat = () => {
               className="w-full"
             >
             <div
-              className="relative rounded-2xl bg-card"
+              className="relative rounded-2xl bg-card shadow-md"
               onDragEnter={handleInputDragEnter}
               onDragOver={handleInputDragOver}
               onDragLeave={handleInputDragLeave}
