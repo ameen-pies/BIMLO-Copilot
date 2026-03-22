@@ -1074,13 +1074,10 @@ Respond with ONLY the rewritten query, nothing else."""
         # Build context
         context = _build_context(chunks)
         
-        # On retry, inject the judge's fix instruction into the prompt
-        fix_instruction = ""
-        if retry_count > 0 and evaluation and evaluation.how_to_fix:
-            fix_instruction = f"\n\nFix required: {evaluation.how_to_fix}\n"
-        
-        # Build prompt that FOLLOWS the plan
-        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction)
+        # On retry the plan itself has been updated by _should_retry —
+        # the fix instruction is already baked into plan.approach.
+        # We pass an empty fix_instruction here so we don't double-inject it.
+        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="")
         
         # Build messages — prepend conversation history so the model can handle
         # modification requests ("make it shorter", "change X to Y") by seeing
@@ -1158,12 +1155,20 @@ Respond with ONLY the rewritten query, nothing else."""
         }
         tone = tone_map.get(plan.target_tone, plan.target_tone)
 
-        # Build source reference list so LLM knows which number = which file
-        source_lines = ""
-        # context is built by _build_context which already labels [Source 1], [Source 2] etc.
+        # Surface the approach/correction directive if present
+        approach_block = ""
+        if plan.approach and "CORRECTION REQUIRED" in plan.approach:
+            approach_block = f"\n\n⚠️  CORRECTION: {plan.approach.split('CORRECTION REQUIRED:')[-1].strip()}\n"
+        elif plan.approach:
+            approach_block = f"\nApproach: {plan.approach}\n"
+
+        # Things to avoid
+        avoid_block = ""
+        if plan.things_to_avoid:
+            avoid_block = f"\nAvoid: {', '.join(plan.things_to_avoid[:5])}\n"
 
         return f"""You are a document assistant. Answer ONLY using the documents below.
-Language: {plan.target_language}. Tone: {tone}.{fix_instruction}
+Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}
 
 CITATION RULE: After every sentence that uses information from a document, add [N] where N is the source number shown in the document headers below.
 
@@ -1178,14 +1183,6 @@ OUTPUT STRUCTURE — follow this exactly:
 - Leave a blank line between every section
 - Use **bold** for key terms, numbers, technical standards
 - NEVER label sections "Source 1" or "Document 2" — use the actual subject matter
-
-EXAMPLE of correct output format:
-## [Main Topic from Documents]
-One or two sentences summarising the key point [1].
-
-## [Second Topic]
-- **Item A**: description [1]
-- **Item B**: description [2]
 
 {query}
 
@@ -1269,7 +1266,16 @@ Answer in {plan.target_language}:"""
         
         # Get judge's evaluation
         evaluation = self.judge.evaluate_response(query, plan, answer, chunks)
-        
+
+        # Override: only retry if score is genuinely low (< 0.5).
+        # The LLM judge tends to be overly strict — a score of 0.6-0.7 is fine.
+        # Hallucination is the only hard rejection regardless of score.
+        if evaluation.overall_score >= 0.5 and not evaluation.has_hallucination:
+            from dataclasses import replace as _replace
+            evaluation = type(evaluation)(
+                **{**evaluation.__dict__, "is_acceptable": True}
+            )
+
         if evaluation.is_acceptable:
             print(f"✅ ACCEPTED (score: {evaluation.overall_score:.2f})")
         else:
@@ -1285,41 +1291,73 @@ Answer in {plan.target_language}:"""
     def _should_retry(self, state: AgentState) -> str:
         """
         Decide whether to retry based on judge's evaluation.
-        
-        Returns:
-        - 'retry': Response not acceptable, retry
-        - 'analytics': Continue to analytics (if analytics route)
-        - 'done': Response acceptable or max retries reached
+
+        On retry: mutate the ResponsePlan to directly encode the judge's fix
+        so the synthesiser follows an improved plan — not the same prompt + a note.
+
+        Returns: 'retry' | 'analytics' | 'done'
         """
         evaluation = state.get("response_evaluation")
         retry_count = state.get("retry_count", 0)
         route = state["route"]
-        
-        # If no evaluation, proceed
+
+        def _next(r: str) -> str:
+            return "analytics" if r == "analytics" else "done"
+
         if not evaluation:
-            if route == "analytics":
-                return "analytics"
-            return "done"
-        
-        # If acceptable, proceed
+            return _next(route)
+
         if evaluation.is_acceptable:
-            if route == "analytics":
-                return "analytics"
-            return "done"
-        
-        # If max retries reached, give up
+            return _next(route)
+
         if retry_count >= MAX_RETRIES:
-            print(f"⚠️  Max retries ({MAX_RETRIES}) reached, proceeding anyway")
-            if route == "analytics":
-                return "analytics"
-            return "done"
-        
-        # Retry
-        print(f"🔄 Retrying (attempt {retry_count + 2}/{MAX_RETRIES + 1})")
-        
-        # Increment retry count
+            print(f"⚠️  Max retries ({MAX_RETRIES}) reached — using best answer so far")
+            return _next(route)
+
+        # ── Mutate the plan to encode the judge's fix ─────────────────────
+        plan = state.get("response_plan")
+        if plan and evaluation.how_to_fix:
+            fix = evaluation.how_to_fix.lower()
+            updates = {}
+
+            # Language wrong → correct it
+            if not evaluation.language_correct:
+                updates["target_language"] = plan.target_language  # keep — judge already set it
+
+            # Tone wrong → adjust
+            if not evaluation.tone_correct:
+                if any(w in fix for w in ("formal", "professional")):
+                    updates["target_tone"] = "professional"
+                elif any(w in fix for w in ("casual", "friendly", "conversational")):
+                    updates["target_tone"] = "conversational"
+                elif "technical" in fix:
+                    updates["target_tone"] = "technical"
+
+            # Length/detail issues
+            if any(w in fix for w in ("shorter", "concise", "brief", "too long")):
+                updates["max_response_length"] = "brief"
+                updates["response_style"] = "concise"
+            elif any(w in fix for w in ("longer", "more detail", "expand", "comprehensive")):
+                updates["max_response_length"] = "comprehensive"
+                updates["response_style"] = "detailed"
+
+            # Structure issues
+            if any(w in fix for w in ("bullet", "list", "structured")):
+                updates["response_style"] = "bullet_points"
+            elif any(w in fix for w in ("narrative", "prose", "paragraph")):
+                updates["response_style"] = "narrative"
+
+            # Always inject the fix instruction as an explicit directive
+            existing_approach = plan.approach or ""
+            updates["approach"] = f"{existing_approach}. CORRECTION REQUIRED: {evaluation.how_to_fix}"
+            updates["things_to_avoid"] = list(plan.things_to_avoid) + evaluation.specific_problems
+
+            if updates:
+                state["response_plan"] = ResponsePlan(**{**plan.to_dict(), **updates})
+                print(f"🔧 Plan updated for retry: {list(updates.keys())}")
+
         state["retry_count"] = retry_count + 1
-        
+        print(f"🔄 Retrying with improved plan (attempt {retry_count + 2}/{MAX_RETRIES + 1})")
         return "retry"
 
     # ------------------------------------------------------------------ #
