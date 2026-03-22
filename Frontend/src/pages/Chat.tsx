@@ -1904,7 +1904,6 @@ const Chat = () => {
       });
       setTypingMessageId(assistantMsg.id);
       // Fetch contextual next-step suggestions in background
-      setSuggestions([]);
       fetchSuggestions(trimmedInput, response.answer);
 
     } catch (error) {
@@ -2002,47 +2001,34 @@ const Chat = () => {
     }
   };
 
-  // ── Contextual suggestions ────────────────────────────────────────────────
+  // ── Contextual suggestions (via backend /suggest → CF Worker) ───────────
   const fetchSuggestions = useCallback(async (userQuery: string, assistantReply: string) => {
+    // Set loading FIRST so the skeleton appears immediately
     setSuggestionsLoading(true);
     setSuggestions([]);
     try {
-      const apiBase =
+      const base =
         (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
         "http://localhost:8000";
-      // Proxy through backend to avoid exposing key on client — if backend exposes /suggest
-      // Otherwise fall through to Anthropic directly (key must be injected server-side)
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch(`${base}/suggest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 120,
-          system: `You generate short follow-up prompt suggestions (2–4 words each) based on a user's last query and the AI's reply.
-Rules:
-- Return ONLY a JSON array of 3–4 short strings, nothing else.
-- Each suggestion must be 2–4 words, actionable, and directly relevant.
-- Vary the types: e.g. dig deeper, compare, define a term, list something, export/summarize.
-- NO preamble, NO markdown, NO explanations. Pure JSON array only.
-Example output: ["Summarize key points","Define key terms","Compare with baseline","Export as table"]`,
-          messages: [
-            {
-              role: "user",
-              content: `User asked: "${userQuery.slice(0, 300)}"\n\nAssistant replied: "${assistantReply.slice(0, 600)}"\n\nGenerate 3-4 follow-up suggestion chips.`,
-            },
-          ],
+          user_query:      userQuery.slice(0, 400),
+          assistant_reply: assistantReply.slice(0, 800),
+          available_docs:  documents.map(d => d.filename),
         }),
       });
-      if (!res.ok) throw new Error("API error");
-      const data = await res.json();
-      const text = data.content?.find((b: any) => b.type === "text")?.text ?? "[]";
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed: string[] = JSON.parse(clean);
-      if (Array.isArray(parsed)) {
-        setSuggestions(parsed.slice(0, 4).map((s: string) => String(s).slice(0, 40)));
+      if (!res.ok) {
+        console.warn(`[suggestions] /suggest returned ${res.status}`);
+        setSuggestionsLoading(false);
+        return;
       }
-    } catch {
-      // Silently fail — suggestions are optional UX enhancement
+      const data = await res.json();
+      const chips: string[] = Array.isArray(data.suggestions) ? data.suggestions : [];
+      setSuggestions(chips.slice(0, 4).map((s: string) => String(s).slice(0, 50)));
+    } catch (err) {
+      console.warn("[suggestions] fetch failed:", err);
     } finally {
       setSuggestionsLoading(false);
     }
@@ -2871,12 +2857,12 @@ Example output: ["Summarize key points","Define key terms","Compare with baselin
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.2 }}
-                  className="flex items-center gap-2 flex-wrap mb-2.5"
+                  className="flex items-center justify-center gap-2 flex-wrap mb-2.5"
                 >
-                  <Sparkles className="h-3.5 w-3.5 text-primary/50 shrink-0" />
                   {suggestionsLoading && suggestions.length === 0 ? (
                     <>
-                      {[80, 96, 72].map((w, i) => (
+                      <Sparkles className="h-3.5 w-3.5 text-primary/50 shrink-0" />
+                      {[80, 96, 72, 88].map((w, i) => (
                         <div
                           key={i}
                           className="h-7 rounded-full bg-muted animate-pulse"
@@ -2885,22 +2871,33 @@ Example output: ["Summarize key points","Define key terms","Compare with baselin
                       ))}
                     </>
                   ) : (
-                    suggestions.map((s, i) => (
-                      <motion.button
-                        key={s}
-                        initial={{ opacity: 0, scale: 0.92 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        transition={{ delay: i * 0.05 }}
-                        onClick={() => {
-                          setInput(s);
-                          setSuggestions([]);
-                          textareaRef.current?.focus();
-                        }}
-                        className="px-3 py-1 rounded-full text-xs font-medium border border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground transition-all duration-150 whitespace-nowrap"
-                      >
-                        {s}
-                      </motion.button>
-                    ))
+                    <>
+                      <Sparkles className="h-3.5 w-3.5 text-primary/50 shrink-0" />
+                      {suggestions.map((s, i) => {
+                        // Last 1-2 items are general/cross-doc suggestions
+                        const isGeneral = i >= suggestions.length - 2 && suggestions.length >= 3;
+                        return (
+                          <motion.button
+                            key={s}
+                            initial={{ opacity: 0, scale: 0.92 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: i * 0.06 }}
+                            onClick={() => {
+                              setInput(s);
+                              setSuggestions([]);
+                              textareaRef.current?.focus();
+                            }}
+                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-150 whitespace-nowrap ${
+                              isGeneral
+                                ? "border-dashed border-border/70 bg-transparent hover:bg-muted hover:border-primary/30 text-muted-foreground/60 hover:text-muted-foreground"
+                                : "border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground"
+                            }`}
+                          >
+                            {s}
+                          </motion.button>
+                        );
+                      })}
+                    </>
                   )}
                 </motion.div>
               )}

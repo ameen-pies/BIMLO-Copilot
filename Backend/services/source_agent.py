@@ -118,7 +118,12 @@ def _call_llm(prompt: str, api_key: str, base_url: str, max_tokens: int = 800) -
         try:
             resp = requests.post(base_url, headers=headers, json=payload, timeout=30)
             if resp.status_code == 200:
-                return (resp.json().get("response") or "").strip()
+                raw = resp.json().get("response") or ""
+                # Worker always returns a string, but guard against edge cases
+                if not isinstance(raw, str):
+                    import json as _json
+                    raw = _json.dumps(raw) if isinstance(raw, (list, dict)) else str(raw)
+                return raw.strip()
             elif resp.status_code == 429:
                 time.sleep(2 ** attempt)
             else:

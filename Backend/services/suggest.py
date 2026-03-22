@@ -134,42 +134,25 @@ def _parse_suggestions(raw: str) -> List[str]:
     """
     Parse the model's structured response into an ordered list:
     contextual chips first, general chips last.
-    Handles: JSON object, JSON array, Python repr strings, newline list.
+    Handles: JSON object with contextual/general keys, plain JSON array, newline list.
     """
-    import ast
     clean = re.sub(r"```(?:json)?|```", "", raw).strip()
 
-    # Helper: extract chips from a parsed object/list
-    def _from_parsed(parsed) -> List[str]:
-        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-            parsed = parsed[0]
+    # Try structured JSON object: {"contextual": [...], "general": [...]}
+    try:
+        parsed = json.loads(clean)
         if isinstance(parsed, dict):
             contextual = [str(s).strip()[:50] for s in parsed.get("contextual", []) if str(s).strip()]
             general    = [str(s).strip()[:50] for s in parsed.get("general", []) if str(s).strip()]
+            # Contextual first (max 3), general last (max 2)
             return (contextual[:3] + general[:2])[:5]
+        # Plain array fallback
         if isinstance(parsed, list):
             return [str(s).strip()[:50] for s in parsed if str(s).strip()][:5]
-        return []
-
-    # Try standard JSON first
-    try:
-        parsed = json.loads(clean)
-        result = _from_parsed(parsed)
-        if result:
-            return result
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Fallback: Python repr string (single quotes, True/False/None)
-    try:
-        obj = ast.literal_eval(clean)
-        result = _from_parsed(obj)
-        if result:
-            return result
-    except (ValueError, SyntaxError):
-        pass
-
-    # Last resort: newline-separated or numbered list
+    # Fallback: newline-separated or numbered list
     lines = [
         re.sub(r"^[\d\.\-\*\•\s]+", "", line).strip()
         for line in clean.splitlines()
