@@ -576,6 +576,9 @@ class RAGEngine:
         # (state keys starting with _ are stripped by pydantic/langgraph)
         self._status_callback = status_callback or (lambda *_: None)
 
+        # Generate contextual status messages in background — ready before nodes need them
+        self._status_msgs = self._generate_status_msgs(user_query)
+
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
@@ -605,6 +608,7 @@ class RAGEngine:
             final_state = self.graph.invoke(initial_state)
         finally:
             self._status_callback = None  # always clean up
+            self._status_msgs = None
 
         # Build response
         response = {
@@ -626,6 +630,101 @@ class RAGEngine:
         return response
 
     # ------------------------------------------------------------------ #
+    #  CONTEXTUAL STATUS MESSAGES                                        #
+    # ------------------------------------------------------------------ #
+
+    # Default fallbacks — used when LLM generation fails or times out
+    _DEFAULT_STATUS_MSGS = {
+        "router":          ("🔍", "Understanding your question…"),
+        "retrieve":        ("📂", "Searching through documents…"),
+        "check_retrieval": ("🔎", "Checking search results…"),
+        "rewrite_query":   ("✏️",  "Refining the search…"),
+        "judge_plan":      ("🧠", "Planning the response…"),
+        "synthesise":      ("✍️",  "Generating answer…"),
+        "judge_evaluate":  ("⚖️",  "Reviewing quality…"),
+        "direct_answer":   ("💬", "Preparing answer…"),
+        "transform_node":  ("🔀", "Transforming document…"),
+        "analytics_node":  ("📊", "Running analytics…"),
+    }
+
+    def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
+        """
+        Ask the CF worker to generate short, query-aware status messages for each node.
+        Runs synchronously but is called before graph.invoke() so it doesn't add latency
+        to the actual answer — it runs while the thread is starting.
+
+        Returns a dict of node_name → (icon, message), falling back to defaults on failure.
+        """
+        if not self.llm.enabled:
+            return self._DEFAULT_STATUS_MSGS.copy()
+
+        q = user_query.strip()[:200]
+
+        prompt = f"""The user asked: "{q}"
+
+Generate short, natural status messages (max 5 words each) for each processing step below.
+Messages should feel like they're specifically about THIS query — not generic.
+
+Rules:
+- Each message must be 3-6 words, end with "…"
+- Reference what the query is actually about when natural
+- Keep it natural, like a human narrating what they're doing
+- Return ONLY a JSON object with these exact keys, nothing else
+
+Keys and what each step does:
+- router: deciding how to handle the query
+- retrieve: searching docs for relevant info
+- check_retrieval: checking if results are good enough
+- rewrite_query: improving the search terms
+- judge_plan: planning how to structure the answer
+- synthesise: writing the actual answer
+- judge_evaluate: checking answer quality
+- direct_answer: answering directly without docs
+- transform_node: transforming/translating document
+- analytics_node: running data analysis
+
+Example for "what is the budget?":
+{{"router":"Figuring out your question…","retrieve":"Looking up budget details…","check_retrieval":"Checking what we found…","rewrite_query":"Improving budget search…","judge_plan":"Planning budget summary…","synthesise":"Writing up the numbers…","judge_evaluate":"Double-checking the answer…","direct_answer":"Answering directly…","transform_node":"Transforming document…","analytics_node":"Crunching the numbers…"}}
+
+Now generate for: "{q}" """
+
+        try:
+            raw = self.llm.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=300,
+                task="suggest",
+            )
+            # Parse — handles JSON, Python repr, etc.
+            import ast as _ast
+            clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+            parsed = None
+            try:
+                parsed = json.loads(clean)
+            except Exception:
+                try:
+                    parsed = _ast.literal_eval(clean)
+                except Exception:
+                    pass
+
+            if isinstance(parsed, dict):
+                icons = {k: v[0] for k, v in self._DEFAULT_STATUS_MSGS.items()}
+                result = {}
+                for node, default in self._DEFAULT_STATUS_MSGS.items():
+                    msg = parsed.get(node, "")
+                    if isinstance(msg, str) and 3 <= len(msg) <= 80:
+                        # Ensure it ends with …
+                        msg = msg.rstrip(".…").rstrip() + "…"
+                        result[node] = (default[0], msg)
+                    else:
+                        result[node] = default
+                return result
+        except Exception as e:
+            print(f"⚠️  Status msg generation failed: {e}")
+
+        return self._DEFAULT_STATUS_MSGS.copy()
+
+    # ------------------------------------------------------------------ #
     #  GRAPH CONSTRUCTION                                                 #
     # ------------------------------------------------------------------ #
 
@@ -633,25 +732,17 @@ class RAGEngine:
         workflow = StateGraph(AgentState)
 
         # ── Status-aware node wrapper ─────────────────────────────────────
-        # Maps node name → user-friendly message emitted BEFORE the node runs.
-        _STATUS_MSGS = {
-            "router":          ("🔍", "Understanding your question…"),
-            "retrieve":        ("📂", "Searching through documents…"),
-            "check_retrieval": ("🔎", "Checking search results…"),
-            "rewrite_query":   ("✏️",  "Refining the search query…"),
-            "judge_plan":      ("🧠", "Planning the response…"),
-            "synthesise":      ("✍️",  "Generating answer…"),
-            "judge_evaluate":  ("⚖️",  "Reviewing answer quality…"),
-            "direct_answer":   ("💬", "Preparing answer…"),
-            "transform_node":  ("🔀", "Transforming document…"),
-            "analytics_node":  ("📊", "Running analytics…"),
-        }
+        # Per-query contextual messages are stored in self._status_msgs (set in query())
+        # Fallback to self._DEFAULT_STATUS_MSGS if not set.
 
         def _wrap(name, fn):
-            icon, msg = _STATUS_MSGS.get(name, ("⚙️", name))
+            default_icon, default_msg = self._DEFAULT_STATUS_MSGS.get(name, ("⚙️", f"{name}…"))
             def _wrapped(state):
                 cb = getattr(self, "_status_callback", None)
                 if callable(cb):
+                    # Use per-query generated messages if available, else defaults
+                    msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
+                    icon, msg = msgs.get(name, (default_icon, default_msg))
                     cb(name, icon, msg)
                 return fn(state)
             _wrapped.__name__ = name
