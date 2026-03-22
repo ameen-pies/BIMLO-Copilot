@@ -78,7 +78,12 @@ def _call_cf(user_query: str, assistant_reply: str, available_docs: List[str], m
     Hit the CF Worker with a suggestion prompt.
     Returns contextual chips first, then general/cross-doc chips last.
     """
-    if not _CF_API_KEY:
+    # Read at call time so .env is guaranteed loaded
+    cf_api_key = os.getenv("CF_API_KEY", "")
+    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+
+    if not cf_api_key:
+        print("⚠️  suggest: CF_API_KEY not set")
         return []
 
     docs_section = ""
@@ -102,13 +107,13 @@ def _call_cf(user_query: str, assistant_reply: str, available_docs: List[str], m
         "task":         "suggest",
     }
     headers = {
-        "Authorization": f"Bearer {_CF_API_KEY}",
+        "Authorization": f"Bearer {cf_api_key}",
         "Content-Type":  "application/json",
     }
 
     for attempt in range(max_retries):
         try:
-            resp = requests.post(_CF_API_URL, headers=headers, json=payload, timeout=20)
+            resp = requests.post(cf_api_url, headers=headers, json=payload, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 raw = data.get("response") or ""
@@ -134,31 +139,54 @@ def _parse_suggestions(raw: str) -> List[str]:
     """
     Parse the model's structured response into an ordered list:
     contextual chips first, general chips last.
-    Handles: JSON object with contextual/general keys, plain JSON array, newline list.
+    Handles: proper JSON, Python repr (single quotes/True/False/None), newline list.
     """
-    clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+    import ast
 
-    # Try structured JSON object: {"contextual": [...], "general": [...]}
-    try:
-        parsed = json.loads(clean)
+    clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+    print(f"💡 suggest raw response: {clean[:200]}")
+
+    def _extract(parsed) -> List[str]:
+        # Unwrap list-wrapped object: [{...}] → {...}
+        if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            parsed = parsed[0]
         if isinstance(parsed, dict):
             contextual = [str(s).strip()[:50] for s in parsed.get("contextual", []) if str(s).strip()]
             general    = [str(s).strip()[:50] for s in parsed.get("general", []) if str(s).strip()]
-            # Contextual first (max 3), general last (max 2)
             return (contextual[:3] + general[:2])[:5]
-        # Plain array fallback
         if isinstance(parsed, list):
             return [str(s).strip()[:50] for s in parsed if str(s).strip()][:5]
+        return []
+
+    # 1. Try standard JSON
+    try:
+        result = _extract(json.loads(clean))
+        if result:
+            print(f"✅ suggest parsed (JSON): {result}")
+            return result
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Fallback: newline-separated or numbered list
+    # 2. Try Python repr (Llama returns single-quoted dicts)
+    try:
+        result = _extract(ast.literal_eval(clean))
+        if result:
+            print(f"✅ suggest parsed (ast): {result}")
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    # 3. Last resort: newline/bullet list
     lines = [
         re.sub(r"^[\d\.\-\*\•\s]+", "", line).strip()
-        for line in clean.splitlines()
-        if line.strip()
+        for line in clean.splitlines() if line.strip()
     ]
-    return [l[:50] for l in lines if 2 <= len(l.split()) <= 7][:5]
+    result = [l[:50] for l in lines if 2 <= len(l.split()) <= 7][:5]
+    if result:
+        print(f"✅ suggest parsed (lines): {result}")
+    else:
+        print(f"⚠️  suggest: could not parse response")
+    return result
 
 
 # ────────────────────────────────────────────────────────────────────────────
