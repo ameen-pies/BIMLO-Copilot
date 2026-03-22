@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2 } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -1419,6 +1419,20 @@ const Chat = () => {
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
   const { toast } = useToast();
 
+  // ── Filename autocomplete ────────────────────────────────────────────────
+  const [autocomplete, setAutocomplete] = useState<{
+    query: string;
+    triggerPos: number;
+    results: Document[];
+    activeIdx: number;
+  } | null>(null);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
+  const [autocompletePos, setAutocompletePos] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  // ── Contextual next-step suggestions ────────────────────────────────────
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+
   // ── Document viewer helpers ──────────────────────────────────────────────
 
   const getApiBase = () =>
@@ -1844,6 +1858,7 @@ const Chat = () => {
 
     // Collapse all sources when sending new message
     setOpenSourceKey(null);
+    setSuggestions([]);
 
     // Create user message
     const userMsg: Message = {
@@ -1888,6 +1903,9 @@ const Chat = () => {
         return updated;
       });
       setTypingMessageId(assistantMsg.id);
+      // Fetch contextual next-step suggestions in background
+      setSuggestions([]);
+      fetchSuggestions(trimmedInput, response.answer);
 
     } catch (error) {
       // Ignore abort errors (user clicked Stop)
@@ -1915,6 +1933,120 @@ const Chat = () => {
     setIsLoading(false);
     setTypingMessageId(null);
   };
+
+  // ── Filename autocomplete ─────────────────────────────────────────────────
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setInput(val);
+
+    const caret = e.target.selectionStart ?? val.length;
+    const before = val.slice(0, caret);
+    const atIdx = before.lastIndexOf("@");
+    if (atIdx !== -1) {
+      const fragment = before.slice(atIdx + 1).toLowerCase();
+      if (!fragment.includes(" ")) {
+        const results = documents.filter(d =>
+          d.filename.toLowerCase().includes(fragment)
+        ).slice(0, 6);
+        // Compute position from textarea
+        const rect = e.target.getBoundingClientRect();
+        setAutocompletePos({
+          top: rect.top,        // will render above using transform
+          left: rect.left,
+          width: rect.width,
+        });
+        setAutocomplete({ query: fragment, triggerPos: atIdx, results, activeIdx: 0 });
+        return;
+      }
+    }
+    setAutocomplete(null);
+    setAutocompletePos(null);
+  };
+
+  const applyAutocomplete = (doc: Document) => {
+    if (!autocomplete) return;
+    const before = input.slice(0, autocomplete.triggerPos);
+    const after = input.slice(autocomplete.triggerPos + 1 + autocomplete.query.length);
+    setInput(before + doc.filename + after);
+    setAutocomplete(null);
+    setAutocompletePos(null);
+    textareaRef.current?.focus();
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (autocomplete && autocomplete.results.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setAutocomplete(a => a ? { ...a, activeIdx: (a.activeIdx + 1) % a.results.length } : a);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setAutocomplete(a => a ? { ...a, activeIdx: (a.activeIdx - 1 + a.results.length) % a.results.length } : a);
+        return;
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        applyAutocomplete(autocomplete.results[autocomplete.activeIdx]);
+        return;
+      }
+      if (e.key === "Escape") {
+        setAutocomplete(null);
+        setAutocompletePos(null);
+        return;
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // ── Contextual suggestions ────────────────────────────────────────────────
+  const fetchSuggestions = useCallback(async (userQuery: string, assistantReply: string) => {
+    setSuggestionsLoading(true);
+    setSuggestions([]);
+    try {
+      const apiBase =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+      // Proxy through backend to avoid exposing key on client — if backend exposes /suggest
+      // Otherwise fall through to Anthropic directly (key must be injected server-side)
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 120,
+          system: `You generate short follow-up prompt suggestions (2–4 words each) based on a user's last query and the AI's reply.
+Rules:
+- Return ONLY a JSON array of 3–4 short strings, nothing else.
+- Each suggestion must be 2–4 words, actionable, and directly relevant.
+- Vary the types: e.g. dig deeper, compare, define a term, list something, export/summarize.
+- NO preamble, NO markdown, NO explanations. Pure JSON array only.
+Example output: ["Summarize key points","Define key terms","Compare with baseline","Export as table"]`,
+          messages: [
+            {
+              role: "user",
+              content: `User asked: "${userQuery.slice(0, 300)}"\n\nAssistant replied: "${assistantReply.slice(0, 600)}"\n\nGenerate 3-4 follow-up suggestion chips.`,
+            },
+          ],
+        }),
+      });
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
+      const text = data.content?.find((b: any) => b.type === "text")?.text ?? "[]";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed: string[] = JSON.parse(clean);
+      if (Array.isArray(parsed)) {
+        setSuggestions(parsed.slice(0, 4).map((s: string) => String(s).slice(0, 40)));
+      }
+    } catch {
+      // Silently fail — suggestions are optional UX enhancement
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  }, []);
 
   const handleEditCancel = () => {
     setEditingMsgId(null);
@@ -2730,138 +2862,182 @@ const Chat = () => {
         {/* Input */}
         <div className="border-t border-border p-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto">
-            <BorderGlow
-              edgeSensitivity={30}
-              glowColor="214 100 65"
-              backgroundColor="transparent"
-              borderRadius={16}
-              glowRadius={40}
-              glowIntensity={1.5}
-              coneSpread={25}
-              animated={false}
-              colors={['#60a5fa', '#3b82f6', '#93c5fd']}
-              className="w-full"
-            >
-            <div
-              className="relative rounded-2xl bg-card shadow-md"
-              onDragEnter={handleInputDragEnter}
-              onDragOver={handleInputDragOver}
-              onDragLeave={handleInputDragLeave}
-              onDrop={handleInputDrop}
-            >
-              {/* Drag-over overlay — same style as the page-level one */}
-              <AnimatePresence>
-                {isDraggingInput && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    className="absolute inset-0 z-10 rounded-2xl bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none"
-                  >
-                    <motion.div
-                      initial={{ scale: 0.9 }}
-                      animate={{ scale: 1 }}
-                      exit={{ scale: 0.9 }}
-                      className="border-2 border-dashed border-primary rounded-2xl p-6 bg-card/50"
-                    >
-                      <div className="text-center">
-                        <FileText className="h-8 w-8 text-primary mx-auto mb-2" />
-                        <h3 className="text-sm font-semibold text-foreground mb-1">Drop files here</h3>
-                        <p className="text-xs text-muted-foreground">PDF · DOCX · TXT · PNG · JPG</p>
-                      </div>
-                    </motion.div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
 
-              {/* Actual input row — hidden behind overlay when dragging */}
-              <div className={`flex items-end gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
-                {/* Plus / attach button */}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mb-0.5"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
+            {/* ── Contextual suggestion chips ── */}
+            <AnimatePresence>
+              {(suggestions.length > 0 || suggestionsLoading) && !isLoading && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex items-center gap-2 flex-wrap mb-2.5"
                 >
-                  <Plus className="h-5 w-5" />
-                </Button>
-
-                {/* Auto-expanding textarea */}
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSend();
-                    }
-                  }}
-                  placeholder="Ask a question about your documents..."
-                  rows={1}
-                  disabled={isLoading}
-                  style={{ maxHeight: "160px" }}
-                  className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
-                />
-
-                {/* Voice wave button */}
-                <button
-                  type="button"
-                  onMouseEnter={() => setIsHoveringVoice(true)}
-                  onMouseLeave={() => setIsHoveringVoice(false)}
-                  className="h-8 w-8 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-primary transition-colors mb-0.5 group"
-                  title="Voice message"
-                >
-                  <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
-                    {[
-                      { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                      { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
-                      { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
-                      { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
-                      { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
-                      { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
-                      { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                    ].map((bar, i) => (
-                      <rect
-                        key={i}
-                        x={bar.x}
-                        y={isHoveringVoice ? (9 - bar.hoverH / 2) : (9 - bar.baseH / 2)}
-                        width="2"
-                        rx="1"
-                        height={isHoveringVoice ? bar.hoverH : bar.baseH}
-                        fill="currentColor"
-                        style={{
-                          transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
+                  <Sparkles className="h-3.5 w-3.5 text-primary/50 shrink-0" />
+                  {suggestionsLoading && suggestions.length === 0 ? (
+                    <>
+                      {[80, 96, 72].map((w, i) => (
+                        <div
+                          key={i}
+                          className="h-7 rounded-full bg-muted animate-pulse"
+                          style={{ width: `${w}px` }}
+                        />
+                      ))}
+                    </>
+                  ) : (
+                    suggestions.map((s, i) => (
+                      <motion.button
+                        key={s}
+                        initial={{ opacity: 0, scale: 0.92 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ delay: i * 0.05 }}
+                        onClick={() => {
+                          setInput(s);
+                          setSuggestions([]);
+                          textareaRef.current?.focus();
                         }}
-                      />
-                    ))}
-                  </svg>
-                </button>
+                        className="px-3 py-1 rounded-full text-xs font-medium border border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground transition-all duration-150 whitespace-nowrap"
+                      >
+                        {s}
+                      </motion.button>
+                    ))
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-                {/* Send / Stop button */}
-                {isLoading ? (
+            {/* ── Input box ── */}
+            <div className="relative">
+
+              <BorderGlow
+                edgeSensitivity={30}
+                glowColor="214 100 65"
+                backgroundColor="transparent"
+                borderRadius={16}
+                glowRadius={40}
+                glowIntensity={1.5}
+                coneSpread={25}
+                animated={false}
+                colors={['#60a5fa', '#3b82f6', '#93c5fd']}
+                className="w-full"
+              >
+              <div
+                className="relative rounded-2xl bg-card shadow-md"
+                onDragEnter={handleInputDragEnter}
+                onDragOver={handleInputDragOver}
+                onDragLeave={handleInputDragLeave}
+                onDrop={handleInputDrop}
+              >
+                {/* Drag-over overlay */}
+                <AnimatePresence>
+                  {isDraggingInput && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="absolute inset-0 z-10 rounded-2xl bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none"
+                    >
+                      <motion.div
+                        initial={{ scale: 0.9 }}
+                        animate={{ scale: 1 }}
+                        exit={{ scale: 0.9 }}
+                        className="border-2 border-dashed border-primary rounded-2xl p-6 bg-card/50"
+                      >
+                        <div className="text-center">
+                          <FileText className="h-8 w-8 text-primary mx-auto mb-2" />
+                          <h3 className="text-sm font-semibold text-foreground mb-1">Drop files here</h3>
+                          <p className="text-xs text-muted-foreground">PDF · DOCX · TXT · PNG · JPG</p>
+                        </div>
+                      </motion.div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Actual input row */}
+                <div className={`flex items-end gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
+                  {/* Plus / attach button */}
                   <Button
+                    variant="ghost"
                     size="icon"
-                    className="h-8 w-8 bg-destructive/90 hover:bg-destructive text-white transition-colors shrink-0 rounded-lg mb-0.5"
-                    onClick={handleStop}
-                    title="Stop generating"
+                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mb-0.5"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
                   >
-                    <Square className="h-3.5 w-3.5 fill-current" />
+                    <Plus className="h-5 w-5" />
                   </Button>
-                ) : (
-                  <Button
-                    size="icon"
-                    className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
-                    onClick={handleSend}
-                    disabled={!input.trim()}
+
+                  {/* Auto-expanding textarea */}
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={handleInputChange}
+                    onKeyDown={handleInputKeyDown}
+                    onBlur={() => setTimeout(() => { setAutocomplete(null); setAutocompletePos(null); }, 150)}
+                    placeholder="Ask a question… type @ to mention a file"
+                    rows={1}
+                    disabled={isLoading}
+                    style={{ maxHeight: "160px" }}
+                    className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
+                  />
+
+                  {/* Voice wave button */}
+                  <button
+                    type="button"
+                    onMouseEnter={() => setIsHoveringVoice(true)}
+                    onMouseLeave={() => setIsHoveringVoice(false)}
+                    className="h-8 w-8 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-primary transition-colors mb-0.5 group"
+                    title="Voice message"
                   >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                )}
+                    <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
+                      {[
+                        { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
+                        { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
+                        { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
+                        { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
+                        { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
+                        { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
+                        { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
+                      ].map((bar, i) => (
+                        <rect
+                          key={i}
+                          x={bar.x}
+                          y={isHoveringVoice ? (9 - bar.hoverH / 2) : (9 - bar.baseH / 2)}
+                          width="2"
+                          rx="1"
+                          height={isHoveringVoice ? bar.hoverH : bar.baseH}
+                          fill="currentColor"
+                          style={{
+                            transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
+                          }}
+                        />
+                      ))}
+                    </svg>
+                  </button>
+
+                  {/* Send / Stop button */}
+                  {isLoading ? (
+                    <Button
+                      size="icon"
+                      className="h-8 w-8 bg-destructive/90 hover:bg-destructive text-white transition-colors shrink-0 rounded-lg mb-0.5"
+                      onClick={handleStop}
+                      title="Stop generating"
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                    </Button>
+                  ) : (
+                    <Button
+                      size="icon"
+                      className="h-8 w-8 bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity shrink-0 rounded-lg mb-0.5"
+                      onClick={handleSend}
+                      disabled={!input.trim()}
+                    >
+                      <Send className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
               </div>
+              </BorderGlow>
             </div>
-            </BorderGlow>
           </div>
           <p className="text-center text-[11px] text-muted-foreground/50 mt-2 select-none">
             This agent can make mistakes — be sure to verify results.
@@ -2876,6 +3052,60 @@ const Chat = () => {
             state={viewer}
             onClose={() => setViewer(null)}
           />
+        )}
+      </AnimatePresence>
+
+      {/* ── Filename autocomplete — fixed portal, never clipped ── */}
+      <AnimatePresence>
+        {autocomplete && autocomplete.results.length > 0 && autocompletePos && (
+          <motion.div
+            ref={autocompleteRef}
+            initial={{ opacity: 0, y: 6, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.98 }}
+            transition={{ duration: 0.15 }}
+            style={{
+              position: "fixed",
+              bottom: `calc(100vh - ${autocompletePos.top}px + 8px)`,
+              left: autocompletePos.left,
+              width: autocompletePos.width,
+              zIndex: 9999,
+            }}
+            className="bg-card border border-border rounded-xl shadow-2xl overflow-hidden"
+          >
+            <div className="px-3 py-1.5 border-b border-border/60 flex items-center gap-1.5">
+              <FileText className="h-3 w-3 text-primary/60" />
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                Documents
+              </span>
+              <span className="text-[10px] text-muted-foreground/50 ml-auto">
+                ↑↓ · Tab to select
+              </span>
+            </div>
+            {autocomplete.results.map((doc, idx) => (
+              <button
+                key={doc.document_id}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  applyAutocomplete(doc);
+                }}
+                onMouseEnter={() =>
+                  setAutocomplete(a => a ? { ...a, activeIdx: idx } : a)
+                }
+                className={`w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors ${
+                  idx === autocomplete.activeIdx
+                    ? "bg-primary/10 text-foreground"
+                    : "hover:bg-muted text-foreground/80"
+                }`}
+              >
+                <FileText className={`h-3.5 w-3.5 shrink-0 ${idx === autocomplete.activeIdx ? "text-primary" : "text-muted-foreground"}`} />
+                <span className="text-sm flex-1 truncate">{doc.filename}</span>
+                <span className="text-[10px] text-muted-foreground/50 shrink-0 capitalize">
+                  {(doc.doc_type ?? "").replace(/_/g, " ")}
+                </span>
+              </button>
+            ))}
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
