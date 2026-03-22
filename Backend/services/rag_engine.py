@@ -812,9 +812,10 @@ Now generate for: "{q}" """
             "judge_evaluate",
             lambda s: self._should_retry(s),
             {
-                "retry": "synthesise",
-                "analytics": "analytics_node",
-                "done": END
+                "retry":           "synthesise",
+                "reroute_direct":  "direct_answer",
+                "analytics":       "analytics_node",
+                "done":            END
             }
         )
 
@@ -875,23 +876,17 @@ Now generate for: "{q}" """
         routing_prompt = f"""You are a query router. Pick exactly one route for the CURRENT QUERY.
 
 ROUTES:
-- direct: purely conversational — greetings, small talk, memory recall, edits/modifications to a previous answer. No document lookup needed.
-- rag: the user wants to read, understand, or extract content from one or more documents — summaries, explanations, specific facts, questions answered from the docs.
-- iterative_rag: like rag, but the user explicitly wants to compare or contrast information across multiple different documents.
-- transform: the user wants the document content reproduced in a completely different form — e.g. full translation to another language, or a total rewrite/reformat of the entire document. The output IS the transformed document.
-- analytics: the user wants numerical aggregations computed across ALL documents — counts, totals, averages, statistics. NOT a summary of content.
+- direct: purely conversational — greetings, small talk, memory recall ("what did you just do", "what was that", "can you repeat"), edits/modifications to a previous answer ("make it shorter", "translate that", "change the tone"). No document lookup needed.
+- rag: the user wants to read, understand, or extract content from documents — summaries, explanations, specific facts, questions answered from docs.
+- iterative_rag: like rag, but comparing/contrasting across multiple different documents.
+- transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
+- analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
 
-DECISION GUIDE:
-- "summarize", "what does it say", "explain", "tell me about" → rag
-- "compare doc A and doc B" → iterative_rag
-- "translate the whole document to French" → transform
-- "how many documents mention X", "total count of Y across all files" → analytics
-- anything conversational with no document intent → direct
-
-CONTEXT INHERITANCE RULE:
-If the previous turn used documents and the current query is a short follow-up that only makes sense in that context, inherit the previous route.
-
-PRIORITY: When in doubt between rag and anything else, pick rag.
+CRITICAL RULES — read these first:
+1. Questions about the CONVERSATION or the AI's own actions → ALWAYS direct. Examples: "what did you just do?", "what did you say?", "summarize what you told me", "what route did you use?", "explain what you just did".
+2. Questions referencing "you", "your answer", "what you said/did" → direct.
+3. Short follow-up that only makes sense from the last reply context → direct.
+4. When in doubt between direct and rag: if the question is about the AI or the conversation → direct. If it's about document content → rag.
 {prior_context}
 
 CURRENT QUERY: {query}
@@ -1416,10 +1411,10 @@ Answer in {plan.target_language}:"""
         """
         Decide whether to retry based on judge's evaluation.
 
-        On retry: mutate the ResponsePlan to directly encode the judge's fix
-        so the synthesiser follows an improved plan — not the same prompt + a note.
+        On retry: mutate the ResponsePlan to directly encode the judge's fix.
+        On repeated failure: check if the route itself was wrong and re-route to direct.
 
-        Returns: 'retry' | 'analytics' | 'done'
+        Returns: 'retry' | 'reroute_direct' | 'analytics' | 'done'
         """
         evaluation = state.get("response_evaluation")
         retry_count = state.get("retry_count", 0)
@@ -1438,17 +1433,34 @@ Answer in {plan.target_language}:"""
             print(f"⚠️  Max retries ({MAX_RETRIES}) reached — using best answer so far")
             return _next(route)
 
+        # ── Detect wrong-route situations via LLM ─────────────────────────
+        # Ask the LLM whether the judge's feedback suggests the route itself
+        # was wrong — no keyword matching, pure LLM judgment.
+        if retry_count == 0 and self.llm.enabled:
+            reroute_check = self.llm.chat(
+                [{"role": "user", "content": (
+                    f"A RAG system routed this query to document search: \"{state['query']}\"\n"
+                    f"The judge rejected the answer with this feedback:\n"
+                    f"Problems: {', '.join(evaluation.specific_problems or [])}\n"
+                    f"Fix: {evaluation.how_to_fix}\n\n"
+                    f"Does this feedback suggest the query should NOT have used documents at all "
+                    f"and should be answered directly from conversation context instead?\n"
+                    f"Reply with YES or NO only."
+                )}],
+                temperature=0.0,
+                max_tokens=5,
+                task="classify",
+            ).strip().upper()
+
+            if reroute_check.startswith("YES"):
+                print(f"🔀 Judge + LLM detected wrong route — switching to direct_answer")
+                state["route"] = "direct"
+                return "reroute_direct"
+
         # ── Mutate the plan to encode the judge's fix ─────────────────────
         plan = state.get("response_plan")
         if plan and evaluation.how_to_fix:
-            fix = evaluation.how_to_fix.lower()
             updates = {}
-
-            # Language wrong → correct it
-            if not evaluation.language_correct:
-                updates["target_language"] = plan.target_language  # keep — judge already set it
-
-            # Tone wrong → adjust
             if not evaluation.tone_correct:
                 if any(w in fix for w in ("formal", "professional")):
                     updates["target_tone"] = "professional"
@@ -1457,7 +1469,6 @@ Answer in {plan.target_language}:"""
                 elif "technical" in fix:
                     updates["target_tone"] = "technical"
 
-            # Length/detail issues
             if any(w in fix for w in ("shorter", "concise", "brief", "too long")):
                 updates["max_response_length"] = "brief"
                 updates["response_style"] = "concise"
@@ -1465,13 +1476,11 @@ Answer in {plan.target_language}:"""
                 updates["max_response_length"] = "comprehensive"
                 updates["response_style"] = "detailed"
 
-            # Structure issues
             if any(w in fix for w in ("bullet", "list", "structured")):
                 updates["response_style"] = "bullet_points"
             elif any(w in fix for w in ("narrative", "prose", "paragraph")):
                 updates["response_style"] = "narrative"
 
-            # Always inject the fix instruction as an explicit directive
             existing_approach = plan.approach or ""
             updates["approach"] = f"{existing_approach}. CORRECTION REQUIRED: {evaluation.how_to_fix}"
             updates["things_to_avoid"] = list(plan.things_to_avoid) + evaluation.specific_problems
