@@ -1432,6 +1432,7 @@ const Chat = () => {
   // ── Contextual next-step suggestions ────────────────────────────────────
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [expandingSuggestion, setExpandingSuggestion] = useState<string | null>(null);
 
   // ── Document viewer helpers ──────────────────────────────────────────────
 
@@ -2033,6 +2034,47 @@ const Chat = () => {
       setSuggestionsLoading(false);
     }
   }, []);
+
+  // ── Expand a suggestion pill into a full polished prompt ─────────────────
+  // Calls /expand-suggestion on the backend, shows a spinner on the pill,
+  // then fills the textarea with the expanded prompt.
+  const expandSuggestion = useCallback(async (label: string, isGeneral: boolean) => {
+    setExpandingSuggestion(label);
+    try {
+      const base =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+
+      // Get the last assistant message for context
+      const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
+      const lastUser      = [...messages].reverse().find(m => m.role === "user");
+
+      const res = await fetch(`${base}/expand-suggestion`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label,
+          is_general:      isGeneral,
+          last_user_query: lastUser?.content?.slice(0, 300) ?? "",
+          last_ai_reply:   lastAssistant?.content?.slice(0, 600) ?? "",
+          available_docs:  documents.map(d => d.filename),
+        }),
+      });
+      if (!res.ok) {
+        // Fallback: just use the label as-is
+        setInput(label);
+      } else {
+        const data = await res.json();
+        setInput(data.prompt ?? label);
+      }
+    } catch {
+      setInput(label); // fallback
+    } finally {
+      setExpandingSuggestion(null);
+      setSuggestions([]);
+      textareaRef.current?.focus();
+    }
+  }, [messages, documents]);
 
   const handleEditCancel = () => {
     setEditingMsgId(null);
@@ -2874,25 +2916,29 @@ const Chat = () => {
                     <>
                       <Sparkles className="h-3.5 w-3.5 text-primary/50 shrink-0" />
                       {suggestions.map((s, i) => {
-                        // Last 1-2 items are general/cross-doc suggestions
                         const isGeneral = i >= suggestions.length - 2 && suggestions.length >= 3;
+                        const isExpanding = expandingSuggestion === s;
                         return (
                           <motion.button
                             key={s}
                             initial={{ opacity: 0, scale: 0.92 }}
                             animate={{ opacity: 1, scale: 1 }}
                             transition={{ delay: i * 0.06 }}
-                            onClick={() => {
-                              setInput(s);
-                              setSuggestions([]);
-                              textareaRef.current?.focus();
-                            }}
-                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-150 whitespace-nowrap ${
-                              isGeneral
-                                ? "border-dashed border-border/70 bg-transparent hover:bg-muted hover:border-primary/30 text-muted-foreground/60 hover:text-muted-foreground"
-                                : "border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground"
+                            disabled={expandingSuggestion !== null}
+                            onClick={() => expandSuggestion(s, isGeneral)}
+                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-150 whitespace-nowrap inline-flex items-center gap-1.5 ${
+                              isExpanding
+                                ? "border-primary/40 bg-primary/10 text-primary"
+                                : expandingSuggestion !== null
+                                ? "opacity-40 cursor-not-allowed border-border bg-card text-muted-foreground"
+                                : isGeneral
+                                ? "border-dashed border-border/70 bg-transparent hover:bg-muted hover:border-primary/30 text-muted-foreground/60 hover:text-muted-foreground cursor-pointer"
+                                : "border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground cursor-pointer"
                             }`}
                           >
+                            {isExpanding && (
+                              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            )}
                             {s}
                           </motion.button>
                         );

@@ -206,3 +206,104 @@ async def suggest(req: SuggestRequest) -> SuggestResponse:
     """
     suggestions = _call_cf(req.user_query, req.assistant_reply, req.available_docs)
     return SuggestResponse(suggestions=suggestions)
+
+
+# ── Expand suggestion ────────────────────────────────────────────────────────
+
+class ExpandRequest(BaseModel):
+    label:           str               # the short pill text, e.g. "List key dates"
+    is_general:      bool = False      # True = cross-doc/broader chip
+    last_user_query: str = ""
+    last_ai_reply:   str = ""
+    available_docs:  List[str] = []
+
+
+class ExpandResponse(BaseModel):
+    prompt: str                        # the full expanded prompt to inject into textarea
+
+
+def _expand_cf(label: str, is_general: bool, last_user_query: str,
+               last_ai_reply: str, available_docs: List[str]) -> str:
+    """
+    Ask the CF worker to turn a short chip label into a full, polished prompt.
+    """
+    cf_api_key = os.getenv("CF_API_KEY", "")
+    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+
+    if not cf_api_key:
+        return label
+
+    docs_hint = f"\nAvailable documents: {', '.join(available_docs[:8])}" if available_docs else ""
+
+    if is_general:
+        instruction = (
+            f"The user clicked a broad/cross-document suggestion: \"{label}\".\n"
+            f"Write a single polished question (1-2 sentences) that explores this topic "
+            f"across the available documents, going beyond what was just discussed."
+        )
+    else:
+        instruction = (
+            f"The user clicked a suggestion pill: \"{label}\".\n"
+            f"Write a single polished, specific question (1-2 sentences) that digs deeper "
+            f"into this topic based on what was just discussed."
+        )
+
+    prompt = (
+        f"Context — the user just asked: \"{last_user_query[:250]}\"\n"
+        f"The AI answered: \"{last_ai_reply[:400]}\"{docs_hint}\n\n"
+        f"{instruction}\n\n"
+        f"Rules:\n"
+        f"- Output ONLY the expanded prompt text. Nothing else.\n"
+        f"- No quotes around it, no explanation, no preamble.\n"
+        f"- Keep it natural, like a real user typed it.\n"
+        f"- 15-40 words max."
+    )
+
+    system = (
+        "You expand short suggestion labels into full, natural user prompts for a document Q&A assistant. "
+        "Output only the prompt text itself — no quotes, no explanation."
+    )
+
+    payload = {
+        "prompt":       prompt,
+        "systemPrompt": system,
+        "history":      [],
+        "max_tokens":   80,
+        "temperature":  0.6,
+        "task":         "suggest",
+    }
+    headers = {
+        "Authorization": f"Bearer {cf_api_key}",
+        "Content-Type":  "application/json",
+    }
+
+    try:
+        resp = requests.post(cf_api_url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            raw = resp.json().get("response") or ""
+            if not isinstance(raw, str):
+                raw = str(raw)
+            expanded = raw.strip().strip('"').strip("'").strip()
+            # Sanity check — if model hallucinated something huge, fall back
+            if 5 < len(expanded) < 300:
+                return expanded
+    except Exception as e:
+        print(f"⚠️  expand-suggestion: {e}")
+
+    return label  # fallback to original label
+
+
+@router.post("/expand-suggestion", response_model=ExpandResponse)
+async def expand_suggestion(req: ExpandRequest) -> ExpandResponse:
+    """
+    POST /expand-suggestion
+    Turns a short pill label into a full polished prompt using the CF worker.
+    """
+    prompt = _expand_cf(
+        req.label,
+        req.is_general,
+        req.last_user_query,
+        req.last_ai_reply,
+        req.available_docs,
+    )
+    return ExpandResponse(prompt=prompt)
