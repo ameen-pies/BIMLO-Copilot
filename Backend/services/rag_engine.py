@@ -569,8 +569,13 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
+
+        # Store callback on instance so node wrappers can access it without going through state
+        # (state keys starting with _ are stripped by pydantic/langgraph)
+        self._status_callback = status_callback or (lambda *_: None)
+
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
@@ -581,9 +586,9 @@ class RAGEngine:
             "retrieved_chunks": [],
             "retrieval_iterations": 0,
             "sub_queries": [],
-            "response_plan": None,  # NEW
-            "response_evaluation": None,  # NEW
-            "retry_count": 0,  # NEW
+            "response_plan": None,
+            "response_evaluation": None,
+            "retry_count": 0,
             "context": "",
             "answer": "",
             "raw_answer": "",
@@ -596,7 +601,10 @@ class RAGEngine:
         print(f"\n{'='*80}")
         print(f"🔍 Query: {user_query}")
         
-        final_state = self.graph.invoke(initial_state)
+        try:
+            final_state = self.graph.invoke(initial_state)
+        finally:
+            self._status_callback = None  # always clean up
 
         # Build response
         response = {
@@ -624,17 +632,42 @@ class RAGEngine:
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(AgentState)
 
+        # ── Status-aware node wrapper ─────────────────────────────────────
+        # Maps node name → user-friendly message emitted BEFORE the node runs.
+        _STATUS_MSGS = {
+            "router":          ("🔍", "Understanding your question…"),
+            "retrieve":        ("📂", "Searching through documents…"),
+            "check_retrieval": ("🔎", "Checking search results…"),
+            "rewrite_query":   ("✏️",  "Refining the search query…"),
+            "judge_plan":      ("🧠", "Planning the response…"),
+            "synthesise":      ("✍️",  "Generating answer…"),
+            "judge_evaluate":  ("⚖️",  "Reviewing answer quality…"),
+            "direct_answer":   ("💬", "Preparing answer…"),
+            "transform_node":  ("🔀", "Transforming document…"),
+            "analytics_node":  ("📊", "Running analytics…"),
+        }
+
+        def _wrap(name, fn):
+            icon, msg = _STATUS_MSGS.get(name, ("⚙️", name))
+            def _wrapped(state):
+                cb = getattr(self, "_status_callback", None)
+                if callable(cb):
+                    cb(name, icon, msg)
+                return fn(state)
+            _wrapped.__name__ = name
+            return _wrapped
+
         # Add nodes
-        workflow.add_node("router", self.router)
-        workflow.add_node("direct_answer", self.direct_answer)
-        workflow.add_node("retrieve", self.retrieve)
-        workflow.add_node("check_retrieval", self.check_retrieval)
-        workflow.add_node("rewrite_query", self.rewrite_query)
-        workflow.add_node("judge_plan", self.judge_plan)
-        workflow.add_node("synthesise", self.synthesise)
-        workflow.add_node("judge_evaluate", self.judge_evaluate)
-        workflow.add_node("analytics_node", self.analytics_node)
-        workflow.add_node("transform_node", self.transform_node)
+        workflow.add_node("router",          _wrap("router",          self.router))
+        workflow.add_node("direct_answer",   _wrap("direct_answer",   self.direct_answer))
+        workflow.add_node("retrieve",        _wrap("retrieve",        self.retrieve))
+        workflow.add_node("check_retrieval", _wrap("check_retrieval", self.check_retrieval))
+        workflow.add_node("rewrite_query",   _wrap("rewrite_query",   self.rewrite_query))
+        workflow.add_node("judge_plan",      _wrap("judge_plan",      self.judge_plan))
+        workflow.add_node("synthesise",      _wrap("synthesise",      self.synthesise))
+        workflow.add_node("judge_evaluate",  _wrap("judge_evaluate",  self.judge_evaluate))
+        workflow.add_node("analytics_node",  _wrap("analytics_node",  self.analytics_node))
+        workflow.add_node("transform_node",  _wrap("transform_node",  self.transform_node))
 
         # Entry point
         workflow.set_entry_point("router")

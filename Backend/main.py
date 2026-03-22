@@ -1,9 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
-import os, mimetypes, uuid
+import os, mimetypes, uuid, json, asyncio, threading, queue
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import deque
@@ -210,6 +210,88 @@ async def query_documents(request: QueryRequest):
     except Exception as e:
         print(f"❌ Query error: {e}")
         raise HTTPException(500, f"Error processing query: {e}")
+
+
+@app.post("/query-stream")
+async def query_stream(request: QueryRequest):
+    """
+    Streaming version of /query using Server-Sent Events.
+
+    Emits:
+      { "type": "status",   "node": "...", "icon": "...", "message": "..." }
+      { "type": "result",   "answer": "...", "sources": [...], ... }
+      { "type": "error",    "message": "..." }
+    """
+    session_id = request.session_id or str(uuid.uuid4())
+    history    = get_history(session_id)
+    prev_route = _session_routes.get(session_id, "")
+    route_log  = get_route_log(session_id)
+
+    # Thread-safe queue: background thread pushes SSE events, async generator reads them
+    q: queue.Queue = queue.Queue()
+    DONE_SENTINEL = object()
+
+    def status_callback(node: str, icon: str, message: str):
+        q.put({"type": "status", "node": node, "icon": icon, "message": message})
+
+    def run_query():
+        try:
+            result = rag_engine.query(
+                request.query,
+                top_k=request.top_k,
+                conversation_history=history,
+                prev_route=prev_route,
+                route_log=route_log,
+                status_callback=status_callback,
+            )
+            # Persist session
+            import re as _re
+            clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
+            append_turn(session_id, "user",      request.query)
+            append_turn(session_id, "assistant", clean_answer)
+            if result.get("route"):
+                _session_routes[session_id] = result["route"]
+                log_route(session_id, result["route"], request.query)
+            # Strip non-JSON-serializable debug fields before putting on queue
+            safe_result = {
+                "answer":     result.get("answer", ""),
+                "raw_answer": result.get("raw_answer") or result.get("answer", ""),
+                "sources":    result.get("sources", []),
+                "confidence": result.get("confidence", 0.0),
+                "route":      result.get("route"),
+                "analytics":  result.get("analytics"),
+            }
+            q.put({"type": "result", "session_id": session_id, **safe_result})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            q.put(DONE_SENTINEL)
+
+    # Run blocking RAG in a thread so we don't block the event loop
+    thread = threading.Thread(target=run_query, daemon=True)
+    thread.start()
+
+    async def event_generator():
+        loop = asyncio.get_event_loop()
+        while True:
+            # Poll queue without blocking the event loop
+            try:
+                item = await loop.run_in_executor(None, lambda: q.get(timeout=60))
+            except Exception:
+                break
+            if item is DONE_SENTINEL:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.delete("/sessions/{session_id}")

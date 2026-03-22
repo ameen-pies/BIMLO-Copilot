@@ -1419,6 +1419,11 @@ const Chat = () => {
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
   const { toast } = useToast();
 
+  // ── Thinking / progress steps ────────────────────────────────────────────
+  interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
+  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [thinkingExpanded, setThinkingExpanded] = useState(true);
+
   // ── Filename autocomplete ────────────────────────────────────────────────
   const [autocomplete, setAutocomplete] = useState<{
     query: string;
@@ -1860,6 +1865,8 @@ const Chat = () => {
     // Collapse all sources when sending new message
     setOpenSourceKey(null);
     setSuggestions([]);
+    setThinkingSteps([]);
+    setThinkingExpanded(true);
 
     // Create user message
     const userMsg: Message = {
@@ -1874,42 +1881,93 @@ const Chat = () => {
     setIsLoading(true);
 
     try {
+      const base =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+
       abortControllerRef.current = new AbortController();
-      const response = await queryBackend(trimmedInput, sessionId, abortControllerRef.current.signal);
-      if (response.session_id) setSessionId(response.session_id);
 
-      // Create assistant message with sources
-      const assistantMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: response.answer,
-        rawAnswer: response.raw_answer ?? response.answer,
-        sources: response.sources,
-        confidence: response.confidence,
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => {
-        const updated = [...prev, assistantMsg];
-        // Save/update conversation in history
-        const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
-        const preview = response.answer.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-        setConversations(convs => {
-          const existing = convs.find(c => c.id === activeConvId);
-          if (existing) {
-            return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-          }
-          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
-        });
-        return updated;
+      const res = await fetch(`${base}/query-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: trimmedInput,
+          top_k: 5,
+          ...(sessionId ? { session_id: sessionId } : {}),
+        }),
+        signal: abortControllerRef.current.signal,
       });
-      setTypingMessageId(assistantMsg.id);
-      // Fetch contextual next-step suggestions in background
-      fetchSuggestions(trimmedInput, response.answer);
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(serializeError(body) || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.type === "status") {
+              setThinkingSteps(prev => [...prev, {
+                node:    event.node,
+                icon:    event.icon,
+                message: event.message,
+                ts:      Date.now(),
+              }]);
+            } else if (event.type === "result") {
+              if (event.session_id) setSessionId(event.session_id);
+
+              const assistantMsg: Message = {
+                id: (Date.now() + 1).toString(),
+                role: "assistant",
+                content: event.answer,
+                rawAnswer: event.raw_answer ?? event.answer,
+                sources: event.sources,
+                confidence: event.confidence,
+                timestamp: new Date(),
+              };
+
+              setThinkingSteps([]);  // clear steps — response is here
+              setMessages((prev) => {
+                const updated = [...prev, assistantMsg];
+                const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+                const preview = event.answer.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+                setConversations(convs => {
+                  const existing = convs.find(c => c.id === activeConvId);
+                  if (existing) {
+                    return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+                  }
+                  return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
+                });
+                return updated;
+              });
+              setTypingMessageId(assistantMsg.id);
+              fetchSuggestions(trimmedInput, event.answer);
+
+            } else if (event.type === "error") {
+              throw new Error(event.message);
+            }
+          } catch (parseErr) {
+            // malformed SSE line — skip
+          }
+        }
+      }
 
     } catch (error) {
-      // Ignore abort errors (user clicked Stop)
       if (error instanceof Error && error.name === "AbortError") {
+        setThinkingSteps([]);
         setIsLoading(false);
         return;
       }
@@ -1920,6 +1978,7 @@ const Chat = () => {
         content: `Sorry, I encountered an error: ${msg}. Please try again.`,
         timestamp: new Date(),
       };
+      setThinkingSteps([]);
       setMessages((prev) => [...prev, errorMsg]);
       toast({ title: "Query failed", description: msg, variant: "destructive" });
     } finally {
@@ -1932,6 +1991,7 @@ const Chat = () => {
     abortControllerRef.current = null;
     setIsLoading(false);
     setTypingMessageId(null);
+    setThinkingSteps([]);
   };
 
   // ── Filename autocomplete ─────────────────────────────────────────────────
@@ -2876,9 +2936,96 @@ const Chat = () => {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex gap-3"
               >
-                <Logo className="h-8 w-8 shrink-0" />
-                <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3">
-                  <TypingIndicator />
+                <Logo className="h-8 w-8 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  {thinkingSteps.length === 0 ? (
+                    /* No steps yet — plain dots */
+                    <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
+                      <TypingIndicator />
+                    </div>
+                  ) : (
+                    /* Thinking panel */
+                    <div className="bg-secondary/60 border border-border/50 rounded-2xl rounded-bl-md overflow-hidden">
+                      {/* Header — always visible */}
+                      <button
+                        onClick={() => setThinkingExpanded(v => !v)}
+                        className="w-full flex items-center gap-2 px-3.5 py-2.5 hover:bg-muted/40 transition-colors"
+                      >
+                        <motion.div
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                        >
+                          <Sparkles className="h-3.5 w-3.5 text-primary/70 shrink-0" />
+                        </motion.div>
+                        <span className="text-xs font-medium text-muted-foreground flex-1 text-left">
+                          {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/50">
+                          {thinkingExpanded ? "hide" : "show"} steps
+                        </span>
+                        <motion.div
+                          animate={{ rotate: thinkingExpanded ? 180 : 0 }}
+                          transition={{ duration: 0.2 }}
+                        >
+                          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/50" />
+                        </motion.div>
+                      </button>
+
+                      {/* Steps list */}
+                      <AnimatePresence>
+                        {thinkingExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-3.5 pb-2.5 flex flex-col gap-1.5 border-t border-border/30 pt-2">
+                              {thinkingSteps.map((step, i) => {
+                                const isLatest = i === thinkingSteps.length - 1;
+                                return (
+                                  <motion.div
+                                    key={`${step.node}-${i}`}
+                                    initial={{ opacity: 0, x: -6 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    transition={{ duration: 0.18 }}
+                                    className="flex items-center gap-2"
+                                  >
+                                    {/* Connector line */}
+                                    <div className="flex flex-col items-center self-stretch">
+                                      <div className={`h-2 w-px ${i === 0 ? "bg-transparent" : "bg-border/50"}`} />
+                                      <span className="text-[13px] leading-none">{step.icon}</span>
+                                      <div className={`flex-1 w-px ${isLatest ? "bg-transparent" : "bg-border/50"}`} />
+                                    </div>
+                                    <span className={`text-[11px] leading-relaxed ${isLatest ? "text-foreground/80 font-medium" : "text-muted-foreground/60"}`}>
+                                      {step.message}
+                                    </span>
+                                    {isLatest && (
+                                      <motion.div
+                                        className="flex gap-0.5 ml-auto"
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                      >
+                                        {[0, 1, 2].map(j => (
+                                          <motion.div
+                                            key={j}
+                                            className="h-1 w-1 rounded-full bg-primary/60"
+                                            animate={{ opacity: [0.3, 1, 0.3] }}
+                                            transition={{ duration: 1, repeat: Infinity, delay: j * 0.2 }}
+                                          />
+                                        ))}
+                                      </motion.div>
+                                    )}
+                                  </motion.div>
+                                );
+                              })}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}
