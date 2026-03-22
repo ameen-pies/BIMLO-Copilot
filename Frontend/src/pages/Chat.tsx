@@ -2888,7 +2888,7 @@ const Chat = () => {
         </div>
 
         {/* Input */}
-        <div className="border-t border-border p-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
+        <div className="border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto">
 
             {/* ── Contextual suggestion chips ── */}
@@ -2899,7 +2899,7 @@ const Chat = () => {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 4 }}
                   transition={{ duration: 0.2 }}
-                  className="flex items-center justify-center gap-2 flex-wrap mb-2.5"
+                  className="flex items-center justify-center gap-2 flex-wrap mb-3 mt-0"
                 >
                   {suggestionsLoading && suggestions.length === 0 ? (
                     <>
