@@ -291,7 +291,6 @@ function parseSegments(raw: string, fallbackSource: number): { text: string; sou
   const tokens = raw.split(/(\[\d+\](?!\())/);
   const segments: { text: string; source: number }[] = [];
 
-  // Walk tokens: text tok → buffer it; [N] tok → flush buffer with this N as source
   let buf = '';
   let lastSource = fallbackSource;
 
@@ -300,7 +299,6 @@ function parseSegments(raw: string, fallbackSource: number): { text: string; sou
     const citeMatch = tok.match(/^\[(\d+)\]$/);
     if (citeMatch) {
       const n = parseInt(citeMatch[1]);
-      // Flush whatever text was buffered — it belongs to this [N]
       if (buf.trim()) {
         segments.push({ text: buf, source: n });
       }
@@ -311,12 +309,17 @@ function parseSegments(raw: string, fallbackSource: number): { text: string; sou
     }
   }
 
-  // Trailing text after the last [N] stays attributed to lastSource
   if (buf.trim()) {
     segments.push({ text: buf, source: lastSource });
   }
 
-  return segments;
+  // Strip leading orphan punctuation left by citation splitting.
+  // e.g. ".\n- next bullet" → "- next bullet"
+  // This happens because "[N]." splits into segment="." + segment="next text"
+  return segments.map(seg => ({
+    ...seg,
+    text: seg.text.replace(/^[\s.,;:!?]+/, ''),
+  })).filter(seg => seg.text.trim().length > 0);
 }
 
 /**
@@ -1863,26 +1866,12 @@ const Chat = () => {
     if (convId === activeConvId) startNewConversation();
   };
 
-  const handleSend = async () => {
-    const trimmedInput = input.trim();
-    if (!trimmedInput || isLoading) return;
-
-    // Collapse all sources when sending new message
-    setOpenSourceKey(null);
-    setSuggestions([]);
+  // ── Shared streaming query runner ────────────────────────────────────────
+  // Used by handleSend, handleRedo, and handleEditSubmit so they all get
+  // thinking steps and the SSE stream.
+  const runStreamingQuery = useCallback(async (query: string) => {
     setThinkingSteps([]);
     setThinkingExpanded(true);
-
-    // Create user message
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: trimmedInput,
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
     setIsLoading(true);
 
     try {
@@ -1896,7 +1885,7 @@ const Chat = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query: trimmedInput,
+          query,
           top_k: 5,
           ...(sessionId ? { session_id: sessionId } : {}),
         }),
@@ -1911,6 +1900,7 @@ const Chat = () => {
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let resultMsg: Message | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1923,19 +1913,15 @@ const Chat = () => {
           if (!line.startsWith("data: ")) continue;
           try {
             const event = JSON.parse(line.slice(6));
-
             if (event.type === "status") {
               setThinkingSteps(prev => [...prev, {
-                node:    event.node,
-                icon:    event.icon,
-                message: event.message,
-                ts:      Date.now(),
+                node: event.node, icon: event.icon,
+                message: event.message, ts: Date.now(),
               }]);
             } else if (event.type === "result") {
               if (event.session_id) setSessionId(event.session_id);
-
-              const assistantMsg: Message = {
-                id: (Date.now() + 1).toString(),
+              resultMsg = {
+                id: Date.now().toString(),
                 role: "assistant",
                 content: event.answer,
                 rawAnswer: event.raw_answer ?? event.answer,
@@ -1943,39 +1929,57 @@ const Chat = () => {
                 confidence: event.confidence,
                 timestamp: new Date(),
               };
-
-              setThinkingSteps([]);  // clear steps — response is here
-              setMessages((prev) => {
-                const updated = [...prev, assistantMsg];
-                const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
-                const preview = event.answer.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-                setConversations(convs => {
-                  const existing = convs.find(c => c.id === activeConvId);
-                  if (existing) {
-                    return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-                  }
-                  return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
-                });
-                return updated;
-              });
-              setTypingMessageId(assistantMsg.id);
-              fetchSuggestions(trimmedInput, event.answer);
-
             } else if (event.type === "error") {
               throw new Error(event.message);
             }
-          } catch (parseErr) {
-            // malformed SSE line — skip
-          }
+          } catch { /* malformed SSE line */ }
         }
       }
 
+      setThinkingSteps([]);
+      return resultMsg;
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        setThinkingSteps([]);
-        setIsLoading(false);
-        return;
-      }
+      setThinkingSteps([]);
+      if (error instanceof Error && error.name === "AbortError") return null;
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [sessionId]);
+
+  const handleSend = async () => {
+    const trimmedInput = input.trim();
+    if (!trimmedInput || isLoading) return;
+
+    setOpenSourceKey(null);
+    setSuggestions([]);
+
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: trimmedInput,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+
+    try {
+      const assistantMsg = await runStreamingQuery(trimmedInput);
+      if (!assistantMsg) return;
+      setMessages(prev => {
+        const updated = [...prev, assistantMsg];
+        const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+        const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+        setConversations(convs => {
+          const existing = convs.find(c => c.id === activeConvId);
+          if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
+        });
+        return updated;
+      });
+      setTypingMessageId(assistantMsg.id);
+      fetchSuggestions(trimmedInput, assistantMsg.content);
+    } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
@@ -1983,11 +1987,8 @@ const Chat = () => {
         content: `Sorry, I encountered an error: ${msg}. Please try again.`,
         timestamp: new Date(),
       };
-      setThinkingSteps([]);
-      setMessages((prev) => [...prev, errorMsg]);
+      setMessages(prev => [...prev, errorMsg]);
       toast({ title: "Query failed", description: msg, variant: "destructive" });
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -2150,7 +2151,6 @@ const Chat = () => {
     const newContent = editDraft.trim();
     if (!newContent) return;
 
-    // Stop any in-flight request immediately
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);
@@ -2158,53 +2158,22 @@ const Chat = () => {
     setEditingMsgId(null);
     setEditDraft("");
 
-    // Find the user message index and drop everything from it onward
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
 
-    const updatedUserMsg: Message = {
-      ...messages[msgIndex],
-      content: newContent,
-      timestamp: new Date(),
-    };
-
-    // Keep all messages before the edited one, then the updated user message
+    const updatedUserMsg: Message = { ...messages[msgIndex], content: newContent, timestamp: new Date() };
     setMessages(prev => [...prev.slice(0, msgIndex), updatedUserMsg]);
-    setIsLoading(true);
 
     try {
-      abortControllerRef.current = new AbortController();
-      const response = await queryBackend(newContent, sessionId, abortControllerRef.current.signal);
-      if (response.session_id) setSessionId(response.session_id);
-
-      const assistantMsg: Message = {
-        id: Date.now().toString(),
-        role: "assistant",
-        content: response.answer,
-        rawAnswer: response.raw_answer ?? response.answer,
-        sources: response.sources,
-        confidence: response.confidence,
-        timestamp: new Date(),
-      };
-
+      const assistantMsg = await runStreamingQuery(newContent);
+      if (!assistantMsg) return;
       setMessages(prev => [...prev, assistantMsg]);
       setTypingMessageId(assistantMsg.id);
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        setIsLoading(false);
-        return;
-      }
       const msg = serializeError(error);
-      const errorMsg: Message = {
-        id: Date.now().toString(),
-        role: "assistant",
-        content: `Sorry, I encountered an error: ${msg}. Please try again.`,
-        timestamp: new Date(),
-      };
+      const errorMsg: Message = { id: Date.now().toString(), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };
       setMessages(prev => [...prev, errorMsg]);
       toast({ title: "Query failed", description: msg, variant: "destructive" });
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -2213,31 +2182,19 @@ const Chat = () => {
     if (msgIndex < 1) return;
     const prevUserMsg = [...messages].slice(0, msgIndex).reverse().find(m => m.role === "user");
     if (!prevUserMsg) return;
+
     setMessages(prev => prev.filter(m => m.id !== msgId));
-    setIsLoading(true);
+
     try {
-      abortControllerRef.current = new AbortController();
-      const response = await queryBackend(prevUserMsg.content, sessionId, abortControllerRef.current.signal);
-      if (response.session_id) setSessionId(response.session_id);
-      const redoMsg: Message = {
-        id: Date.now().toString(),
-        role: "assistant",
-        content: response.answer,
-        rawAnswer: response.raw_answer ?? response.answer,
-        sources: response.sources,
-        confidence: response.confidence,
-        timestamp: new Date(),
-      };
+      const redoMsg = await runStreamingQuery(prevUserMsg.content);
+      if (!redoMsg) return;
       setMessages(prev => [...prev, redoMsg]);
       setTypingMessageId(redoMsg.id);
     } catch (error) {
-      // Silently ignore abort; surface real errors
       if (!(error instanceof Error && error.name === "AbortError")) {
         const msg = serializeError(error);
         toast({ title: "Regeneration failed", description: msg, variant: "destructive" });
       }
-    } finally {
-      setIsLoading(false);
     }
   };
 

@@ -522,13 +522,8 @@ def _clean_answer(text: str) -> str:
     # Catches: '-', '- ', '- [1]', '- [1][2]', '* ', bullet followed only by whitespace/citations
     text = re.sub(r'(?m)^\s*[-*+]\s*(\[\d+\]\s*)*\s*$', '', text)
 
-    # 6b. Remove bullets where the only content is whitespace or a lone period
-    text = re.sub(r'(?m)^\s*[-*+]\s+[.\s]*$', '', text)
-
-    # 6c. Orphan period on its own line — rejoin to the previous line
-    text = re.sub(r'([^\n])\n+^\s*\.\s*$', r'\1.', text, flags=re.MULTILINE)
-    # Also catch period lines that follow a blank line
-    text = re.sub(r'(?m)^\s*\.\s*$', '', text)
+    # 6b. Remove bullets where the only content is whitespace
+    text = re.sub(r'(?m)^\s*[-*+]\s+\s*$', '', text)
 
     # 7. Remove lines that are only citation markers e.g. a lone '[1]'
     text = re.sub(r'(?m)^\s*(\[\d+\]\s*)+$', '', text)
@@ -1269,14 +1264,29 @@ Respond with ONLY the rewritten query, nothing else."""
 
         import re as _re
 
+        # ── Kill orphan periods immediately after LLM output ──────────────
+        # The model sometimes outputs a sentence on one line and its closing
+        # period on the next, e.g. "some text\n.\n- next bullet".
+        # Attack it at every possible form before anything else runs:
+
+        # 1. Period on its own line between list items or paragraphs → delete the line
+        answer = _re.sub(r'\n[ \t]*\.[ \t]*\n', '\n', answer)
+        # 2. Period on its own line at end of string
+        answer = _re.sub(r'\n[ \t]*\.[ \t]*$', '', answer.rstrip())
+        # 3. Period-only line that follows a bullet line → attach to previous line
+        answer = _re.sub(r'([-*+][^\n]+)\n[ \t]*\.[ \t]*\n', r'\1\n', answer)
+        # 4. Any remaining line consisting of only a period (with optional spaces)
+        answer = _re.sub(r'(?m)^[ \t]*\.[ \t]*$', '', answer)
+        # 5. Collapse any triple+ newlines that removals above may have created
+        answer = _re.sub(r'\n{3,}', '\n\n', answer)
+
         # Strip markdown links [text](url) → text
         answer = _re.sub(r'\[([^\]]+)\]\(https?://[^)]+\)', r'\1', answer)
 
         # Check [N] citation markers
         cited_nums = sorted(set(int(m) for m in _re.findall(r'\[(\d+)\]', answer)))
         print(f"✍️  Citations found: {cited_nums}")
-        print(f"   Answer preview: {answer[:160]!r}")
-        print(f"   {len(answer)} chars")
+        print(f"   Answer RAW:\n{answer}\n---END RAW---")
 
         # Emit section headings from the generated answer
         headings = _re.findall(r'^#{1,3}\s+(.+)$', answer, _re.MULTILINE)
