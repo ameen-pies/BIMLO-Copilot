@@ -2900,101 +2900,83 @@ const Chat = () => {
               >
                 <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
-                  {thinkingSteps.length === 0 ? (
-                    <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
-                      <TypingIndicator />
-                    </div>
-                  ) : (
-                    <div className="bg-secondary/60 border border-border/50 rounded-2xl rounded-bl-md overflow-hidden">
-                      {/* Header */}
-                      <button
-                        onClick={() => setThinkingExpanded(v => !v)}
-                        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 hover:bg-muted/40 transition-colors"
+                  {/* ── Thinking steps above the dots ── */}
+                  <AnimatePresence>
+                    {thinkingSteps.length > 0 && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="mb-2 flex flex-col gap-1.5"
                       >
-                        <span className="text-xs font-medium text-muted-foreground flex-1 text-left truncate">
-                          {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground/40 shrink-0">
-                          {thinkingExpanded ? "hide" : "show"}
-                        </span>
-                        <motion.div
-                          animate={{ rotate: thinkingExpanded ? 180 : 0 }}
-                          transition={{ duration: 0.2 }}
+                        {/* Inline status line */}
+                        <button
+                          onClick={() => setThinkingExpanded(v => !v)}
+                          className="flex items-center gap-1.5 group w-fit"
                         >
-                          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/40" />
-                        </motion.div>
-                      </button>
-
-                      {/* Steps */}
-                      <AnimatePresence>
-                        {thinkingExpanded && (
-                          <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: "auto", opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
+                          <motion.span
+                            className="inline-block h-1.5 w-1.5 rounded-full bg-primary/60 shrink-0"
+                            animate={{ opacity: [0.4, 1, 0.4] }}
+                            transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+                          />
+                          <motion.span
+                            key={thinkingSteps[thinkingSteps.length - 1]?.message}
+                            initial={{ opacity: 0, y: 3 }}
+                            animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.2 }}
-                            className="overflow-hidden"
+                            className="text-[11px] text-muted-foreground/60 italic leading-none"
                           >
-                            <div className="px-3.5 pb-3 pt-1 border-t border-border/30">
-                              {thinkingSteps.map((step, i) => {
-                                const isLatest = i === thinkingSteps.length - 1;
-                                return (
-                                  <div key={`${step.node}-${i}`} className="flex gap-3">
-                                    {/* Dot + line column */}
-                                    <div className="flex flex-col items-center shrink-0 w-2">
-                                      <div className="h-[18px] flex items-center justify-center">
-                                        {isLatest ? (
-                                          <motion.div
-                                            className="h-2 w-2 rounded-full bg-primary"
-                                            animate={{ scale: [1, 1.4, 1], opacity: [0.7, 1, 0.7] }}
-                                            transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
-                                          />
-                                        ) : (
-                                          <div className="h-2 w-2 rounded-full bg-border" />
-                                        )}
-                                      </div>
-                                      {/* Connector line to next dot */}
-                                      {i < thinkingSteps.length - 1 && (
-                                        <motion.div
-                                          className="w-px flex-1 bg-border/50"
-                                          style={{ minHeight: 4 }}
-                                          initial={{ scaleY: 0, originY: 0 }}
-                                          animate={{ scaleY: 1 }}
-                                          transition={{ duration: 0.2 }}
-                                        />
-                                      )}
-                                      {isLatest && (
-                                        <motion.div
-                                          className="w-px bg-primary/30"
-                                          animate={{ height: [4, 10, 4] }}
-                                          transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
-                                        />
-                                      )}
-                                    </div>
-                                    {/* Text — vertically centered with dot */}
-                                    <motion.div
-                                      initial={{ opacity: 0, x: -4 }}
-                                      animate={{ opacity: 1, x: 0 }}
-                                      transition={{ duration: 0.15 }}
-                                      className="flex items-center h-[18px] min-w-0"
-                                    >
-                                      <span className={`text-[11px] leading-none truncate ${
-                                        isLatest
-                                          ? "text-foreground/80 font-medium"
-                                          : "text-muted-foreground/50"
-                                      }`}>
-                                        {step.message}
-                                      </span>
-                                    </motion.div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  )}
+                            {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
+                          </motion.span>
+                          <motion.span
+                            animate={{ rotate: thinkingExpanded ? 180 : 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
+                          </motion.span>
+                        </button>
+
+                        {/* Expanded past steps */}
+                        <AnimatePresence>
+                          {thinkingExpanded && thinkingSteps.length > 1 && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="flex flex-col gap-0.5 pl-3 border-l border-border/30 ml-[2px]">
+                                {thinkingSteps.slice(0, -1).map((step, i) => (
+                                  <motion.div
+                                    key={`${step.node}-${i}`}
+                                    initial={{ opacity: 0, x: -4 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    transition={{ duration: 0.12, delay: i * 0.03 }}
+                                    className="flex items-center gap-1.5"
+                                  >
+                                    {step.icon && (
+                                      <span className="text-[10px] leading-none shrink-0 opacity-50">{step.icon}</span>
+                                    )}
+                                    <span className="text-[10px] text-muted-foreground/40 leading-snug">
+                                      {step.message}
+                                    </span>
+                                  </motion.div>
+                                ))}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* ── Typing dots — always visible during generation ── */}
+                  <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
+                    <TypingIndicator />
+                  </div>
                 </div>
               </motion.div>
             )}
