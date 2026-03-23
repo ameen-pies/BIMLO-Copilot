@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -1432,6 +1432,42 @@ const Chat = () => {
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
 
+  // ── Notify-when-done ─────────────────────────────────────────────────────
+  const [notifyEnabled, setNotifyEnabled]       = useState(false);
+  const [showNotifyBanner, setShowNotifyBanner] = useState(false);
+  const [notifyDismissed, setNotifyDismissed]   = useState(false);
+  const beepAudioRef    = useRef<HTMLAudioElement>(new Audio("/beep.wav"));
+  const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopBeeping = useCallback(() => {
+    if (beepIntervalRef.current) { clearInterval(beepIntervalRef.current); beepIntervalRef.current = null; }
+  }, []);
+
+  const playBeep = useCallback(() => {
+    beepAudioRef.current.currentTime = 0;
+    beepAudioRef.current.play().catch(() => {});
+  }, []);
+
+  const fireNotification = useCallback(() => {
+    if (!notifyEnabled) return;
+    playBeep();
+    if (document.visibilityState !== "visible") {
+      if (Notification.permission === "granted") {
+        new Notification("Done!", { body: "Your answer is ready.", icon: "/favicon.ico" });
+      }
+      beepIntervalRef.current = setInterval(playBeep, 3000);
+      const onVisible = () => {
+        if (document.visibilityState === "visible") {
+          stopBeeping();
+          document.removeEventListener("visibilitychange", onVisible);
+        }
+      };
+      document.addEventListener("visibilitychange", onVisible);
+    }
+  }, [notifyEnabled, stopBeeping, playBeep]);
+
+  useEffect(() => stopBeeping, [stopBeeping]);
+
   // ── Filename autocomplete ────────────────────────────────────────────────
   const [autocomplete, setAutocomplete] = useState<{
     query: string;
@@ -1962,6 +1998,7 @@ const Chat = () => {
     };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
+    if (!notifyDismissed) setShowNotifyBanner(true);
 
     try {
       const assistantMsg = await runStreamingQuery(trimmedInput);
@@ -1979,6 +2016,7 @@ const Chat = () => {
       });
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
+      fireNotification();
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = {
@@ -2183,6 +2221,8 @@ const Chat = () => {
     const prevUserMsg = [...messages].slice(0, msgIndex).reverse().find(m => m.role === "user");
     if (!prevUserMsg) return;
 
+    setThinkingSteps([]);
+    setThinkingExpanded(true);
     setMessages(prev => prev.filter(m => m.id !== msgId));
 
     try {
@@ -2190,6 +2230,7 @@ const Chat = () => {
       if (!redoMsg) return;
       setMessages(prev => [...prev, redoMsg]);
       setTypingMessageId(redoMsg.id);
+      fireNotification();
     } catch (error) {
       if (!(error instanceof Error && error.name === "AbortError")) {
         const msg = serializeError(error);
@@ -2651,14 +2692,38 @@ const Chat = () => {
                     <User className="h-4 w-4 text-muted-foreground" />
                   </div>
                 )}
-                <div className={`space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
+                <div className={`group/msg relative space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
+                  {/* Copy button — top-right corner of the message, appears on hover */}
+                  {msg.role === "assistant" && (
+                    <button
+                      onClick={() => {
+                        const text = msg.rawAnswer ?? msg.content;
+                        navigator.clipboard.writeText(
+                          text.replace(/\[\d+\]/g, "").replace(/#{1,3}\s/g, "").trim()
+                        );
+                        setCopiedMsgId(msg.id);
+                        setTimeout(() => setCopiedMsgId(null), 1500);
+                      }}
+                      className={`absolute -top-2 right-0 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
+                        copiedMsgId === msg.id
+                          ? "opacity-100 bg-primary/15 text-primary"
+                          : "opacity-0 group-hover/msg:opacity-100 bg-muted/80 text-muted-foreground hover:text-foreground hover:bg-muted"
+                      }`}
+                      title="Copy response"
+                    >
+                      {copiedMsgId === msg.id
+                        ? <><Check className="h-3 w-3" /><span>Copied</span></>
+                        : <><Copy className="h-3 w-3" /><span>Copy</span></>}
+                    </button>
+                  )}
                   <div
-                    className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                    className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
                         ? "bg-primary text-primary-foreground rounded-br-md w-fit"
                         : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
+
                     {msg.role === "assistant" && msg.id === typingMessageId ? (
                       <TypewriterText
                         text={msg.rawAnswer ?? msg.content}
@@ -2896,60 +2961,64 @@ const Chat = () => {
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="flex gap-3"
+                className="flex flex-col gap-1.5"
               >
-                <Logo className="h-8 w-8 shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  {/* ── Thinking steps above the dots ── */}
-                  <AnimatePresence>
-                    {thinkingSteps.length > 0 && (
-                      <motion.div
-                        initial={{ opacity: 0, y: -4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.2 }}
-                        className="mb-2 flex flex-col gap-1.5"
+                {/* Thinking steps above logo+dots */}
+                <AnimatePresence>
+                  {thinkingSteps.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.2 }}
+                      className="flex flex-col gap-1 pl-11"
+                    >
+                      <button
+                        onClick={() => setThinkingExpanded(v => !v)}
+                        className="flex items-center gap-1.5 group w-fit"
                       >
-                        {/* Inline status line */}
-                        <button
-                          onClick={() => setThinkingExpanded(v => !v)}
-                          className="flex items-center gap-1.5 group w-fit"
+                        <motion.span
+                          className="inline-block h-1.5 w-1.5 rounded-full bg-primary/50 shrink-0"
+                          animate={{ opacity: [0.3, 1, 0.3] }}
+                          transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+                        />
+                        <motion.span
+                          key={thinkingSteps[thinkingSteps.length - 1]?.message}
+                          initial={{ opacity: 0, y: 2 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.18 }}
+                          className="text-[11px] text-muted-foreground/50 italic leading-none"
                         >
-                          <motion.span
-                            className="inline-block h-1.5 w-1.5 rounded-full bg-primary/60 shrink-0"
-                            animate={{ opacity: [0.4, 1, 0.4] }}
-                            transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-                          />
-                          <motion.span
-                            key={thinkingSteps[thinkingSteps.length - 1]?.message}
-                            initial={{ opacity: 0, y: 3 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.2 }}
-                            className="text-[11px] text-muted-foreground/60 italic leading-none"
+                          {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
+                        </motion.span>
+                        <motion.span
+                          animate={{ rotate: thinkingExpanded ? 180 : 0 }}
+                          transition={{ duration: 0.2 }}
+                          className="opacity-0 group-hover:opacity-60 transition-opacity"
+                        >
+                          <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
+                        </motion.span>
+                      </button>
+                      <AnimatePresence>
+                        {thinkingExpanded && thinkingSteps.length > 1 && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.18 }}
+                            className="overflow-hidden"
                           >
-                            {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
-                          </motion.span>
-                          <motion.span
-                            animate={{ rotate: thinkingExpanded ? 180 : 0 }}
-                            transition={{ duration: 0.2 }}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity"
-                          >
-                            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
-                          </motion.span>
-                        </button>
-
-                        {/* Expanded past steps */}
-                        <AnimatePresence>
-                          {thinkingExpanded && thinkingSteps.length > 1 && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.18 }}
-                              className="overflow-hidden"
-                            >
-                              <div className="flex flex-col gap-0.5 pl-3 border-l border-border/30 ml-[2px]">
-                                {thinkingSteps.slice(0, -1).map((step, i) => (
+                            <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+                              {thinkingSteps.slice(0, -1).map((step, i) => {
+                                const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
+                                const icon =
+                                  step.node === "retrieve"       ? <FileText className={cls} /> :
+                                  step.node === "rewrite_query"  ? <Search className={cls} /> :
+                                  step.node === "judge_plan"     ? <ScrollText className={cls} /> :
+                                  step.node === "synthesise"     ? <Pencil className={cls} /> :
+                                  step.node === "judge_evaluate" ? <Check className={cls} /> :
+                                                                   <Sparkles className={cls} />;
+                                return (
                                   <motion.div
                                     key={`${step.node}-${i}`}
                                     initial={{ opacity: 0, x: -4 }}
@@ -2957,23 +3026,21 @@ const Chat = () => {
                                     transition={{ duration: 0.12, delay: i * 0.03 }}
                                     className="flex items-center gap-1.5"
                                   >
-                                    {step.icon && (
-                                      <span className="text-[10px] leading-none shrink-0 opacity-50">{step.icon}</span>
-                                    )}
-                                    <span className="text-[10px] text-muted-foreground/40 leading-snug">
-                                      {step.message}
-                                    </span>
+                                    {icon}
+                                    <span className="text-[10px] text-muted-foreground/35 leading-snug">{step.message}</span>
                                   </motion.div>
-                                ))}
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  {/* ── Typing dots — always visible during generation ── */}
+                                );
+                              })}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                {/* Logo + dots always same row */}
+                <div className="flex gap-3 items-center">
+                  <Logo className="h-8 w-8 shrink-0" />
                   <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
                     <TypingIndicator />
                   </div>
@@ -2984,6 +3051,46 @@ const Chat = () => {
             <div ref={messagesEndRef} />
           </div>
         </div>
+
+        {/* Notification permission pill */}
+        <AnimatePresence>
+          {showNotifyBanner && (
+            <motion.div
+              initial={{ opacity: 0, y: 6, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 6, scale: 0.97 }}
+              transition={{ duration: 0.18 }}
+              className="flex justify-center pb-2"
+            >
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-card shadow-sm text-xs text-muted-foreground">
+                <Bell className="h-3 w-3 text-primary shrink-0" />
+                <span>Notify when done?</span>
+                <button
+                  onClick={() => {
+                    Notification.requestPermission().then(p => {
+                      if (p === "granted") setNotifyEnabled(true);
+                    });
+                    setShowNotifyBanner(false);
+                    setNotifyDismissed(true);
+                  }}
+                  className="font-medium text-primary hover:text-primary/80 transition-colors"
+                >
+                  Allow
+                </button>
+                <span className="text-border">·</span>
+                <button
+                  onClick={() => {
+                    setShowNotifyBanner(false);
+                    setNotifyDismissed(true);
+                  }}
+                  className="hover:text-foreground transition-colors"
+                >
+                  No thanks
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Input */}
         <div className="border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
@@ -3120,6 +3227,24 @@ const Chat = () => {
                     style={{ maxHeight: "160px" }}
                     className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
                   />
+
+                  {/* Notify toggle */}
+                  {notifyDismissed && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!notifyEnabled) {
+                          Notification.requestPermission().then(p => { if (p === "granted") setNotifyEnabled(true); });
+                        } else {
+                          setNotifyEnabled(false);
+                        }
+                      }}
+                      title={notifyEnabled ? "Notifications on — click to disable" : "Enable notifications"}
+                      className={"h-8 w-8 shrink-0 flex items-center justify-center rounded-lg transition-colors mb-0.5 " + (notifyEnabled ? "text-primary" : "text-muted-foreground/40 hover:text-muted-foreground")}
+                    >
+                      {notifyEnabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
+                    </button>
+                  )}
 
                   {/* Voice wave button */}
                   <button
