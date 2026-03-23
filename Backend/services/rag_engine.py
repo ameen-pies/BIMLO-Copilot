@@ -519,8 +519,16 @@ def _clean_answer(text: str) -> str:
     # turning structured markdown output into a wall of text.
 
     # 6. Remove orphan bullets — marker with no real content.
-    # Catches: '-', '- ', '- [1]', '- [1][2]', '* [1]', etc.
-    text = re.sub(r'(?m)^\s*[-*+]\s*(\[\d+\]\s*)*$', '', text)
+    # Catches: '-', '- ', '- [1]', '- [1][2]', '* ', bullet followed only by whitespace/citations
+    text = re.sub(r'(?m)^\s*[-*+]\s*(\[\d+\]\s*)*\s*$', '', text)
+
+    # 6b. Remove bullets where the only content is whitespace or a lone period
+    text = re.sub(r'(?m)^\s*[-*+]\s+[.\s]*$', '', text)
+
+    # 6c. Orphan period on its own line — rejoin to the previous line
+    text = re.sub(r'([^\n])\n+^\s*\.\s*$', r'\1.', text, flags=re.MULTILINE)
+    # Also catch period lines that follow a blank line
+    text = re.sub(r'(?m)^\s*\.\s*$', '', text)
 
     # 7. Remove lines that are only citation markers e.g. a lone '[1]'
     text = re.sub(r'(?m)^\s*(\[\d+\]\s*)+$', '', text)
@@ -1049,6 +1057,12 @@ Reply with ONE word only — the route name."""
         else:
             return f"[Response in {plan.target_language} - LLM unavailable]"
 
+    def _emit(self, node: str, icon: str, message: str):
+        """Fire a live status event from inside a node with real runtime context."""
+        cb = getattr(self, "_status_callback", None)
+        if callable(cb):
+            cb(node, icon, message)
+
     # ------------------------------------------------------------------ #
     #  RETRIEVAL NODES                                                    #
     # ------------------------------------------------------------------ #
@@ -1058,10 +1072,24 @@ Reply with ONE word only — the route name."""
         query = state["query"]
         top_k = state["top_k"]
         iteration = state["retrieval_iterations"] + 1
-        
+
         print(f"🔎 Retrieval #{iteration} (+{top_k} chunks) → ", end="")
-        
-        results = self.vs.search(query, top_k=top_k)
+
+        # If the query explicitly names a file, restrict search to that file only
+        filter_dict = None
+        all_docs = self.vs.list_documents()
+        for doc in all_docs:
+            fname = doc.get("filename", "")
+            if fname and fname.lower() in query.lower():
+                filter_dict = {"filename": fname}
+                print(f"[filtered to {fname}] ", end="")
+                break
+
+        try:
+            results = self.vs.search(query, top_k=top_k, filter_dict=filter_dict)
+        except Exception:
+            # Some vector stores don't support filter — fall back to unfiltered
+            results = self.vs.search(query, top_k=top_k)
         
         # Merge with existing chunks (for iterative RAG)
         existing = state["retrieved_chunks"]
@@ -1077,7 +1105,17 @@ Reply with ONE word only — the route name."""
                 unique.append(c)
         
         print(f"{len(unique)} total chunks")
-        
+
+        # Emit which files were found
+        filenames = list(dict.fromkeys(
+            c["metadata"].get("filename", "unknown") for c in unique
+        ))
+        if filenames:
+            if len(filenames) == 1:
+                self._emit("retrieve", "📄", f"Reading {filenames[0]}…")
+            else:
+                self._emit("retrieve", "📂", f"Found {len(filenames)} files: {', '.join(filenames[:3])}…")
+
         return {
             **state,
             "retrieved_chunks": unique,
@@ -1127,6 +1165,7 @@ Respond with ONLY the rewritten query, nothing else."""
         )
         
         print(f'"{rewritten}"')
+        self._emit("rewrite_query", "✏️", f"Searching for: {rewritten[:60]}…")
         
         # Add to sub-queries for tracking
         sub_queries = state["sub_queries"] + [rewritten]
@@ -1158,7 +1197,13 @@ Respond with ONLY the rewritten query, nothing else."""
         plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
         
         print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style}")
-        
+
+        # Emit what the judge plans to cover
+        if plan.key_points_to_include:
+            pts = plan.key_points_to_include[:2]
+            label = " & ".join(pts) if len(pts) > 1 else pts[0]
+            self._emit("judge_plan", "🧠", f"Covering: {label[:60]}…")
+
         return {
             **state,
             "response_plan": plan,
@@ -1189,7 +1234,13 @@ Respond with ONLY the rewritten query, nothing else."""
             return {**state, "error": "No response plan"}
         
         print(f"✍️  Generating (attempt {retry_count + 1}, following plan) → ", end="")
-        
+
+        # Emit the primary file being synthesised from
+        if chunks:
+            primary_file = chunks[0]["metadata"].get("filename", "")
+            if primary_file:
+                self._emit("synthesise", "✍️", f"Writing from {primary_file}…")
+
         # Build context
         context = _build_context(chunks)
         
@@ -1227,6 +1278,11 @@ Respond with ONLY the rewritten query, nothing else."""
         print(f"   Answer preview: {answer[:160]!r}")
         print(f"   {len(answer)} chars")
 
+        # Emit section headings from the generated answer
+        headings = _re.findall(r'^#{1,3}\s+(.+)$', answer, _re.MULTILINE)
+        if headings:
+            self._emit("synthesise", "📝", f"Sections: {', '.join(h.strip() for h in headings[:3])}…")
+
         # If LLM produced zero citations, add a single [1] at the end only —
         # do NOT stamp every paragraph, that creates false sources.
         if not cited_nums and chunks:
@@ -1246,6 +1302,12 @@ Respond with ONLY the rewritten query, nothing else."""
         # Build sources only when the judge's plan calls for citations
         if plan.should_cite_sources:
             if self._source_node and _SOURCE_AGENT_AVAILABLE:
+                # Emit which files we're extracting sources from
+                source_files = list(dict.fromkeys(
+                    c["metadata"].get("filename", "") for c in chunks if c["metadata"].get("filename")
+                ))
+                for fname in source_files[:3]:
+                    self._emit("synthesise", "🔗", f"Extracting sources from {fname}…")
                 intermediate = {**state, "answer": clean_answer, "retrieved_chunks": chunks}
                 intermediate = self._source_node(intermediate)
                 built_sources = intermediate.get("sources", [])
@@ -1397,10 +1459,12 @@ Answer in {plan.target_language}:"""
 
         if evaluation.is_acceptable:
             print(f"✅ ACCEPTED (score: {evaluation.overall_score:.2f})")
+            self._emit("judge_evaluate", "✅", f"Answer looks good (score {evaluation.overall_score:.0%})…")
         else:
             print(f"❌ REJECTED (score: {evaluation.overall_score:.2f})")
             print(f"   Issues: {', '.join(evaluation.specific_problems)}")
             print(f"   How to fix: {evaluation.how_to_fix}")
+            self._emit("judge_evaluate", "🔁", f"Improving answer: {evaluation.how_to_fix[:60]}…")
         
         return {
             **state,

@@ -86,7 +86,12 @@ const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["components"] = 
   p: ({ children }) => <span className="inline leading-relaxed">{children}</span>,
   ul: ({ children }) => <ul className="list-disc list-inside my-2 space-y-1 block">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal list-inside my-2 space-y-1 block">{children}</ol>,
-  li: ({ children }) => <li className="ml-2 leading-relaxed">{children}</li>,
+  li: ({ children }) => {
+    // Don't render empty list items — they show as stray bullet dots
+    const text = typeof children === "string" ? children : Array.isArray(children) ? children.join("") : String(children ?? "");
+    if (!text.trim()) return null;
+    return <li className="ml-2 leading-relaxed">{children}</li>;
+  },
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
   h1: ({ children }) => <h1 className="text-base font-bold mb-2 mt-4 block">{children}</h1>,
@@ -2939,39 +2944,31 @@ const Chat = () => {
                 <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
                   {thinkingSteps.length === 0 ? (
-                    /* No steps yet — plain dots */
                     <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
                       <TypingIndicator />
                     </div>
                   ) : (
-                    /* Thinking panel */
                     <div className="bg-secondary/60 border border-border/50 rounded-2xl rounded-bl-md overflow-hidden">
-                      {/* Header — always visible */}
+                      {/* Header */}
                       <button
                         onClick={() => setThinkingExpanded(v => !v)}
-                        className="w-full flex items-center gap-2 px-3.5 py-2.5 hover:bg-muted/40 transition-colors"
+                        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 hover:bg-muted/40 transition-colors"
                       >
-                        <motion.div
-                          animate={{ rotate: 360 }}
-                          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                        >
-                          <Sparkles className="h-3.5 w-3.5 text-primary/70 shrink-0" />
-                        </motion.div>
-                        <span className="text-xs font-medium text-muted-foreground flex-1 text-left">
+                        <span className="text-xs font-medium text-muted-foreground flex-1 text-left truncate">
                           {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
                         </span>
-                        <span className="text-[10px] text-muted-foreground/50">
-                          {thinkingExpanded ? "hide" : "show"} steps
+                        <span className="text-[10px] text-muted-foreground/40 shrink-0">
+                          {thinkingExpanded ? "hide" : "show"}
                         </span>
                         <motion.div
                           animate={{ rotate: thinkingExpanded ? 180 : 0 }}
                           transition={{ duration: 0.2 }}
                         >
-                          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/50" />
+                          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/40" />
                         </motion.div>
                       </button>
 
-                      {/* Steps list */}
+                      {/* Steps */}
                       <AnimatePresence>
                         {thinkingExpanded && (
                           <motion.div
@@ -2981,43 +2978,58 @@ const Chat = () => {
                             transition={{ duration: 0.2 }}
                             className="overflow-hidden"
                           >
-                            <div className="px-3.5 pb-2.5 flex flex-col gap-1.5 border-t border-border/30 pt-2">
+                            <div className="px-3.5 pb-3 pt-1 border-t border-border/30">
                               {thinkingSteps.map((step, i) => {
                                 const isLatest = i === thinkingSteps.length - 1;
                                 return (
-                                  <motion.div
-                                    key={`${step.node}-${i}`}
-                                    initial={{ opacity: 0, x: -6 }}
-                                    animate={{ opacity: 1, x: 0 }}
-                                    transition={{ duration: 0.18 }}
-                                    className="flex items-center gap-2"
-                                  >
-                                    {/* Connector line */}
-                                    <div className="flex flex-col items-center self-stretch">
-                                      <div className={`h-2 w-px ${i === 0 ? "bg-transparent" : "bg-border/50"}`} />
-                                      <span className="text-[13px] leading-none">{step.icon}</span>
-                                      <div className={`flex-1 w-px ${isLatest ? "bg-transparent" : "bg-border/50"}`} />
-                                    </div>
-                                    <span className={`text-[11px] leading-relaxed ${isLatest ? "text-foreground/80 font-medium" : "text-muted-foreground/60"}`}>
-                                      {step.message}
-                                    </span>
-                                    {isLatest && (
-                                      <motion.div
-                                        className="flex gap-0.5 ml-auto"
-                                        initial={{ opacity: 0 }}
-                                        animate={{ opacity: 1 }}
-                                      >
-                                        {[0, 1, 2].map(j => (
+                                  <div key={`${step.node}-${i}`} className="flex gap-3">
+                                    {/* Dot + line column */}
+                                    <div className="flex flex-col items-center shrink-0 w-2">
+                                      <div className="h-[18px] flex items-center justify-center">
+                                        {isLatest ? (
                                           <motion.div
-                                            key={j}
-                                            className="h-1 w-1 rounded-full bg-primary/60"
-                                            animate={{ opacity: [0.3, 1, 0.3] }}
-                                            transition={{ duration: 1, repeat: Infinity, delay: j * 0.2 }}
+                                            className="h-2 w-2 rounded-full bg-primary"
+                                            animate={{ scale: [1, 1.4, 1], opacity: [0.7, 1, 0.7] }}
+                                            transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
                                           />
-                                        ))}
-                                      </motion.div>
-                                    )}
-                                  </motion.div>
+                                        ) : (
+                                          <div className="h-2 w-2 rounded-full bg-border" />
+                                        )}
+                                      </div>
+                                      {/* Connector line to next dot */}
+                                      {i < thinkingSteps.length - 1 && (
+                                        <motion.div
+                                          className="w-px flex-1 bg-border/50"
+                                          style={{ minHeight: 4 }}
+                                          initial={{ scaleY: 0, originY: 0 }}
+                                          animate={{ scaleY: 1 }}
+                                          transition={{ duration: 0.2 }}
+                                        />
+                                      )}
+                                      {isLatest && (
+                                        <motion.div
+                                          className="w-px bg-primary/30"
+                                          animate={{ height: [4, 10, 4] }}
+                                          transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
+                                        />
+                                      )}
+                                    </div>
+                                    {/* Text — vertically centered with dot */}
+                                    <motion.div
+                                      initial={{ opacity: 0, x: -4 }}
+                                      animate={{ opacity: 1, x: 0 }}
+                                      transition={{ duration: 0.15 }}
+                                      className="flex items-center h-[18px] min-w-0"
+                                    >
+                                      <span className={`text-[11px] leading-none truncate ${
+                                        isLatest
+                                          ? "text-foreground/80 font-medium"
+                                          : "text-muted-foreground/50"
+                                      }`}>
+                                        {step.message}
+                                      </span>
+                                    </motion.div>
+                                  </div>
                                 );
                               })}
                             </div>
