@@ -1436,37 +1436,53 @@ const Chat = () => {
   const [notifyEnabled, setNotifyEnabled]       = useState(false);
   const [showNotifyBanner, setShowNotifyBanner] = useState(false);
   const [notifyDismissed, setNotifyDismissed]   = useState(false);
-  const beepAudioRef    = useRef<HTMLAudioElement>(new Audio("/beep.wav"));
-  const beepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Ref mirror so fireNotification never reads a stale closure value.
+  const notifyEnabledRef = useRef(false);
+  useEffect(() => { notifyEnabledRef.current = notifyEnabled; }, [notifyEnabled]);
 
-  const stopBeeping = useCallback(() => {
-    if (beepIntervalRef.current) { clearInterval(beepIntervalRef.current); beepIntervalRef.current = null; }
+  // Audio is created lazily on first user gesture to satisfy browser autoplay policy.
+  // We keep a ref to the Audio object (null until first interaction) and a flag
+  // that tracks whether it has been "unlocked" (played silently once).
+  const beepAudioRef    = useRef<HTMLAudioElement | null>(null);
+  const audioUnlocked   = useRef(false);
+
+  // Call once on any user gesture to create + silently unlock the audio element.
+  const ensureAudio = useCallback(() => {
+    if (beepAudioRef.current) return beepAudioRef.current;
+    const audio = new Audio("/beep.wav");
+    audio.preload = "auto";
+    beepAudioRef.current = audio;
+    // Unlock: play at zero volume then immediately pause — satisfies autoplay policy.
+    if (!audioUnlocked.current) {
+      audio.volume = 0;
+      audio.play().then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.volume = 1;
+        audioUnlocked.current = true;
+      }).catch(() => {});
+    }
+    return audio;
   }, []);
 
   const playBeep = useCallback(() => {
-    beepAudioRef.current.currentTime = 0;
-    beepAudioRef.current.play().catch(() => {});
-  }, []);
+    const audio = ensureAudio();
+    audio.currentTime = 0;
+    audio.volume = 1;
+    audio.play().catch(() => {});
+  }, [ensureAudio]);
 
+  // Uses ref so it never has a stale value of notifyEnabled, regardless of
+  // when/where it's called from inside async callbacks like handleSend.
   const fireNotification = useCallback(() => {
-    if (!notifyEnabled) return;
+    if (!notifyEnabledRef.current) return;
+    // Always play a single ding — whether the tab is visible or not.
     playBeep();
-    if (document.visibilityState !== "visible") {
-      if (Notification.permission === "granted") {
-        new Notification("Done!", { body: "Your answer is ready.", icon: "/favicon.ico" });
-      }
-      beepIntervalRef.current = setInterval(playBeep, 3000);
-      const onVisible = () => {
-        if (document.visibilityState === "visible") {
-          stopBeeping();
-          document.removeEventListener("visibilitychange", onVisible);
-        }
-      };
-      document.addEventListener("visibilitychange", onVisible);
+    // If the tab is hidden, also send a browser notification (if permitted).
+    if (document.visibilityState !== "visible" && Notification.permission === "granted") {
+      new Notification("Done!", { body: "Your answer is ready.", icon: "/favicon.svg" });
     }
-  }, [notifyEnabled, stopBeeping, playBeep]);
-
-  useEffect(() => stopBeeping, [stopBeeping]);
+  }, [playBeep]); // no longer depends on notifyEnabled state — reads ref instead
 
   // ── Filename autocomplete ────────────────────────────────────────────────
   const [autocomplete, setAutocomplete] = useState<{
@@ -1986,6 +2002,9 @@ const Chat = () => {
   const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
+
+    // Unlock audio on first real user gesture so the beep works later.
+    ensureAudio();
 
     setOpenSourceKey(null);
     setSuggestions([]);
