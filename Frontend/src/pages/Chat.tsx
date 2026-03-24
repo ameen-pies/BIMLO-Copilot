@@ -2712,7 +2712,14 @@ const Chat = () => {
                   </div>
                 )}
                 <div className={`group/msg relative space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
-                  {/* Copy button — top-right corner of the message, appears on hover */}
+                  <div
+                    className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
+                        : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
+                    }`}
+                  >
+                  {/* Copy button — floats right and sticks as you scroll long answers */}
                   {msg.role === "assistant" && (
                     <button
                       onClick={() => {
@@ -2723,7 +2730,7 @@ const Chat = () => {
                         setCopiedMsgId(msg.id);
                         setTimeout(() => setCopiedMsgId(null), 1500);
                       }}
-                      className={`absolute -top-2 right-0 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
+                      className={`sticky top-0 float-right ml-2 -mr-1 -mt-2 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
                         copiedMsgId === msg.id
                           ? "opacity-100 bg-primary/15 text-primary"
                           : "opacity-0 group-hover/msg:opacity-100 bg-muted/80 text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -2735,13 +2742,6 @@ const Chat = () => {
                         : <><Copy className="h-3 w-3" /><span>Copy</span></>}
                     </button>
                   )}
-                  <div
-                    className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
-                      msg.role === "user"
-                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
-                        : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
-                    }`}
-                  >
 
                     {msg.role === "assistant" && msg.id === typingMessageId ? (
                       <TypewriterText
