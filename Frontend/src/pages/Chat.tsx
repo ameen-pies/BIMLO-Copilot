@@ -1375,6 +1375,66 @@ async function queryBackend(
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// Word-completion engine — Directed Acyclic Word Graph (DAWG / trie)
+// Mirrors the fast-autocomplete DWG approach, zero dependencies.
+// Vocabulary is built dynamically from message history + document names.
+// ---------------------------------------------------------------------------
+
+interface TrieNode {
+  children: Map<string, TrieNode>;
+  freq: number;      // times this exact word was inserted
+  isEnd: boolean;
+}
+
+function makeTrie(): TrieNode {
+  return { children: new Map(), freq: 0, isEnd: false };
+}
+
+function trieInsert(root: TrieNode, word: string, weight = 1) {
+  let node = root;
+  for (const ch of word) {
+    if (!node.children.has(ch)) node.children.set(ch, makeTrie());
+    node = node.children.get(ch)!;
+  }
+  node.isEnd = true;
+  node.freq += weight;
+}
+
+/** Walk to the node matching `prefix`, or null if not found. */
+function trieFind(root: TrieNode, prefix: string): TrieNode | null {
+  let node = root;
+  for (const ch of prefix) {
+    if (!node.children.has(ch)) return null;
+    node = node.children.get(ch)!;
+  }
+  return node;
+}
+
+/** Collect up to `limit` completions from a subtree, sorted by freq desc. */
+function trieCollect(node: TrieNode, prefix: string, limit: number): { word: string; freq: number }[] {
+  const out: { word: string; freq: number }[] = [];
+  const dfs = (n: TrieNode, buf: string) => {
+    if (out.length >= limit * 3) return; // over-collect then sort
+    if (n.isEnd) out.push({ word: buf, freq: n.freq });
+    // Visit higher-freq children first (greedy DFS)
+    const sorted = [...n.children.entries()].sort((a, b) => b[1].freq - a[1].freq);
+    for (const [ch, child] of sorted) dfs(child, buf + ch);
+  };
+  dfs(node, prefix);
+  return out.sort((a, b) => b.freq - a.freq).slice(0, limit);
+}
+
+/** Tokenise any text into lowercase words ≥3 chars, stripping markdown/punctuation. */
+function tokenise(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/```[\s\S]*?```/g, "")   // strip code blocks
+    .replace(/[^a-z0-9'\s-]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !/^\d+$/.test(w));
+}
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -1493,6 +1553,29 @@ const Chat = () => {
   } | null>(null);
   const autocompleteRef = useRef<HTMLDivElement>(null);
   const [autocompletePos, setAutocompletePos] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  // ── Word-completion trie (DWG) ───────────────────────────────────────────
+  const trieRef = useRef<TrieNode>(makeTrie());
+  // Ghost-text inline suggestion: the suffix to append after the current word
+  const [wordSuffix, setWordSuffix] = useState<string>("");
+
+  // Rebuild trie whenever messages or documents change.
+  useEffect(() => {
+    const root = makeTrie();
+    // Seed from all message content (user + assistant), weighted by role
+    for (const msg of messages) {
+      const weight = msg.role === "user" ? 3 : 1; // user phrasing more relevant
+      for (const word of tokenise(msg.content)) trieInsert(root, word, weight);
+    }
+    // Seed from document filenames (high weight — user types these often)
+    for (const doc of documents) {
+      for (const word of tokenise(doc.filename)) trieInsert(root, word, 5);
+      // Also insert full filename tokens as-is (e.g. "report2024")
+      const slug = doc.filename.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (slug.length >= 3) trieInsert(root, slug, 5);
+    }
+    trieRef.current = root;
+  }, [messages, documents]);
 
   // ── Contextual next-step suggestions ────────────────────────────────────
   const [suggestions, setSuggestions] = useState<string[]>([]);
@@ -2079,11 +2162,29 @@ const Chat = () => {
           width: rect.width,
         });
         setAutocomplete({ query: fragment, triggerPos: atIdx, results, activeIdx: 0 });
+        setWordSuffix("");
         return;
       }
     }
     setAutocomplete(null);
     setAutocompletePos(null);
+
+    // ── Word-completion ghost text ──────────────────────────────────────────
+    // Extract the current word being typed (last word before caret, no spaces)
+    const wordMatch = before.match(/([a-zA-Z'][a-zA-Z0-9'-]*)$/);
+    const currentWord = wordMatch ? wordMatch[1].toLowerCase() : "";
+    if (currentWord.length >= 2) {
+      const node = trieFind(trieRef.current, currentWord);
+      if (node) {
+        const hits = trieCollect(node, currentWord, 1);
+        if (hits.length > 0 && hits[0].word !== currentWord) {
+          // Suffix = the part after what's already typed
+          setWordSuffix(hits[0].word.slice(currentWord.length));
+          return;
+        }
+      }
+    }
+    setWordSuffix("");
   };
 
   const applyAutocomplete = (doc: Document) => {
@@ -2117,6 +2218,24 @@ const Chat = () => {
         setAutocomplete(null);
         setAutocompletePos(null);
         return;
+      }
+    }
+    // ── Word-completion: Tab accepts, Escape dismisses ──────────────────────
+    if (wordSuffix) {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        setInput(prev => prev + wordSuffix);
+        setWordSuffix("");
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setWordSuffix("");
+        return;
+      }
+      // Any other key that doesn't continue the word clears the ghost
+      if (e.key === " " || e.key === "Enter" || e.key === "Backspace") {
+        setWordSuffix("");
       }
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -2730,7 +2849,7 @@ const Chat = () => {
                         setCopiedMsgId(msg.id);
                         setTimeout(() => setCopiedMsgId(null), 1500);
                       }}
-                      className={`sticky top-0 float-right ml-2 -mr-1 -mt-2 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
+                      className={`sticky top-2 float-right ml-2 -mr-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
                         copiedMsgId === msg.id
                           ? "opacity-100 bg-primary/15 text-primary"
                           : "opacity-0 group-hover/msg:opacity-100 bg-muted/80 text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -3233,19 +3352,36 @@ const Chat = () => {
                     <Plus className="h-5 w-5" />
                   </Button>
 
-                  {/* Auto-expanding textarea */}
-                  <textarea
-                    ref={textareaRef}
-                    value={input}
-                    onChange={handleInputChange}
-                    onKeyDown={handleInputKeyDown}
-                    onBlur={() => setTimeout(() => { setAutocomplete(null); setAutocompletePos(null); }, 150)}
-                    placeholder="Ask a question… type @ to mention a file"
-                    rows={1}
-                    disabled={isLoading}
-                    style={{ maxHeight: "160px" }}
-                    className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
-                  />
+                  {/* Auto-expanding textarea with ghost-text word completion */}
+                  <div className="flex-1 relative">
+                    <textarea
+                      ref={textareaRef}
+                      value={input}
+                      onChange={handleInputChange}
+                      onKeyDown={handleInputKeyDown}
+                      onBlur={() => {
+                        setTimeout(() => { setAutocomplete(null); setAutocompletePos(null); }, 150);
+                        setWordSuffix("");
+                      }}
+                      placeholder="Ask a question… type @ to mention a file"
+                      rows={1}
+                      disabled={isLoading}
+                      style={{ maxHeight: "160px" }}
+                      className="w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
+                    />
+                    {/* Ghost-text suffix — rendered as faded overlay after the real input */}
+                    {wordSuffix && !autocomplete && (
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-1 whitespace-pre-wrap break-words select-none"
+                        style={{ color: "transparent" }}
+                      >
+                        {/* Invisible clone of typed text to push the ghost to the right position */}
+                        <span>{input}</span>
+                        <span className="text-muted-foreground/40">{wordSuffix}</span>
+                      </span>
+                    )}
+                  </div>
 
                   {/* Notify toggle */}
                   {notifyDismissed && (
