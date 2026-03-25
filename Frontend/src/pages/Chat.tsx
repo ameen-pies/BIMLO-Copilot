@@ -3017,109 +3017,73 @@ const Chat = () => {
                           const sourceKey = `${msg.id}-${source.source_number}`;
                           const isExpanded = openSourceKey === sourceKey;
 
-                          // Detect Wikipedia source card
-                          const isWiki = !!(source as any).wiki_url;
-                          const wikiUrl: string | undefined = (source as any).wiki_url;
-
                           return (
                             <div
                               key={source.source_number}
                               id={`source-${msg.id}-${source.source_number}`}
-                              className={`rounded-xl border overflow-hidden scroll-mt-4 ${isWiki ? "border-blue-400/30" : "border-primary/20"}`}
+                              className="rounded-xl border border-primary/20 overflow-hidden scroll-mt-4"
                             >
                               {/* Card header */}
                               <div
-                                className={`flex items-center gap-2 px-3 py-2 transition-colors cursor-pointer ${isWiki ? "bg-blue-500/8 hover:bg-blue-500/12" : "bg-primary/8 hover:bg-primary/12"}`}
-                                onClick={() => {
-                                  if (isWiki && wikiUrl) {
-                                    window.open(wikiUrl, "_blank", "noopener,noreferrer");
-                                  } else {
-                                    setOpenSourceKey(k => k === sourceKey ? null : sourceKey);
-                                  }
-                                }}
+                                className="flex items-center gap-2 px-3 py-2 bg-primary/8 hover:bg-primary/12 transition-colors cursor-pointer"
+                                onClick={() => setOpenSourceKey(k => k === sourceKey ? null : sourceKey)}
                               >
-                                <span className={`inline-flex items-center justify-center h-5 w-5 rounded-full font-bold text-[10px] shrink-0 ${isWiki ? "bg-blue-500/20 text-blue-500" : "bg-primary/20 text-primary"}`}>
+                                <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary/20 text-primary font-bold text-[10px] shrink-0">
                                   {source.source_number}
                                 </span>
                                 <span className="flex-1 min-w-0">
                                   <span className="flex items-center gap-1.5">
                                     <span className="text-[12px] font-semibold text-foreground truncate">
-                                      {isWiki ? (source.filename) : (sections[0]?.title || source.filename)}
+                                      {sections[0]?.title || source.filename}
                                     </span>
-                                    {isWiki ? (
-                                      <ExternalLink
-                                        className="h-3 w-3 shrink-0 text-blue-500 hover:text-blue-400 transition-colors"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          if (wikiUrl) window.open(wikiUrl, "_blank", "noopener,noreferrer");
-                                        }}
-                                      />
-                                    ) : (
-                                      <ExternalLink
-                                        className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
-                                        data-open-doc
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          openDocumentAtExcerpt(source.filename, docExcerpt);
-                                        }}
-                                      />
-                                    )}
+                                    <ExternalLink
+                                      className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
+                                      data-open-doc
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openDocumentAtExcerpt(source.filename, docExcerpt);
+                                      }}
+                                    />
                                   </span>
-                                  <span className="text-[10px] text-muted-foreground truncate block">
-                                    {isWiki ? "wikipedia.org" : source.filename}
-                                  </span>
+                                  <span className="text-[10px] text-muted-foreground truncate block">{source.filename}</span>
                                 </span>
-                                <span className={`text-[10px] shrink-0 flex items-center gap-1 ${isWiki ? "text-blue-500/60" : "text-muted-foreground"}`}>
-                                  {isWiki ? (
-                                    <ExternalLink className="h-3 w-3" />
-                                  ) : (
-                                    <>
-                                      <Eye className="h-3 w-3" />
-                                      {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                                    </>
-                                  )}
+                                <span className="text-[10px] text-muted-foreground shrink-0 flex items-center gap-1">
+                                  <Eye className="h-3 w-3" />
+                                  {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                                 </span>
                               </div>
 
-                              {/* Wikipedia card: show summary excerpt inline (no expand needed — clicking opens the URL) */}
-                              {isWiki && docExcerpt && (
-                                <div className="px-3 py-2 bg-background/60 border-t border-blue-400/10">
-                                  <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-3">{docExcerpt}</p>
-                                </div>
-                              )}
-
-                              {/* Expandable — sections mirror ## headings from the output exactly (doc sources only) */}
-                              {!isWiki && (
-                                <AnimatePresence>
-                                  {isExpanded && sections.filter(s => s.lines.length > 0).length > 0 && (
-                                    <motion.div
-                                      initial={{ height: 0, opacity: 0 }}
-                                      animate={{ height: "auto", opacity: 1 }}
-                                      exit={{ height: 0, opacity: 0 }}
-                                      transition={{ duration: 0.18 }}
-                                      className="overflow-hidden"
-                                    >
-                                      <div className="bg-background/60">
-                                        {sections.filter(s => s.lines.length > 0).map((sec, si) => (
-                                          <div key={si} className="border-t border-primary/10">
-                                            {sec.lines.map((line, li) => (
-                                              <button
-                                                key={li}
-                                                className="w-full text-left px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
-                                                data-open-doc
-                                                onClick={() => openDocumentAtExcerpt(source.filename, line)}
-                                              >
-                                                <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
-                                                <span className="leading-relaxed">{line}</span>
-                                              </button>
-                                            ))}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </motion.div>
-                                  )}
-                                </AnimatePresence>
-                              )}
+                              {/* Expandable — sections mirror ## headings from the output exactly */}
+                              <AnimatePresence>
+                                {isExpanded && sections.filter(s => s.lines.length > 0).length > 0 && (
+                                  <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: "auto", opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    transition={{ duration: 0.18 }}
+                                    className="overflow-hidden"
+                                  >
+                                    <div className="bg-background/60">
+                                      {sections.filter(s => s.lines.length > 0).map((sec, si) => (
+                                        <div key={si} className="border-t border-primary/10">
+                                          {/* Lines cited under this heading */}
+                                          {sec.lines.map((line, li) => (
+                                            <button
+                                              key={li}
+                                              className="w-full text-left px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
+                                              data-open-doc
+                                              onClick={() => openDocumentAtExcerpt(source.filename, line)}
+                                            >
+                                              <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
+                                              <span className="leading-relaxed">{line}</span>
+                                            </button>
+                                          ))}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
                             </div>
                           );
                         })}
@@ -3376,12 +3340,12 @@ const Chat = () => {
                 </AnimatePresence>
 
                 {/* Actual input row */}
-                <div className={`flex items-end gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
+                <div className={`flex items-center gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
                   {/* Plus / attach button */}
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors mb-0.5"
+                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isUploading}
                   >
@@ -3403,13 +3367,13 @@ const Chat = () => {
                       rows={1}
                       disabled={isLoading}
                       style={{ maxHeight: "160px" }}
-                      className="w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-1 overflow-y-auto scrollbar-thin"
+                      className="w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-0 pt-[7px] overflow-y-auto scrollbar-thin"
                     />
                     {/* Ghost-text suffix — rendered as faded overlay after the real input */}
                     {wordSuffix && !autocomplete && (
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-1 whitespace-pre-wrap break-words select-none"
+                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 whitespace-pre-wrap break-words select-none"
                         style={{ color: "transparent" }}
                       >
                         {/* Invisible clone of typed text to push the ghost to the right position */}

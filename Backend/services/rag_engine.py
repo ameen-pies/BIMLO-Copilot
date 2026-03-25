@@ -779,7 +779,7 @@ Now generate for: "{q}" """
                 "iterative_rag": "retrieve",
                 "analytics": "retrieve",
                 "transform": "retrieve",   # fetch doc content, then transform
-                "define": "retrieve",      # fetch context, then explain in-depth
+                "define": "define_node",   # goes straight to Wikipedia — no doc retrieval
             }
         )
 
@@ -1665,36 +1665,16 @@ DOCUMENT:
         - wiki_url is passed on the source card so the frontend can render an external link
         """
         query   = state["query"]
-        chunks  = state["retrieved_chunks"]
         history = state.get("conversation_history", [])
 
-        print(f"📖 Define → ", end="")
+        print(f"📖 Define (Wikipedia-only) → ", end="")
 
-        # ── Relevance filter — keep only chunks that actually match the query ──
-        # Use a slightly looser threshold than RELEVANCE_THRESHOLD (0.65) so we
-        # don't discard everything on niche terms.  Still cuts clearly off-topic chunks.
-        DEFINE_RELEVANCE_THRESHOLD = 0.75
-        relevant_chunks = [c for c in chunks if (c.get("distance") or 1.0) < DEFINE_RELEVANCE_THRESHOLD]
-        # Fall back to top-3 by distance if everything is filtered out
-        if not relevant_chunks and chunks:
-            relevant_chunks = sorted(chunks, key=lambda c: c.get("distance") or 1.0)[:3]
-        chunks = relevant_chunks
-
-        if not chunks:
-            print("no relevant documents")
-            return {
-                **state,
-                "answer": "I couldn't find any relevant document content to explain that term.",
-                "sources": [],
-                "confidence": 0.0,
-            }
-
-        # Ask the judge to plan language/tone
+        # Ask the judge to plan language/tone — no chunks needed for planning
         history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
-        plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
-        print(f"{plan.target_language}/{plan.target_tone} | {len(chunks)} relevant chunks")
+        plan = self.judge.plan_response(query, retrieved_docs=[], conversation_history=history_texts)
+        print(f"{plan.target_language}/{plan.target_tone}")
 
-        # ── Wikipedia enrichment ──────────────────────────────────────────
+        # ── Wikipedia enrichment — primary and only source ────────────────
         wiki_ctx = None
         try:
             from wiki_enricher import get_wiki_context
@@ -1705,65 +1685,51 @@ DOCUMENT:
                 language=plan.target_language if len(plan.target_language) == 2 else "en",
             )
         except ImportError:
-            print("   ⚠️  wiki_enricher not found — proceeding RAG-only")
+            print("   ⚠️  wiki_enricher not found")
         except Exception as e:
-            print(f"   ⚠️  WikiEnricher error: {e} — proceeding RAG-only")
+            print(f"   ⚠️  WikiEnricher error: {e}")
 
-        # Build document context — numbered starting at 1
-        doc_context = _build_context(chunks)
-
-        # Wikipedia gets the slot right after the last doc chunk
-        wiki_source_num = len(chunks) + 1
-        wiki_block = ""
-        if wiki_ctx and wiki_ctx.found:
-            wiki_raw = wiki_ctx.as_context_block(max_chars=3000)
-            wiki_block = f"\n\n[Source {wiki_source_num} | Wikipedia: {wiki_ctx.term} | encyclopedia]\n{wiki_raw}"
-            print(f"   ✅ Wikipedia context injected as [Source {wiki_source_num}]")
+        if not wiki_ctx or not wiki_ctx.found:
+            print("   ℹ️  No Wikipedia page found — answering from general knowledge")
+            wiki_block = ""
+            wiki_source_num = 1
+            context_section = "No external source found. Answer from your general knowledge."
         else:
-            print("   ℹ️  No Wikipedia context — RAG-only explanation")
-
-        full_context = doc_context + wiki_block
+            wiki_source_num = 1   # Wikipedia is always source [1] — no doc chunks
+            wiki_raw = wiki_ctx.as_context_block(max_chars=3500)
+            wiki_block = f"[Source 1 | Wikipedia: {wiki_ctx.term} | encyclopedia]\n{wiki_raw}"
+            context_section = wiki_block
+            print(f"   ✅ Wikipedia '{wiki_ctx.term}' ready as [Source 1]")
 
         # Conversation history
         history_msgs: List[Dict] = []
         if history:
             history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
-        wiki_cite_note = (
-            f"\n- [Source {wiki_source_num}] is the Wikipedia article — use it for the general definition, background, and how the concept works at a high level."
-            if wiki_block else ""
-        )
-        doc_cite_note = (
-            "\n- [Source 1] through [Source {n}] are your project documents — use them to show how the concept is applied or referenced in THIS specific context.".format(n=len(chunks))
-            if chunks else ""
-        )
-
-        prompt = f"""You are a knowledgeable assistant explaining a concept to someone working with technical documents.
+        prompt = f"""You are a knowledgeable assistant explaining a concept clearly and thoroughly.
 
 Language: {plan.target_language}. Tone: {plan.target_tone}.
 
 TASK: {query}
 
 OUTPUT FORMAT — follow this structure exactly:
-1. **Opening paragraph** (2-3 sentences): Give a clear, direct definition of the concept. What is it? [{wiki_source_num if wiki_block else 1}]
-2. **How it works** (1 paragraph or 3-5 bullet points if there are distinct steps/components): Explain the mechanism, process, or key properties. Use bullets when listing 3+ distinct items.
-3. **In your documents** (1 short paragraph): Explain how this concept appears or is used in the specific project documents provided. Only include this section if the doc chunks actually mention it.
-4. **Why it matters** (1-2 sentences, optional): Brief note on significance or practical impact — only if genuinely relevant.
+1. **Opening paragraph** (2-3 sentences): A clear, direct definition. What is this concept? [1]
+2. **How it works** (1 paragraph OR 3-5 bullet points if there are distinct steps/components): Explain the mechanism, key properties, or main aspects. Use bullets when listing 3+ distinct items.
+3. **Why it matters** (1-2 sentences): Brief note on real-world significance or practical use.
 
 CITATION RULES:
-- After every sentence that uses information from a source, add [N] where N is the source number.{wiki_cite_note}{doc_cite_note}
-- Only cite a source if you actually used it. Do NOT add citations to sentences from your general knowledge.
-- NEVER invent or hallucinate a source number that isn't listed below.
+- After every sentence drawn from Source 1 (Wikipedia), add [1].
+- Only cite when you actually used the source. Skip [1] on sentences from pure general knowledge.
 
 STYLE RULES:
-- Use blank lines between sections for readability.
-- Use **bold** for the first mention of the key term and any critical sub-terms.
-- Use bullet points (- item) when listing 3+ distinct items; prose otherwise.
-- Never write more than 3 sentences in a row without a line break or bullet.
-- Do NOT use ## headings — this is a flowing explanation, not a report.
-- Output ONLY the explanation. No preamble like "Sure!" or "Here is an explanation of...".
+- Use blank lines between each section.
+- **Bold** the first mention of the key term and any critical sub-terms.
+- Use bullet points (- item [1]) when listing 3+ distinct items; prose otherwise.
+- Never write more than 3 consecutive sentences without a line break.
+- Do NOT use ## headings.
+- Output ONLY the explanation — no preamble, no "Here is...", no meta-commentary.
 
-{full_context}
+{context_section}
 
 Explain in {plan.target_language}:"""
 
@@ -1785,21 +1751,11 @@ Explain in {plan.target_language}:"""
 
         print(f"done ({len(answer)} chars)")
 
-        # ── Build sources — only for chunks actually cited in the answer ──
-        # _build_sources_from_brackets already skips uncited chunks, but we
-        # add an extra guard: strip any source whose [N] marker isn't in the answer.
-        cited_nums_in_answer = set(int(m) for m in _re.findall(r'\[(\d+)\]', answer))
+        # ── Wikipedia source card — only if cited ─────────────────────────
+        sources: List[Dict] = []
+        cited_nums = set(int(m) for m in _re.findall(r'\[(\d+)\]', answer))
 
-        sources = [
-            s for s in _build_sources_from_brackets(answer, chunks)
-            if s["source_number"] in cited_nums_in_answer
-        ]
-
-        # ── Wikipedia source card ─────────────────────────────────────────
-        # Always append the Wikipedia card when wiki was fetched and cited,
-        # regardless of whether _build_sources_from_brackets caught it
-        # (it only processes doc chunks, not the wiki block).
-        if wiki_ctx and wiki_ctx.found and wiki_source_num in cited_nums_in_answer:
+        if wiki_ctx and wiki_ctx.found and wiki_source_num in cited_nums:
             sources.append({
                 "source_number": wiki_source_num,
                 "filename":      f"Wikipedia: {wiki_ctx.term}",
@@ -1810,9 +1766,9 @@ Explain in {plan.target_language}:"""
                 "cited_facts":   [wiki_ctx.term],
                 "wiki_url":      wiki_ctx.url,
             })
-            print(f"   📎 Wikipedia source card appended (cited as [{wiki_source_num}])")
-        elif wiki_ctx and wiki_ctx.found and wiki_source_num not in cited_nums_in_answer:
-            print(f"   ℹ️  Wikipedia fetched but [{wiki_source_num}] not cited — card suppressed")
+            print(f"   📎 Wikipedia source card added")
+        else:
+            print(f"   ℹ️  Wikipedia not cited in answer — card suppressed")
 
         return {
             **state,
@@ -1820,7 +1776,7 @@ Explain in {plan.target_language}:"""
             "answer":     answer,
             "raw_answer": answer,
             "sources":    sources,
-            "confidence": _confidence(chunks),
+            "confidence": 1.0 if (wiki_ctx and wiki_ctx.found) else 0.5,
         }
 
     # ------------------------------------------------------------------ #
