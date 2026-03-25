@@ -77,7 +77,7 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -648,6 +648,7 @@ class RAGEngine:
         "direct_answer":   ("💬", "Preparing answer…"),
         "transform_node":  ("🔀", "Transforming document…"),
         "analytics_node":  ("📊", "Running analytics…"),
+        "define_node":     ("📖", "Looking up definition…"),
     }
 
     def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
@@ -685,9 +686,10 @@ Keys and what each step does:
 - direct_answer: answering directly without docs
 - transform_node: transforming/translating document
 - analytics_node: running data analysis
+- define_node: explaining a specific term or concept from the documents
 
 Example for "what is the budget?":
-{{"router":"Figuring out your question…","retrieve":"Looking up budget details…","check_retrieval":"Checking what we found…","rewrite_query":"Improving budget search…","judge_plan":"Planning budget summary…","synthesise":"Writing up the numbers…","judge_evaluate":"Double-checking the answer…","direct_answer":"Answering directly…","transform_node":"Transforming document…","analytics_node":"Crunching the numbers…"}}
+{{"router":"Figuring out your question…","retrieve":"Looking up budget details…","check_retrieval":"Checking what we found…","rewrite_query":"Improving budget search…","judge_plan":"Planning budget summary…","synthesise":"Writing up the numbers…","judge_evaluate":"Double-checking the answer…","direct_answer":"Answering directly…","transform_node":"Transforming document…","analytics_node":"Crunching the numbers…","define_node":"Explaining the term…"}}
 
 Now generate for: "{q}" """
 
@@ -762,6 +764,7 @@ Now generate for: "{q}" """
         workflow.add_node("judge_evaluate",  _wrap("judge_evaluate",  self.judge_evaluate))
         workflow.add_node("analytics_node",  _wrap("analytics_node",  self.analytics_node))
         workflow.add_node("transform_node",  _wrap("transform_node",  self.transform_node))
+        workflow.add_node("define_node",     _wrap("define_node",     self.define_node))
 
         # Entry point
         workflow.set_entry_point("router")
@@ -776,6 +779,7 @@ Now generate for: "{q}" """
                 "iterative_rag": "retrieve",
                 "analytics": "retrieve",
                 "transform": "retrieve",   # fetch doc content, then transform
+                "define": "retrieve",      # fetch context, then explain in-depth
             }
         )
 
@@ -788,6 +792,8 @@ Now generate for: "{q}" """
                 return "no_docs"   # nothing in the store → direct answer explains this
             if s["route"] == "transform":
                 return "transform"
+            if s["route"] == "define":
+                return "define"
             if (s["route"] == "iterative_rag"
                     and s["retrieval_iterations"] < MAX_ITER
                     and not _is_good_retrieval(s["retrieved_chunks"])):
@@ -798,14 +804,16 @@ Now generate for: "{q}" """
             "check_retrieval",
             _check_retrieval_route,
             {"rewrite": "rewrite_query", "done": "judge_plan",
-             "transform": "transform_node", "no_docs": "direct_answer"},
+             "transform": "transform_node", "define": "define_node",
+             "no_docs": "direct_answer"},
         )
 
         workflow.add_edge("retrieve", "check_retrieval")
         workflow.add_edge("rewrite_query", "retrieve")
 
-        # Transform ends directly — no judge eval loop, no sources
+        # Transform and define end directly — no judge eval loop
         workflow.add_edge("transform_node", END)
+        workflow.add_edge("define_node", END)
 
         # Judge-driven synthesis flow
         workflow.add_edge("judge_plan", "synthesise")
@@ -884,12 +892,14 @@ ROUTES:
 - iterative_rag: like rag, but comparing/contrasting across multiple different documents.
 - transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
+- define: the user is asking what a specific term, concept, acronym, or niche phrase MEANS — typically triggered by "what is X?", "what does X mean?", "explain X", "define X", where X is a word or short phrase that likely appears in the documents. The answer should explain the concept in depth using the document context, not just summarise what the document says about it.
 
 CRITICAL RULES — read these first:
 1. Questions about the CONVERSATION or the AI's own actions → ALWAYS direct. Examples: "what did you just do?", "what did you say?", "summarize what you told me", "what route did you use?", "explain what you just did".
 2. Questions referencing "you", "your answer", "what you said/did" → direct.
 3. Short follow-up that only makes sense from the last reply context → direct.
-4. When in doubt between direct and rag: if the question is about the AI or the conversation → direct. If it's about document content → rag.
+4. Use define (not rag) when the question is clearly asking for the meaning or explanation of a single term or concept — not a document summary or fact extraction.
+5. When in doubt between direct and rag: if the question is about the AI or the conversation → direct. If it's about document content → rag.
 {prior_context}
 
 CURRENT QUERY: {query}
@@ -907,7 +917,7 @@ Reply with ONE word only — the route name."""
             ).strip().lower()
 
             # Validate — rag checked BEFORE transform so ambiguous responses default safely
-            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics"]
+            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
@@ -1635,6 +1645,104 @@ DOCUMENT:
             "raw_answer": answer,
             "sources":    [],          # no sources for transform tasks
             "confidence": 0.9,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  DEFINE NODE  (concept explanation — context-aware, not a summary) #
+    # ------------------------------------------------------------------ #
+
+    def define_node(self, state: AgentState) -> AgentState:
+        """
+        Explain a term or concept using the document context as the knowledge base.
+
+        Key differences from synthesise:
+        - The prompt asks for a conceptual explanation, not a document summary.
+        - The response flows as connected prose — no forced ## section structure.
+        - The explanation is grounded in how the term is actually used in the docs,
+          so it feels native to the project rather than a generic dictionary entry.
+        - Still cites sources [N] so the user can trace where the definition comes from.
+        - Runs through the judge plan (language/tone) — no hardcoding.
+        - No judge evaluation loop (same as transform) — definitions don't need retry.
+        """
+        query   = state["query"]
+        chunks  = state["retrieved_chunks"]
+        history = state.get("conversation_history", [])
+
+        print(f"📖 Define → ", end="")
+
+        if not chunks:
+            print("no documents")
+            return {
+                **state,
+                "answer": "I couldn't find any relevant document content to explain that term.",
+                "sources": [],
+                "confidence": 0.0,
+            }
+
+        # Ask the judge to plan language/tone — same as every other route
+        history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
+        plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
+        print(f"{plan.target_language}/{plan.target_tone}")
+
+        context = _build_context(chunks)
+
+        # Build conversation history messages so the model knows what was just discussed.
+        # This is the key to "full understanding of the context" — the model sees the
+        # prior exchange and knows which term came up and in what context.
+        history_msgs: List[Dict] = []
+        if history:
+            history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
+
+        prompt = f"""You are a knowledgeable assistant explaining a concept to someone who just read a document and has a question about it.
+
+Language: {plan.target_language}. Tone: {plan.target_tone}.
+
+TASK: {query}
+
+INSTRUCTIONS:
+- Explain what the term or concept means, using the document content below as your primary knowledge source.
+- Ground the explanation in how this term is actually used in the documents — not as a generic dictionary definition.
+- Write in flowing prose paragraphs. Do NOT use ## section headings or force a rigid structure.
+- After every sentence that draws from a document, add [N] where N is the source number from the headers below.
+- Aim for genuine depth: explain the concept's purpose, how it works, and why it matters in this context.
+- If the term has nuance or multiple aspects, cover them naturally in the flow — don't reduce it to a bullet list.
+- Keep the length proportional to the complexity of the concept.
+- Do NOT summarise "what the document says" — explain what the concept actually IS.
+- Output ONLY the explanation. No preamble, no meta-commentary.
+
+{context}
+
+Explain in {plan.target_language}:"""
+
+        if self.llm.enabled:
+            answer = self.llm.chat(
+                history_msgs + [{"role": "user", "content": prompt}],
+                temperature=0.3,   # slightly higher than synthesise — explanation benefits from fluency
+                max_tokens=1200,
+            )
+        else:
+            answer = "LLM unavailable — cannot generate explanation."
+
+        import re as _re
+        # Same orphan-period cleanup as synthesise
+        answer = _re.sub(r'\n[ \t]*\.[ \t]*\n', '\n', answer)
+        answer = _re.sub(r'\n[ \t]*\.[ \t]*$', '', answer.rstrip())
+        answer = _re.sub(r'\n{3,}', '\n\n', answer)
+        answer = _re.sub(r'\[([^\]]+)\]\(https?://[^)]+\)', r'\1', answer)
+        answer = _clean_answer(answer)
+
+        print(f"done ({len(answer)} chars)")
+
+        # Build sources — same bracket-based extraction as synthesise
+        sources = _build_sources_from_brackets(answer, chunks)
+
+        return {
+            **state,
+            "response_plan": plan,
+            "answer":     answer,
+            "raw_answer": answer,
+            "sources":    sources,
+            "confidence": _confidence(chunks),
         }
 
     # ------------------------------------------------------------------ #
