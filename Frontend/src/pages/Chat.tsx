@@ -1522,7 +1522,96 @@ const Chat = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
+
   const { toast } = useToast();
+
+  // ── Voice recording ───────────────────────────────────────────────────────
+  type VoiceState = "idle" | "recording" | "transcribing";
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef   = useRef<Blob[]>([]);
+
+  const handleVoiceClick = useCallback(async () => {
+    // ── Stop recording ───────────────────────────────────────────────────────
+    if (voiceState === "recording") {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    // ── Start recording ──────────────────────────────────────────────────────
+    if (voiceState !== "idle") return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "audio/ogg";
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        // Stop all mic tracks immediately
+        stream.getTracks().forEach((t) => t.stop());
+
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        audioChunksRef.current = [];
+
+        if (blob.size < 100) {
+          setVoiceState("idle");
+          return;
+        }
+
+        setVoiceState("transcribing");
+
+        try {
+          const formData = new FormData();
+          formData.append("audio", blob, "recording.webm");
+          formData.append("mime_type", mimeType);
+
+          const res = await fetch(`${getApiBase()}/transcribe`, {
+            method: "POST",
+            body: formData,
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error((err as Record<string, string>).detail ?? `HTTP ${res.status}`);
+          }
+
+          const data = await res.json() as { transcript: string };
+          const transcript = data.transcript?.trim();
+
+          if (transcript) {
+            setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
+            // Focus textarea so the user can immediately edit or send
+            setTimeout(() => textareaRef.current?.focus(), 50);
+          } else {
+            toast({ title: "Nothing detected", description: "No speech was recognised — please try again.", variant: "destructive" });
+          }
+        } catch (err) {
+          console.error("Transcription error:", err);
+          toast({ title: "Transcription failed", description: err instanceof Error ? err.message : "Could not reach the transcription service.", variant: "destructive" });
+        } finally {
+          setVoiceState("idle");
+        }
+      };
+
+      recorder.start();
+      setVoiceState("recording");
+    } catch (err) {
+      console.error("Microphone error:", err);
+      toast({ title: "Microphone access denied", description: "Allow microphone access in your browser settings.", variant: "destructive" });
+      setVoiceState("idle");
+    }
+  }, [voiceState, toast]);
 
   // ── Thinking / progress steps ────────────────────────────────────────────
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
@@ -3554,35 +3643,59 @@ const Chat = () => {
                   {/* Voice wave button */}
                   <button
                     type="button"
+                    onClick={handleVoiceClick}
                     onMouseEnter={() => setIsHoveringVoice(true)}
                     onMouseLeave={() => setIsHoveringVoice(false)}
-                    className="h-8 w-8 shrink-0 flex items-center justify-center rounded-lg text-muted-foreground hover:text-primary transition-colors mb-0.5 group"
-                    title="Voice message"
+                    disabled={voiceState === "transcribing" || isLoading}
+                    className={[
+                      "h-8 w-8 shrink-0 flex items-center justify-center rounded-lg transition-colors mb-0.5 group",
+                      voiceState === "recording"
+                        ? "text-destructive animate-pulse"
+                        : voiceState === "transcribing"
+                        ? "text-primary opacity-60 cursor-wait"
+                        : "text-muted-foreground hover:text-primary",
+                    ].join(" ")}
+                    title={
+                      voiceState === "recording"
+                        ? "Recording… click to stop"
+                        : voiceState === "transcribing"
+                        ? "Transcribing…"
+                        : "Voice message"
+                    }
                   >
-                    <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
-                      {[
-                        { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                        { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
-                        { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
-                        { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
-                        { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
-                        { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
-                        { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
-                      ].map((bar, i) => (
-                        <rect
-                          key={i}
-                          x={bar.x}
-                          y={isHoveringVoice ? (9 - bar.hoverH / 2) : (9 - bar.baseH / 2)}
-                          width="2"
-                          rx="1"
-                          height={isHoveringVoice ? bar.hoverH : bar.baseH}
-                          fill="currentColor"
-                          style={{
-                            transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
-                          }}
-                        />
-                      ))}
-                    </svg>
+                    {voiceState === "transcribing" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
+                        {[
+                          { x: 1,  baseH: 4,  hoverH: 6,  recH: 6,  delay: "0ms"   },
+                          { x: 4,  baseH: 8,  hoverH: 14, recH: 16, delay: "60ms"  },
+                          { x: 7,  baseH: 12, hoverH: 18, recH: 18, delay: "120ms" },
+                          { x: 10, baseH: 16, hoverH: 18, recH: 18, delay: "180ms" },
+                          { x: 13, baseH: 12, hoverH: 18, recH: 18, delay: "120ms" },
+                          { x: 16, baseH: 8,  hoverH: 14, recH: 16, delay: "60ms"  },
+                          { x: 19, baseH: 4,  hoverH: 6,  recH: 6,  delay: "0ms"   },
+                        ].map((bar, i) => {
+                          const activeH = voiceState === "recording"
+                            ? bar.recH
+                            : isHoveringVoice ? bar.hoverH : bar.baseH;
+                          return (
+                            <rect
+                              key={i}
+                              x={bar.x}
+                              y={9 - activeH / 2}
+                              width="2"
+                              rx="1"
+                              height={activeH}
+                              fill="currentColor"
+                              style={{
+                                transition: `y 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}, height 0.55s cubic-bezier(0.34,1.56,0.64,1) ${bar.delay}`,
+                              }}
+                            />
+                          );
+                        })}
+                      </svg>
+                    )}
                   </button>
 
                   {/* Send / Stop button */}
