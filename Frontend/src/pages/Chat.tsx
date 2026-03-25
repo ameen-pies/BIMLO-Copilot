@@ -1435,6 +1435,40 @@ function tokenise(text: string): string[] {
     .filter(w => w.length >= 3 && !/^\d+$/.test(w));
 }
 
+// Fetches and displays a Wikipedia page thumbnail via the public REST API
+const WikiThumbnail: React.FC<{ wikiUrl: string }> = ({ wikiUrl }) => {
+  const [imgSrc, setImgSrc] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    // Extract the page title from the URL e.g. https://en.wikipedia.org/wiki/Photosynthesis
+    const match = wikiUrl.match(/\/wiki\/([^#?]+)/);
+    if (!match) return;
+    const title = decodeURIComponent(match[1]);
+    // Detect language subdomain e.g. fr.wikipedia.org
+    const langMatch = wikiUrl.match(/^https?:\/\/([a-z]{2})\.wikipedia/);
+    const lang = langMatch ? langMatch[1] : "en";
+
+    fetch(
+      `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
+    )
+      .then(r => r.json())
+      .then(data => {
+        const url = data?.thumbnail?.source || data?.originalimage?.source;
+        if (url) setImgSrc(url);
+      })
+      .catch(() => {});
+  }, [wikiUrl]);
+
+  if (!imgSrc) return null;
+  return (
+    <img
+      src={imgSrc}
+      alt=""
+      className="h-16 w-16 object-cover rounded-lg shrink-0 opacity-90"
+    />
+  );
+};
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -3017,6 +3051,48 @@ const Chat = () => {
                           const sourceKey = `${msg.id}-${source.source_number}`;
                           const isExpanded = openSourceKey === sourceKey;
 
+                          const isWiki = !!(source as any).wiki_url;
+                          const wikiUrl: string = (source as any).wiki_url ?? "";
+
+                          // ── Wikipedia source card ──────────────────────
+                          if (isWiki) {
+                            return (
+                              <a
+                                key={source.source_number}
+                                id={`source-${msg.id}-${source.source_number}`}
+                                href={wikiUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="rounded-xl border border-blue-500/25 overflow-hidden scroll-mt-4 flex flex-col hover:border-blue-500/50 transition-colors group/wiki no-underline"
+                              >
+                                <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/8 group-hover/wiki:bg-blue-500/12 transition-colors">
+                                  <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-[10px] shrink-0">
+                                    {source.source_number}
+                                  </span>
+                                  <span className="flex-1 min-w-0">
+                                    <span className="flex items-center gap-1.5">
+                                      <span className="text-[12px] font-semibold text-foreground truncate">
+                                        {source.filename}
+                                      </span>
+                                      <ExternalLink className="h-3 w-3 shrink-0 text-blue-400/70 group-hover/wiki:text-blue-400 transition-colors" />
+                                    </span>
+                                    <span className="text-[10px] text-blue-400/50 truncate block">wikipedia.org</span>
+                                  </span>
+                                  <span className="text-[10px] text-blue-400/40 shrink-0">
+                                    <ExternalLink className="h-3 w-3" />
+                                  </span>
+                                </div>
+                                {docExcerpt && (
+                                  <div className="flex items-start gap-3 px-3 py-2 border-t border-blue-500/10 bg-background/40">
+                                    <p className="text-[11px] text-muted-foreground/60 leading-relaxed line-clamp-3 flex-1">{docExcerpt}</p>
+                                    <WikiThumbnail wikiUrl={wikiUrl} />
+                                  </div>
+                                )}
+                              </a>
+                            );
+                          }
+
+                          // ── Regular document source card ───────────────
                           return (
                             <div
                               key={source.source_number}
@@ -3066,7 +3142,6 @@ const Chat = () => {
                                     <div className="bg-background/60">
                                       {sections.filter(s => s.lines.length > 0).map((sec, si) => (
                                         <div key={si} className="border-t border-primary/10">
-                                          {/* Lines cited under this heading */}
                                           {sec.lines.map((line, li) => (
                                             <button
                                               key={li}
