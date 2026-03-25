@@ -1654,19 +1654,15 @@ DOCUMENT:
     def define_node(self, state: AgentState) -> AgentState:
         """
         Explain a term or concept using:
-          - Vector-store document chunks (project-specific context)
+          - Vector-store document chunks (project-specific context, relevance-filtered)
           - Wikipedia page for the term (general encyclopedic depth)
 
-        The LLM receives both sources and weaves them into a coherent
-        explanation grounded in the user's documents, enriched with
-        background knowledge from Wikipedia.
-
         Key differences from synthesise:
-        - Prompt asks for a conceptual explanation, not a document summary
-        - Flowing prose — no forced ## section structure
-        - Wikipedia context injected as an extra [Source N] block
-        - [W] citation marker used for Wikipedia so sources are traceable
-        - No judge evaluation loop — definitions don't need retry
+        - Only chunks above the relevance threshold are fed to the LLM
+        - Wikipedia is always the primary source card; doc chunks are secondary
+        - Output is structured (intro paragraph + optional bullets) — never a wall of text
+        - Ghost sources (cited [N] with no matching chunk) are stripped before returning
+        - wiki_url is passed on the source card so the frontend can render an external link
         """
         query   = state["query"]
         chunks  = state["retrieved_chunks"]
@@ -1674,8 +1670,18 @@ DOCUMENT:
 
         print(f"📖 Define → ", end="")
 
+        # ── Relevance filter — keep only chunks that actually match the query ──
+        # Use a slightly looser threshold than RELEVANCE_THRESHOLD (0.65) so we
+        # don't discard everything on niche terms.  Still cuts clearly off-topic chunks.
+        DEFINE_RELEVANCE_THRESHOLD = 0.75
+        relevant_chunks = [c for c in chunks if (c.get("distance") or 1.0) < DEFINE_RELEVANCE_THRESHOLD]
+        # Fall back to top-3 by distance if everything is filtered out
+        if not relevant_chunks and chunks:
+            relevant_chunks = sorted(chunks, key=lambda c: c.get("distance") or 1.0)[:3]
+        chunks = relevant_chunks
+
         if not chunks:
-            print("no documents")
+            print("no relevant documents")
             return {
                 **state,
                 "answer": "I couldn't find any relevant document content to explain that term.",
@@ -1686,7 +1692,7 @@ DOCUMENT:
         # Ask the judge to plan language/tone
         history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
         plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
-        print(f"{plan.target_language}/{plan.target_tone}")
+        print(f"{plan.target_language}/{plan.target_tone} | {len(chunks)} relevant chunks")
 
         # ── Wikipedia enrichment ──────────────────────────────────────────
         wiki_ctx = None
@@ -1703,12 +1709,12 @@ DOCUMENT:
         except Exception as e:
             print(f"   ⚠️  WikiEnricher error: {e} — proceeding RAG-only")
 
-        # Build document context (same as synthesise)
+        # Build document context — numbered starting at 1
         doc_context = _build_context(chunks)
 
-        # Build Wikipedia context block as an extra source
+        # Wikipedia gets the slot right after the last doc chunk
+        wiki_source_num = len(chunks) + 1
         wiki_block = ""
-        wiki_source_num = len(chunks) + 1   # Wikipedia gets the next [N] slot
         if wiki_ctx and wiki_ctx.found:
             wiki_raw = wiki_ctx.as_context_block(max_chars=3000)
             wiki_block = f"\n\n[Source {wiki_source_num} | Wikipedia: {wiki_ctx.term} | encyclopedia]\n{wiki_raw}"
@@ -1718,33 +1724,44 @@ DOCUMENT:
 
         full_context = doc_context + wiki_block
 
-        # Conversation history so the model knows what was just discussed
+        # Conversation history
         history_msgs: List[Dict] = []
         if history:
             history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
-        # Citation instruction adapts to whether Wikipedia was found
         wiki_cite_note = (
-            f"\n- [Source {wiki_source_num}] refers to Wikipedia background — cite it with [{wiki_source_num}] for general definitions or background context."
+            f"\n- [Source {wiki_source_num}] is the Wikipedia article — use it for the general definition, background, and how the concept works at a high level."
             if wiki_block else ""
         )
+        doc_cite_note = (
+            "\n- [Source 1] through [Source {n}] are your project documents — use them to show how the concept is applied or referenced in THIS specific context.".format(n=len(chunks))
+            if chunks else ""
+        )
 
-        prompt = f"""You are a knowledgeable assistant explaining a concept to someone who just read a document.
+        prompt = f"""You are a knowledgeable assistant explaining a concept to someone working with technical documents.
 
 Language: {plan.target_language}. Tone: {plan.target_tone}.
 
 TASK: {query}
 
-INSTRUCTIONS:
-- Explain what the term or concept means, using the documents below as your primary knowledge source.
-- Ground the explanation in how this term is actually used in these specific documents — not as a generic textbook definition.
-- Write in flowing prose paragraphs. Do NOT use ## section headings or force a rigid structure.
-- After every sentence that draws from a document, add [N] where N is the source number from the headers below.{wiki_cite_note}
-- Aim for genuine depth: explain the concept's purpose, how it works, why it matters in this context, and any nuance.
-- If the term has multiple aspects, cover them naturally in the flow — don't reduce everything to a bullet list.
-- Keep the length proportional to the complexity of the concept.
-- Do NOT summarise "what the document says" — explain what the concept actually IS.
-- Output ONLY the explanation. No preamble, no meta-commentary.
+OUTPUT FORMAT — follow this structure exactly:
+1. **Opening paragraph** (2-3 sentences): Give a clear, direct definition of the concept. What is it? [{wiki_source_num if wiki_block else 1}]
+2. **How it works** (1 paragraph or 3-5 bullet points if there are distinct steps/components): Explain the mechanism, process, or key properties. Use bullets when listing 3+ distinct items.
+3. **In your documents** (1 short paragraph): Explain how this concept appears or is used in the specific project documents provided. Only include this section if the doc chunks actually mention it.
+4. **Why it matters** (1-2 sentences, optional): Brief note on significance or practical impact — only if genuinely relevant.
+
+CITATION RULES:
+- After every sentence that uses information from a source, add [N] where N is the source number.{wiki_cite_note}{doc_cite_note}
+- Only cite a source if you actually used it. Do NOT add citations to sentences from your general knowledge.
+- NEVER invent or hallucinate a source number that isn't listed below.
+
+STYLE RULES:
+- Use blank lines between sections for readability.
+- Use **bold** for the first mention of the key term and any critical sub-terms.
+- Use bullet points (- item) when listing 3+ distinct items; prose otherwise.
+- Never write more than 3 sentences in a row without a line break or bullet.
+- Do NOT use ## headings — this is a flowing explanation, not a report.
+- Output ONLY the explanation. No preamble like "Sure!" or "Here is an explanation of...".
 
 {full_context}
 
@@ -1768,22 +1785,34 @@ Explain in {plan.target_language}:"""
 
         print(f"done ({len(answer)} chars)")
 
-        # Build sources from document chunks
-        sources = _build_sources_from_brackets(answer, chunks)
+        # ── Build sources — only for chunks actually cited in the answer ──
+        # _build_sources_from_brackets already skips uncited chunks, but we
+        # add an extra guard: strip any source whose [N] marker isn't in the answer.
+        cited_nums_in_answer = set(int(m) for m in _re.findall(r'\[(\d+)\]', answer))
 
-        # Append Wikipedia as an extra source card if it was used and cited
-        if wiki_ctx and wiki_ctx.found and f"[{wiki_source_num}]" in answer:
+        sources = [
+            s for s in _build_sources_from_brackets(answer, chunks)
+            if s["source_number"] in cited_nums_in_answer
+        ]
+
+        # ── Wikipedia source card ─────────────────────────────────────────
+        # Always append the Wikipedia card when wiki was fetched and cited,
+        # regardless of whether _build_sources_from_brackets caught it
+        # (it only processes doc chunks, not the wiki block).
+        if wiki_ctx and wiki_ctx.found and wiki_source_num in cited_nums_in_answer:
             sources.append({
                 "source_number": wiki_source_num,
                 "filename":      f"Wikipedia: {wiki_ctx.term}",
                 "doc_type":      "encyclopedia",
                 "project_ref":   None,
                 "excerpt":       wiki_ctx.summary[:400],
-                "sections":      [{"title": "Wikipedia", "excerpt": wiki_ctx.summary[:400]}],
+                "sections":      [{"title": "Overview", "lines": [wiki_ctx.summary[:300]], "excerpt": wiki_ctx.summary[:400]}],
                 "cited_facts":   [wiki_ctx.term],
                 "wiki_url":      wiki_ctx.url,
             })
-            print(f"   📎 Wikipedia source card appended")
+            print(f"   📎 Wikipedia source card appended (cited as [{wiki_source_num}])")
+        elif wiki_ctx and wiki_ctx.found and wiki_source_num not in cited_nums_in_answer:
+            print(f"   ℹ️  Wikipedia fetched but [{wiki_source_num}] not cited — card suppressed")
 
         return {
             **state,
