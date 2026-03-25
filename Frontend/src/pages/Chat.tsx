@@ -3093,6 +3093,8 @@ const Chat = () => {
                           }
 
                           // ── Regular document source card ───────────────
+                          const hasImages = !!(source as any).has_images;
+                          const hasTables = !!(source as any).has_tables;
                           return (
                             <div
                               key={source.source_number}
@@ -3112,6 +3114,17 @@ const Chat = () => {
                                     <span className="text-[12px] font-semibold text-foreground truncate">
                                       {sections[0]?.title || source.filename}
                                     </span>
+                                    {hasImages && (
+                                      <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
+                                        <ImageIcon className="h-2.5 w-2.5" />
+                                        visual
+                                      </span>
+                                    )}
+                                    {hasTables && (
+                                      <span title="Contains table data" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-teal-500/15 text-teal-400 text-[9px] font-medium shrink-0">
+                                        table
+                                      </span>
+                                    )}
                                     <ExternalLink
                                       className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
                                       data-open-doc

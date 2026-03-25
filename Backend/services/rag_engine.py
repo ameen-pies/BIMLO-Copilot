@@ -463,12 +463,26 @@ def _format_sources(chunks: List[Dict], query: str = "", llm_client=None, genera
 
 
 def _build_context(chunks: List[Dict]) -> str:
+    """
+    Build the context block injected into the synthesis prompt.
+
+    Chunks that contain image descriptions (produced by the vision LLM during
+    ingestion) are flagged with a [has visual content] note so the LLM knows
+    it can reference diagram/figure descriptions from these sources.
+    Chunks with table data are similarly flagged.
+    """
     parts = []
     for i, c in enumerate(chunks, 1):
         m = c["metadata"]
+        flags = []
+        if m.get("has_images"):
+            flags.append("has visual content")
+        if m.get("has_tables"):
+            flags.append("has table data")
+        flag_str = f" | {', '.join(flags)}" if flags else ""
         parts.append(
-            f"[Source {i} | {m.get('filename')} | {m.get('doc_type')}]\n"
-            f"{c['text'][:1000]}"
+            f"[Source {i} | {m.get('filename')} | {m.get('doc_type')}{flag_str}]\n"
+            f"{c['text'][:1200]}"
         )
     return "\n\n".join(parts)
 
@@ -900,6 +914,7 @@ CRITICAL RULES — read these first:
 3. Short follow-up that only makes sense from the last reply context → direct.
 4. Use define (not rag) when the question is clearly asking for the meaning or explanation of a single term or concept — not a document summary or fact extraction.
 5. When in doubt between direct and rag: if the question is about the AI or the conversation → direct. If it's about document content → rag.
+6. Questions about diagrams, schematics, wiring, rack layouts, floor plans, or figures → rag (the document processor has already described these visually, so standard RAG retrieval will find them).
 {prior_context}
 
 CURRENT QUERY: {query}
@@ -1120,6 +1135,14 @@ Reply with ONE word only — the route name."""
                 self._emit("retrieve", "📄", f"Reading {filenames[0]}…")
             else:
                 self._emit("retrieve", "📂", f"Found {len(filenames)} files: {', '.join(filenames[:3])}…")
+
+        # Emit a note if any chunk contains vision-described images or tables
+        visual_chunks = [c for c in unique if c["metadata"].get("has_images")]
+        table_chunks  = [c for c in unique if c["metadata"].get("has_tables")]
+        if visual_chunks:
+            self._emit("retrieve", "🖼️", f"Found {len(visual_chunks)} chunk(s) with diagram descriptions…")
+        if table_chunks:
+            self._emit("retrieve", "📊", f"Found {len(table_chunks)} chunk(s) with table data…")
 
         return {
             **state,
@@ -1368,8 +1391,28 @@ Respond with ONLY the rewritten query, nothing else."""
         if plan.things_to_avoid:
             avoid_block = f"\nAvoid: {', '.join(plan.things_to_avoid[:5])}\n"
 
+        # Detect whether any retrieved chunk has image or table descriptions
+        # so we can add a specific instruction for handling them.
+        has_visual_chunks = any(
+            "[IMAGE " in c.get("text", "") or "[TABLE " in c.get("text", "")
+            for c in (plan._chunks if hasattr(plan, "_chunks") else [])
+        )
+        # Fallback: check if context string itself contains these markers
+        if not has_visual_chunks:
+            has_visual_chunks = "[IMAGE " in context or "[TABLE " in context
+
+        visual_instruction = ""
+        if has_visual_chunks:
+            visual_instruction = (
+                "\n\nVISUAL CONTENT NOTE: Some sources contain [IMAGE on page N: <description>] "
+                "and [TABLE on page N] blocks. These are AI-generated descriptions of diagrams, "
+                "schematics, or tables found in the document. Treat them as factual content — "
+                "reference them naturally in your answer (e.g. 'The wiring diagram on page 3 shows…'). "
+                "Do NOT reproduce the raw [IMAGE ...] tag — describe what it contains instead."
+            )
+
         return f"""You are a document assistant. Answer ONLY using the documents below.
-Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}
+Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}{visual_instruction}
 
 CITATION RULE: After every sentence that uses information from a document, add [N] where N is the source number shown in the document headers below.
 
