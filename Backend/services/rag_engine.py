@@ -1653,16 +1653,20 @@ DOCUMENT:
 
     def define_node(self, state: AgentState) -> AgentState:
         """
-        Explain a term or concept using the document context as the knowledge base.
+        Explain a term or concept using:
+          - Vector-store document chunks (project-specific context)
+          - Wikipedia page for the term (general encyclopedic depth)
+
+        The LLM receives both sources and weaves them into a coherent
+        explanation grounded in the user's documents, enriched with
+        background knowledge from Wikipedia.
 
         Key differences from synthesise:
-        - The prompt asks for a conceptual explanation, not a document summary.
-        - The response flows as connected prose — no forced ## section structure.
-        - The explanation is grounded in how the term is actually used in the docs,
-          so it feels native to the project rather than a generic dictionary entry.
-        - Still cites sources [N] so the user can trace where the definition comes from.
-        - Runs through the judge plan (language/tone) — no hardcoding.
-        - No judge evaluation loop (same as transform) — definitions don't need retry.
+        - Prompt asks for a conceptual explanation, not a document summary
+        - Flowing prose — no forced ## section structure
+        - Wikipedia context injected as an extra [Source N] block
+        - [W] citation marker used for Wikipedia so sources are traceable
+        - No judge evaluation loop — definitions don't need retry
         """
         query   = state["query"]
         chunks  = state["retrieved_chunks"]
@@ -1679,52 +1683,83 @@ DOCUMENT:
                 "confidence": 0.0,
             }
 
-        # Ask the judge to plan language/tone — same as every other route
+        # Ask the judge to plan language/tone
         history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
         plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
         print(f"{plan.target_language}/{plan.target_tone}")
 
-        context = _build_context(chunks)
+        # ── Wikipedia enrichment ──────────────────────────────────────────
+        wiki_ctx = None
+        try:
+            from wiki_enricher import get_wiki_context
+            wiki_ctx = get_wiki_context(
+                query=query,
+                api_key=os.getenv("CF_API_KEY", ""),
+                base_url=os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev"),
+                language=plan.target_language if len(plan.target_language) == 2 else "en",
+            )
+        except ImportError:
+            print("   ⚠️  wiki_enricher not found — proceeding RAG-only")
+        except Exception as e:
+            print(f"   ⚠️  WikiEnricher error: {e} — proceeding RAG-only")
 
-        # Build conversation history messages so the model knows what was just discussed.
-        # This is the key to "full understanding of the context" — the model sees the
-        # prior exchange and knows which term came up and in what context.
+        # Build document context (same as synthesise)
+        doc_context = _build_context(chunks)
+
+        # Build Wikipedia context block as an extra source
+        wiki_block = ""
+        wiki_source_num = len(chunks) + 1   # Wikipedia gets the next [N] slot
+        if wiki_ctx and wiki_ctx.found:
+            wiki_raw = wiki_ctx.as_context_block(max_chars=3000)
+            wiki_block = f"\n\n[Source {wiki_source_num} | Wikipedia: {wiki_ctx.term} | encyclopedia]\n{wiki_raw}"
+            print(f"   ✅ Wikipedia context injected as [Source {wiki_source_num}]")
+        else:
+            print("   ℹ️  No Wikipedia context — RAG-only explanation")
+
+        full_context = doc_context + wiki_block
+
+        # Conversation history so the model knows what was just discussed
         history_msgs: List[Dict] = []
         if history:
             history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
-        prompt = f"""You are a knowledgeable assistant explaining a concept to someone who just read a document and has a question about it.
+        # Citation instruction adapts to whether Wikipedia was found
+        wiki_cite_note = (
+            f"\n- [Source {wiki_source_num}] refers to Wikipedia background — cite it with [{wiki_source_num}] for general definitions or background context."
+            if wiki_block else ""
+        )
+
+        prompt = f"""You are a knowledgeable assistant explaining a concept to someone who just read a document.
 
 Language: {plan.target_language}. Tone: {plan.target_tone}.
 
 TASK: {query}
 
 INSTRUCTIONS:
-- Explain what the term or concept means, using the document content below as your primary knowledge source.
-- Ground the explanation in how this term is actually used in the documents — not as a generic dictionary definition.
+- Explain what the term or concept means, using the documents below as your primary knowledge source.
+- Ground the explanation in how this term is actually used in these specific documents — not as a generic textbook definition.
 - Write in flowing prose paragraphs. Do NOT use ## section headings or force a rigid structure.
-- After every sentence that draws from a document, add [N] where N is the source number from the headers below.
-- Aim for genuine depth: explain the concept's purpose, how it works, and why it matters in this context.
-- If the term has nuance or multiple aspects, cover them naturally in the flow — don't reduce it to a bullet list.
+- After every sentence that draws from a document, add [N] where N is the source number from the headers below.{wiki_cite_note}
+- Aim for genuine depth: explain the concept's purpose, how it works, why it matters in this context, and any nuance.
+- If the term has multiple aspects, cover them naturally in the flow — don't reduce everything to a bullet list.
 - Keep the length proportional to the complexity of the concept.
 - Do NOT summarise "what the document says" — explain what the concept actually IS.
 - Output ONLY the explanation. No preamble, no meta-commentary.
 
-{context}
+{full_context}
 
 Explain in {plan.target_language}:"""
 
         if self.llm.enabled:
             answer = self.llm.chat(
                 history_msgs + [{"role": "user", "content": prompt}],
-                temperature=0.3,   # slightly higher than synthesise — explanation benefits from fluency
+                temperature=0.3,
                 max_tokens=1200,
             )
         else:
             answer = "LLM unavailable — cannot generate explanation."
 
         import re as _re
-        # Same orphan-period cleanup as synthesise
         answer = _re.sub(r'\n[ \t]*\.[ \t]*\n', '\n', answer)
         answer = _re.sub(r'\n[ \t]*\.[ \t]*$', '', answer.rstrip())
         answer = _re.sub(r'\n{3,}', '\n\n', answer)
@@ -1733,8 +1768,22 @@ Explain in {plan.target_language}:"""
 
         print(f"done ({len(answer)} chars)")
 
-        # Build sources — same bracket-based extraction as synthesise
+        # Build sources from document chunks
         sources = _build_sources_from_brackets(answer, chunks)
+
+        # Append Wikipedia as an extra source card if it was used and cited
+        if wiki_ctx and wiki_ctx.found and f"[{wiki_source_num}]" in answer:
+            sources.append({
+                "source_number": wiki_source_num,
+                "filename":      f"Wikipedia: {wiki_ctx.term}",
+                "doc_type":      "encyclopedia",
+                "project_ref":   None,
+                "excerpt":       wiki_ctx.summary[:400],
+                "sections":      [{"title": "Wikipedia", "excerpt": wiki_ctx.summary[:400]}],
+                "cited_facts":   [wiki_ctx.term],
+                "wiki_url":      wiki_ctx.url,
+            })
+            print(f"   📎 Wikipedia source card appended")
 
         return {
             **state,
