@@ -13,6 +13,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import BorderGlow from "@/components/BorderGlow";
 
+interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
+
 interface Message {
   id: string;
   role: "user" | "assistant";
@@ -21,6 +23,7 @@ interface Message {
   sources?: Source[];
   confidence?: number;
   timestamp: Date;
+  thinkingSteps?: ThinkingStep[];
 }
 
 interface Conversation {
@@ -1522,7 +1525,6 @@ const Chat = () => {
   const { toast } = useToast();
 
   // ── Thinking / progress steps ────────────────────────────────────────────
-  interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
 
@@ -2070,6 +2072,7 @@ const Chat = () => {
       const decoder = new TextDecoder();
       let buffer = "";
       let resultMsg: Message | null = null;
+      const accumulatedSteps: ThinkingStep[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -2083,10 +2086,9 @@ const Chat = () => {
           try {
             const event = JSON.parse(line.slice(6));
             if (event.type === "status") {
-              setThinkingSteps(prev => [...prev, {
-                node: event.node, icon: event.icon,
-                message: event.message, ts: Date.now(),
-              }]);
+              const step: ThinkingStep = { node: event.node, icon: event.icon, message: event.message, ts: Date.now() };
+              accumulatedSteps.push(step);
+              setThinkingSteps(prev => [...prev, step]);
             } else if (event.type === "result") {
               if (event.session_id) setSessionId(event.session_id);
               resultMsg = {
@@ -2105,6 +2107,10 @@ const Chat = () => {
         }
       }
 
+      // Persist steps onto the message so they render after generation
+      if (resultMsg) {
+        resultMsg = { ...resultMsg, thinkingSteps: accumulatedSteps };
+      }
       setThinkingSteps([]);
       return resultMsg;
     } catch (error) {
@@ -2865,6 +2871,62 @@ const Chat = () => {
                   </div>
                 )}
                 <div className={`group/msg relative space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
+                  {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
+                  {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
+                    const steps = msg.thinkingSteps;
+                    const stepKey = `thinking-${msg.id}`;
+                    const isOpen = openSourceKey === stepKey;
+                    const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
+                    return (
+                      <div className="flex flex-col gap-1 pl-0 mb-1">
+                        <button
+                          onClick={() => setOpenSourceKey(k => k === stepKey ? null : stepKey)}
+                          className="flex items-center gap-1.5 group/think w-fit"
+                        >
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary/30 shrink-0" />
+                          <span className="text-[11px] text-muted-foreground/40 italic leading-none">
+                            {steps[steps.length - 1]?.message ?? "Thought process"}
+                          </span>
+                          <motion.span
+                            animate={{ rotate: isOpen ? 180 : 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="opacity-0 group-hover/think:opacity-60 transition-opacity"
+                          >
+                            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
+                          </motion.span>
+                        </button>
+                        <AnimatePresence>
+                          {isOpen && steps.length > 0 && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+                                {steps.map((step, i) => {
+                                  const icon =
+                                    step.node === "retrieve"       ? <FileText className={cls} /> :
+                                    step.node === "rewrite_query"  ? <Search className={cls} /> :
+                                    step.node === "judge_plan"     ? <ScrollText className={cls} /> :
+                                    step.node === "synthesise"     ? <Pencil className={cls} /> :
+                                    step.node === "judge_evaluate" ? <Check className={cls} /> :
+                                                                     <Sparkles className={cls} />;
+                                  return (
+                                    <div key={`${step.node}-${i}`} className="flex items-center gap-1.5">
+                                      {icon}
+                                      <span className="text-[10px] text-muted-foreground/35 leading-snug">{step.message}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    );
+                  })()}
                   <div
                     className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
@@ -3461,7 +3523,7 @@ const Chat = () => {
                     {wordSuffix && !autocomplete && (
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 whitespace-pre-wrap break-words select-none"
+                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 pt-[7px] whitespace-pre-wrap break-words select-none"
                         style={{ color: "transparent" }}
                       >
                         {/* Invisible clone of typed text to push the ghost to the right position */}
