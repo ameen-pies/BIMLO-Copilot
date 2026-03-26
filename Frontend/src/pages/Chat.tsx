@@ -29,6 +29,7 @@ interface Message {
   voiceDuration?: number;  // seconds
   voiceTranscript?: string; // the transcription text
   voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
+  interrupted?: true;       // response was stopped mid-generation
 }
 
 interface Conversation {
@@ -1574,7 +1575,7 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
   const isPending = transcript === undefined;
 
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    <div className="flex flex-col items-end gap-1">
       {/* Transcript — above the bubble */}
       <AnimatePresence>
         {isExpanded && transcript && (
@@ -2615,6 +2616,19 @@ const Chat = () => {
     setIsLoading(false);
     setTypingMessageId(null);
     setThinkingSteps([]);
+    // Add a subtle interrupted indicator as an assistant message
+    setMessages(prev => {
+      // Only add if the last message is from the user (i.e. no partial answer came through)
+      const last = prev[prev.length - 1];
+      if (last?.role === "assistant") return prev; // partial answer already exists, don't override
+      return [...prev, {
+        id: Date.now().toString(),
+        role: "assistant" as const,
+        content: "⏸ Response stopped.",
+        timestamp: new Date(),
+        interrupted: true,
+      }];
+    });
   };
 
   // ── Filename autocomplete ─────────────────────────────────────────────────
@@ -3303,11 +3317,11 @@ const Chat = () => {
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
                 {msg.role === "user" && (
-                  <div className="order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
+                  <div className={`order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 ${msg.voiceBlobUrl ? "mt-[26px]" : "mt-0.5"}`}>
                     <User className="h-4 w-4 text-muted-foreground" />
                   </div>
                 )}
-                <div className={`group/msg relative space-y-2 ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end" : "max-w-[80%]"}`}>
+                <div className={`group/msg relative ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end gap-0.5" : "max-w-[80%] space-y-2"}`}>
                   {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
                   {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
                     const steps = msg.thinkingSteps;
@@ -3370,11 +3384,13 @@ const Chat = () => {
                         ? msg.voiceBlobUrl
                           ? "p-0 bg-transparent shadow-none" // voice bubble handles its own bg
                           : "bg-primary text-primary-foreground rounded-br-md w-fit"
-                        : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
+                        : msg.interrupted
+                          ? "px-3 py-2 bg-transparent border border-dashed border-muted-foreground/20 rounded-bl-md w-fit"
+                          : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
                   {/* Copy button — floats right and sticks as you scroll long answers */}
-                  {msg.role === "assistant" && (
+                  {msg.role === "assistant" && !msg.interrupted && (
                     <button
                       onClick={() => {
                         const text = msg.rawAnswer ?? msg.content;
@@ -3406,6 +3422,12 @@ const Chat = () => {
                           <div className="leading-relaxed">{renderContent(partial, msg.id, msg.sources, handleSourceClick)}</div>
                         )}
                       />
+                    ) : msg.role === "assistant" && msg.interrupted ? (
+                      /* ── Interrupted / stopped indicator ── */
+                      <span className="flex items-center gap-1.5 text-[12px] text-muted-foreground/45 italic select-none">
+                        <Square className="h-2.5 w-2.5 fill-muted-foreground/30 text-muted-foreground/30 shrink-0" />
+                        Response stopped
+                      </span>
                     ) : msg.role === "assistant" ? (
                       <div className="leading-relaxed">{renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick)}</div>
                     ) : editingMsgId === msg.id ? (
@@ -3470,7 +3492,7 @@ const Chat = () => {
                   </div>
 
                   {/* Timestamp + action bar */}
-                  <div className={`flex items-center gap-2 px-1 ${msg.role === "user" ? "justify-end" : "justify-start"} group/msgbar`}>
+                  <div className={`flex items-center gap-2 ${msg.role === "user" ? "justify-end" : "justify-start px-1"} group/msgbar`}>
                     {/* User message actions — edit + copy, shown on hover */}
                     {msg.role === "user" && editingMsgId !== msg.id && (
                       <div className="flex items-center gap-0.5 opacity-0 group-hover/msgbar:opacity-100 transition-opacity">
@@ -3503,7 +3525,7 @@ const Chat = () => {
                     <span className="text-[10px] text-muted-foreground/50">
                       {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
-                    {msg.role === "assistant" && msg.id !== typingMessageId && (
+                    {msg.role === "assistant" && msg.id !== typingMessageId && !msg.interrupted && (
                       <div className="flex items-center gap-1 ml-1">
                         <button
                           onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
