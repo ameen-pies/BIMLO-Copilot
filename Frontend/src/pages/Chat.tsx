@@ -1445,6 +1445,56 @@ function tokenise(text: string): string[] {
     .filter(w => w.length >= 3 && !/^\d+$/.test(w));
 }
 
+/**
+ * Given what the user has typed so far, scan all user messages for a sentence
+ * that starts with the same prefix.  Returns the remainder of that sentence
+ * (the ghost-text suffix), or "" if nothing matches.
+ *
+ * Strategy:
+ *  1. Split every user message into sentences.
+ *  2. Normalise each sentence to lowercase, collapsed whitespace.
+ *  3. If a sentence starts with `typed` (and is strictly longer), return the
+ *     suffix — i.e. the part the user hasn't typed yet.
+ *  4. Prefer shorter suffixes (less presumptuous) and deduplicate.
+ */
+/**
+ * AI-powered inline ghost-text completion.
+ * Calls the backend /autocomplete endpoint (backed by the CF LLM worker)
+ * and returns the suggested suffix to ghost after the cursor.
+ *
+ * Debouncing is handled by the caller — this just does the fetch.
+ * Returns "" on any failure so the UI degrades gracefully.
+ */
+async function fetchAICompletion(
+  typed: string,
+  recentMessages: { role: string; content: string }[],
+  apiBase: string,
+): Promise<string> {
+  if (typed.trim().length < 4) return "";
+  try {
+    const res = await fetch(`${apiBase}/autocomplete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        partial: typed,
+        history: recentMessages.slice(-6).map(m => ({
+          role: m.role,
+          content: m.content.slice(0, 200),
+        })),
+      }),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return "";
+    const data = await res.json();
+    const suffix = (data.suffix ?? "").trim();
+    // Sanity: reject if too long (> 80 chars) or empty
+    if (!suffix || suffix.length > 80) return "";
+    return suffix;
+  } catch {
+    return "";
+  }
+}
+
 // Fetches and displays a Wikipedia page thumbnail via the public REST API
 const WikiThumbnail: React.FC<{ wikiUrl: string }> = ({ wikiUrl }) => {
   const [imgSrc, setImgSrc] = React.useState<string | null>(null);
@@ -1828,89 +1878,275 @@ const ChartInsights: React.FC<{ text: string }> = ({ text }) => {
   );
 };
 
+// ── Color palettes ────────────────────────────────────────────────────────────
+// Gradients are created at draw-time inside a Chart.js plugin using the chart's
+// own canvas context. This is the ONLY correct approach — gradients built from a
+// different canvas (e.g. an off-screen one) are canvas-bound and corrupt when
+// used in another context or serialized to PNG.
+const STROKES_DARK  = ["#818cf8","#34d399","#fbbf24","#fb7185","#60a5fa","#f472b4","#a78bfa","#2dd4bf"];
+const STROKES_LIGHT = ["#6366f1","#10b981","#f59e0b","#ef4444","#3b82f6","#ec4899","#8b5cf6","#14b8a6"];
+
+// Gradient stop pairs [top, bottom] per palette
+const GRAD_STOPS_DARK: [string, string][] = [
+  ["rgba(129,140,248,0.88)", "rgba(99,102,241,0.18)"],
+  ["rgba(52,211,153,0.88)",  "rgba(16,185,129,0.18)"],
+  ["rgba(251,191,36,0.88)",  "rgba(245,158,11,0.18)"],
+  ["rgba(251,113,133,0.88)", "rgba(239,68,68,0.18)"],
+  ["rgba(96,165,250,0.88)",  "rgba(59,130,246,0.18)"],
+  ["rgba(244,114,182,0.88)", "rgba(236,72,153,0.18)"],
+  ["rgba(167,139,250,0.88)", "rgba(139,92,246,0.18)"],
+  ["rgba(45,212,191,0.88)",  "rgba(20,184,166,0.18)"],
+];
+const GRAD_STOPS_LIGHT: [string, string][] = [
+  ["rgba(99,102,241,0.82)",  "rgba(99,102,241,0.12)"],
+  ["rgba(16,185,129,0.82)",  "rgba(16,185,129,0.12)"],
+  ["rgba(245,158,11,0.82)",  "rgba(245,158,11,0.12)"],
+  ["rgba(239,68,68,0.82)",   "rgba(239,68,68,0.12)"],
+  ["rgba(59,130,246,0.82)",  "rgba(59,130,246,0.12)"],
+  ["rgba(236,72,153,0.82)",  "rgba(236,72,153,0.12)"],
+  ["rgba(139,92,246,0.82)",  "rgba(139,92,246,0.12)"],
+  ["rgba(20,184,166,0.82)",  "rgba(20,184,166,0.12)"],
+];
+
+// ── Gradient plugin — recreates gradients each draw using the chart's own ctx ─
+// This is the correct pattern: gradients are tied to the canvas they're built on,
+// so they must be created inside beforeDraw where `chart.ctx` and `chart.chartArea`
+// are guaranteed to be the right canvas and have valid dimensions.
+function makeGradientPlugin(rawCfg: Record<string, any>, isDark: boolean) {
+  return {
+    id: "dynamicGradients",
+    beforeDraw(chart: any) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const { top, bottom, left, right } = chartArea;
+      const h          = bottom - top;
+      const w          = right  - left;
+      const chartType  = rawCfg.type as string;
+      const isPie      = chartType === "pie" || chartType === "doughnut";
+      const isLine     = chartType === "line" || chartType === "scatter";
+      const gradStops  = isDark ? GRAD_STOPS_DARK  : GRAD_STOPS_LIGHT;
+      const strokes    = isDark ? STROKES_DARK      : STROKES_LIGHT;
+      const nDatasets  = chart.data.datasets.length;
+
+      chart.data.datasets.forEach((ds: any, i: number) => {
+        const si = i % gradStops.length;
+
+        if (isLine) {
+          const grad = ctx.createLinearGradient(0, top, 0, bottom);
+          grad.addColorStop(0, strokes[si] + "44");
+          grad.addColorStop(1, strokes[si] + "00");
+          ds.backgroundColor = grad;
+          return;
+        }
+
+        if (isPie) {
+          const nSlices = (chart.data.labels ?? []).length;
+          ds.backgroundColor = Array.from({ length: nSlices }, (_: any, j: number) => {
+            const g = ctx.createLinearGradient(left, top, left + w * 0.7, top + h * 0.7);
+            g.addColorStop(0, gradStops[j % gradStops.length][0]);
+            g.addColorStop(1, gradStops[j % gradStops.length][1]);
+            return g;
+          });
+          ds.borderColor  = Array.from({ length: nSlices }, (_: any, j: number) => strokes[j % strokes.length]);
+          ds.borderWidth  = 2;
+          ds.hoverOffset  = 8;
+          return;
+        }
+
+        // Bar
+        if (nDatasets === 1) {
+          const nBars = (chart.data.labels ?? []).length;
+          ds.backgroundColor = Array.from({ length: nBars }, (_: any, j: number) => {
+            const g = ctx.createLinearGradient(0, top, 0, bottom);
+            g.addColorStop(0, gradStops[j % gradStops.length][0]);
+            g.addColorStop(1, gradStops[j % gradStops.length][1]);
+            return g;
+          });
+        } else {
+          const g = ctx.createLinearGradient(0, top, 0, bottom);
+          g.addColorStop(0, gradStops[si][0]);
+          g.addColorStop(1, gradStops[si][1]);
+          ds.backgroundColor = g;
+        }
+        ds.borderColor  = "transparent";
+        ds.borderWidth  = 0;
+        ds.borderRadius = nDatasets === 1 ? 7 : 6;
+        ds.borderSkipped = false;
+      });
+    },
+  };
+}
+
+// ── Apply theme colors to an existing live chart via chart.update() ───────────
+// Using update() instead of destroy+recreate gives a smooth CSS-like transition.
+function applyThemeToChart(chart: any, rawCfg: Record<string, any>, isDark: boolean) {
+  const chartType  = rawCfg.type as string;
+  const isLine     = chartType === "line" || chartType === "scatter";
+  const strokes    = isDark ? STROKES_DARK : STROKES_LIGHT;
+
+  const textColor  = isDark ? "#f1f5f9"                : "#0f172a";
+  const mutedColor = isDark ? "#94a3b8"                : "#64748b";
+  const tooltipBg  = isDark ? "rgba(15,23,42,0.97)"   : "rgba(255,255,255,0.98)";
+  const tooltipTxt = isDark ? "#f1f5f9"               : "#0f172a";
+  const tooltipSub = isDark ? "#cbd5e1"               : "#475569";
+  const tooltipBrd = isDark ? "rgba(129,140,248,0.5)" : "rgba(99,102,241,0.3)";
+  const gridColor  = isDark ? "rgba(148,163,184,0.10)": "rgba(100,116,139,0.09)";
+
+  // Dataset strokes (gradients are handled by the plugin on next draw)
+  chart.data.datasets.forEach((ds: any, i: number) => {
+    const si = i % strokes.length;
+    if (isLine) {
+      ds.borderColor          = strokes[si];
+      ds.pointBackgroundColor = strokes[si];
+      ds.pointBorderColor     = isDark ? "#1e293b" : "#ffffff";
+    }
+  });
+
+  // Scales
+  const scales = chart.options.scales ?? {};
+  for (const axis of Object.values(scales) as any[]) {
+    if (!axis || typeof axis !== "object") continue;
+    if (axis.title) axis.title.color = mutedColor;
+    if (axis.ticks) axis.ticks.color = mutedColor;
+    if (axis.grid)  axis.grid.color  = gridColor;
+  }
+
+  // Plugins
+  const pl = chart.options.plugins ?? {};
+  if (pl.legend?.labels) pl.legend.labels.color = textColor;
+  if (pl.title)           pl.title.color         = textColor;
+  if (pl.tooltip) {
+    pl.tooltip.backgroundColor = tooltipBg;
+    pl.tooltip.titleColor      = tooltipTxt;
+    pl.tooltip.bodyColor       = tooltipSub;
+    pl.tooltip.borderColor     = tooltipBrd;
+  }
+
+  chart.update("none"); // "none" = instant, no animation — smooth visual swap
+}
+
+// ── Build initial Chart.js config (no canvas-bound gradients — plugin handles them) ─
+function buildInitialCfg(raw: Record<string, any>, isDark: boolean): Record<string, any> {
+  const cfg        = JSON.parse(JSON.stringify(raw));
+  const chartType  = cfg.type as string;
+  const isPie      = chartType === "pie" || chartType === "doughnut";
+  const isLine     = chartType === "line" || chartType === "scatter";
+  const strokes    = isDark ? STROKES_DARK : STROKES_LIGHT;
+
+  const textColor  = isDark ? "#f1f5f9"                : "#0f172a";
+  const mutedColor = isDark ? "#94a3b8"                : "#64748b";
+  const tooltipBg  = isDark ? "rgba(15,23,42,0.97)"   : "rgba(255,255,255,0.98)";
+  const tooltipTxt = isDark ? "#f1f5f9"               : "#0f172a";
+  const tooltipSub = isDark ? "#cbd5e1"               : "#475569";
+  const tooltipBrd = isDark ? "rgba(129,140,248,0.5)" : "rgba(99,102,241,0.3)";
+  const gridColor  = isDark ? "rgba(148,163,184,0.10)": "rgba(100,116,139,0.09)";
+
+  // Placeholder colors — the gradient plugin overwrites these on first draw
+  cfg.data.datasets = (cfg.data.datasets ?? []).map((ds: any, i: number) => {
+    const si = i % strokes.length;
+    if (isLine) {
+      return { ...ds, borderColor: strokes[si], backgroundColor: "transparent", fill: true, tension: 0.42, borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: strokes[si], pointBorderColor: isDark ? "#1e293b" : "#ffffff", pointBorderWidth: 2 };
+    }
+    if (isPie) {
+      return { ...ds, backgroundColor: strokes.slice(0, (cfg.data.labels ?? []).length), borderColor: "transparent", borderWidth: 2, hoverOffset: 8 };
+    }
+    return { ...ds, backgroundColor: strokes[si], borderColor: "transparent", borderWidth: 0, borderRadius: 7, borderSkipped: false };
+  });
+
+  cfg.options         = cfg.options         ?? {};
+  cfg.options.plugins = cfg.options.plugins ?? {};
+  cfg.options.scales  = cfg.options.scales  ?? {};
+
+  for (const axis of Object.values(cfg.options.scales) as any[]) {
+    if (!axis || typeof axis !== "object") continue;
+    if (axis.title)  axis.title.color = mutedColor;
+    if (axis.ticks)  { axis.ticks.color = mutedColor; axis.ticks.font = { ...(axis.ticks.font ?? {}), size: 11 }; }
+    if (axis.grid)   { axis.grid.color = gridColor; axis.grid.drawBorder = false; axis.grid.drawTicks = false; }
+    if (axis.border) axis.border = { display: false };
+  }
+
+  const pl = cfg.options.plugins;
+  pl.legend  = { ...(pl.legend ?? {}),  labels: { ...(pl.legend?.labels ?? {}), color: textColor, padding: 18, usePointStyle: true, pointStyleWidth: 10, font: { size: 12, weight: "500" } } };
+  pl.title   = { ...(pl.title  ?? {}),  display: true, color: textColor, font: { size: 14, weight: "600" }, padding: { bottom: 16 } };
+  pl.tooltip = { ...(pl.tooltip ?? {}), backgroundColor: tooltipBg, titleColor: tooltipTxt, bodyColor: tooltipSub, borderColor: tooltipBrd, borderWidth: 1, padding: { x: 12, y: 10 }, cornerRadius: 10, boxPadding: 4 };
+
+  const cbs = pl?.tooltip?.callbacks;
+  if (cbs?.label && typeof cbs.label === "string") {
+    try { /* eslint-disable-next-line no-new-func */ cbs.label = new Function("return " + cbs.label)(); } catch { delete cbs.label; }
+  }
+
+  cfg.options.animation = {
+    duration: 750, easing: "easeOutQuart",
+    delay: (ctx: any) => (ctx.type === "data" && ctx.mode === "default") ? ctx.dataIndex * 30 + ctx.datasetIndex * 60 : 0,
+  };
+  if (isLine) {
+    cfg.options.animations = { y: { duration: 750, easing: "easeOutQuart", from: (ctx: any) => { const s = ctx.chart?.scales?.y; return s ? s.getPixelForValue(0) : ctx.chart?.height ?? 0; } } };
+  }
+
+  cfg.options.responsive          = true;
+  cfg.options.maintainAspectRatio = true;
+  return cfg;
+}
+
+// ── PNG download — snapshot the live canvas with a solid background ───────────
+// We draw the bg fill directly onto the live canvas (then restore), which avoids
+// the off-screen canvas cross-contamination issue entirely.
+function downloadChartPng(chart: any, filename: string, isDark: boolean) {
+  if (!chart) return;
+  const canvas = chart.canvas as HTMLCanvasElement;
+  const ctx    = canvas.getContext("2d")!;
+  const bg     = isDark ? "#0f172a" : "#ffffff";
+
+  // Save → fill bg behind existing pixels → export → restore
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-over";
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  const link     = document.createElement("a");
+  link.download  = filename;
+  link.href      = canvas.toDataURL("image/png", 1.0);
+  link.click();
+}
+
 // ── Chart renderer ──────────────────────────────────────────────────────────
 const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
-  const canvasRef       = useRef<HTMLCanvasElement>(null);
+  const canvasRef        = useRef<HTMLCanvasElement>(null);
   const chartInstanceRef = useRef<any>(null);
   const [interpExpanded, setInterpExpanded] = useState(false);
 
+  const getIsDark = () => document.documentElement.classList.contains("dark");
+
+  // Initial build (only when analytics changes — NOT on theme change)
   useEffect(() => {
     if (!canvasRef.current || !analytics.chart_js) return;
-
     import("chart.js/auto").then(({ Chart }) => {
-      if (chartInstanceRef.current) {
-        chartInstanceRef.current.destroy();
-        chartInstanceRef.current = null;
-      }
-
-      const cfg = JSON.parse(JSON.stringify(analytics.chart_js));
-
-      // ── Theme-aware colors — read from CSS variables at render time ──────
-      // Works with any CSS-variable-based theme (dark or light).
-      const root   = document.documentElement;
-      const cs     = getComputedStyle(root);
-      const isDark = root.classList.contains("dark");
-
-      // Resolve a CSS variable like "--muted-foreground" to its hex/hsl value
-      const cssVar = (name: string) => cs.getPropertyValue(name).trim();
-
-      // Tailwind shadcn/ui variables (hsl channel values)
-      // We build full hsl() strings from them
-      const hsl = (v: string) => {
-        const raw = cssVar(v);
-        return raw ? `hsl(${raw})` : undefined;
-      };
-
-      const textColor       = hsl("--foreground")         ?? (isDark ? "#f1f5f9" : "#0f172a");
-      const mutedColor      = hsl("--muted-foreground")   ?? (isDark ? "#94a3b8" : "#64748b");
-      const tooltipBg       = isDark ? "rgba(15,23,42,0.92)" : "rgba(255,255,255,0.96)";
-      const tooltipText     = isDark ? "#f1f5f9" : "#0f172a";
-      const tooltipSubtext  = isDark ? "#cbd5e1" : "#475569";
-      const tooltipBorder   = isDark ? "rgba(99,102,241,0.4)" : "rgba(99,102,241,0.25)";
-      const gridColor       = isDark ? "rgba(148,163,184,0.12)" : "rgba(100,116,139,0.15)";
-      const canvasBg        = isDark ? "rgba(15,23,42,0)"       : "rgba(255,255,255,0)";
-
-      // Patch scale colors
-      const scales = cfg?.options?.scales ?? {};
-      for (const axis of Object.values(scales) as any[]) {
-        if (axis?.title)  axis.title.color  = mutedColor;
-        if (axis?.ticks)  axis.ticks.color  = mutedColor;
-        if (axis?.grid)   axis.grid.color   = gridColor;
-      }
-
-      // Patch legend + title + tooltip
-      const plugins = cfg?.options?.plugins ?? {};
-      if (plugins.legend?.labels) {
-        plugins.legend.labels.color = textColor;
-      }
-      if (plugins.title) {
-        plugins.title.color = textColor;
-      }
-      if (plugins.tooltip) {
-        plugins.tooltip.backgroundColor = tooltipBg;
-        plugins.tooltip.titleColor       = tooltipText;
-        plugins.tooltip.bodyColor        = tooltipSubtext;
-        plugins.tooltip.borderColor      = tooltipBorder;
-      }
-
-      // Restore serialised function strings (pie tooltip callback)
-      const tooltipCbs = plugins?.tooltip?.callbacks;
-      if (tooltipCbs?.label && typeof tooltipCbs.label === "string") {
-        try {
-          // eslint-disable-next-line no-new-func
-          tooltipCbs.label = new Function("return " + tooltipCbs.label)();
-        } catch {
-          delete tooltipCbs.label;
-        }
-      }
-
-      chartInstanceRef.current = new Chart(canvasRef.current!, cfg);
+      if (chartInstanceRef.current) { chartInstanceRef.current.destroy(); chartInstanceRef.current = null; }
+      const isDark  = getIsDark();
+      const cfg     = buildInitialCfg(analytics.chart_js!, isDark);
+      const gradPlugin = makeGradientPlugin(analytics.chart_js!, isDark);
+      chartInstanceRef.current = new Chart(canvasRef.current!, { ...cfg, plugins: [gradPlugin] } as any);
     });
+    return () => { chartInstanceRef.current?.destroy(); chartInstanceRef.current = null; };
+  }, [analytics]);
 
-    return () => {
-      chartInstanceRef.current?.destroy();
-      chartInstanceRef.current = null;
-    };
+  // Smooth theme update — no destroy, just patch + update("none")
+  useEffect(() => {
+    const observer = new MutationObserver(mutations => {
+      for (const m of mutations) {
+        if (m.attributeName !== "class") continue;
+        const chart = chartInstanceRef.current;
+        if (!chart || !analytics.chart_js) break;
+        const isDark     = getIsDark();
+        // Swap the gradient plugin so it uses the new palette
+        chart.config.plugins = [makeGradientPlugin(analytics.chart_js!, isDark)];
+        applyThemeToChart(chart, analytics.chart_js!, isDark);
+        break;
+      }
+    });
+    observer.observe(document.documentElement, { attributes: true });
+    return () => observer.disconnect();
   }, [analytics]);
 
   if (analytics.type === "chart_error") {
@@ -1918,9 +2154,7 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
       <div className="flex flex-col gap-3">
         {answer && (
           <div className="leading-relaxed text-sm text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-              {answer}
-            </ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{answer}</ReactMarkdown>
           </div>
         )}
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 leading-relaxed">
@@ -1931,25 +2165,23 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
   }
 
   const hasInterp = Boolean(analytics.interpretation);
+  const pngName   = `${(analytics.title ?? "chart").replace(/\s+/g, "_")}.png`;
 
   return (
     <div className="flex flex-col gap-4 w-full">
 
-      {/* ── 1. Narrative RAG answer — primary content ── */}
+      {/* ── 1. Narrative RAG answer ── */}
       {answer && (
         <div className="leading-relaxed text-sm text-foreground">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-            {answer}
-          </ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{answer}</ReactMarkdown>
         </div>
       )}
 
-      {/* ── 2. Chart card — bonus visual below the answer ── */}
+      {/* ── 2. Chart card ── */}
       <div className="flex flex-col gap-2">
-        {/* Small chart label + source badge + download button */}
         <div className="flex items-center gap-2">
           {analytics.title && (
-            <span className="text-[12px] font-medium text-muted-foreground leading-snug flex-1">
+            <span className="text-[12px] font-medium text-muted-foreground leading-snug flex-1 truncate">
               {analytics.title}
             </span>
           )}
@@ -1960,13 +2192,7 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
               </span>
             )}
             <button
-              onClick={() => {
-                if (!canvasRef.current) return;
-                const link = document.createElement("a");
-                link.download = `${(analytics.title ?? "chart").replace(/\s+/g, "_")}.png`;
-                link.href = canvasRef.current.toDataURL("image/png");
-                link.click();
-              }}
+              onClick={() => downloadChartPng(chartInstanceRef.current, pngName, getIsDark())}
               title="Download chart as PNG"
               className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent hover:border-border transition-all"
             >
@@ -1979,11 +2205,11 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
         </div>
 
         {/* Canvas */}
-        <div className="rounded-xl border border-border bg-card p-4 shadow-inner">
+        <div className="rounded-xl border border-border bg-card p-4 shadow-inner overflow-hidden">
           <canvas ref={canvasRef} />
         </div>
 
-        {/* Key insights — collapsible, structured */}
+        {/* Key insights — collapsible */}
         {hasInterp && (
           <div className="rounded-lg border border-primary/20 bg-primary/5 overflow-hidden">
             <button
@@ -2407,6 +2633,8 @@ const Chat = () => {
   const trieRef = useRef<TrieNode>(makeTrie());
   // Ghost-text inline suggestion: the suffix to append after the current word
   const [wordSuffix, setWordSuffix] = useState<string>("");
+  // Debounce timer for AI ghost-text — avoids a fetch on every keystroke
+  const ghostDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Rebuild trie whenever messages or documents change.
   useEffect(() => {
@@ -3037,22 +3265,24 @@ const Chat = () => {
     setAutocomplete(null);
     setAutocompletePos(null);
 
-    // ── Word-completion ghost text ──────────────────────────────────────────
-    // Extract the current word being typed (last word before caret, no spaces)
-    const wordMatch = before.match(/([a-zA-Z'][a-zA-Z0-9'-]*)$/);
-    const currentWord = wordMatch ? wordMatch[1].toLowerCase() : "";
-    if (currentWord.length >= 2) {
-      const node = trieFind(trieRef.current, currentWord);
-      if (node) {
-        const hits = trieCollect(node, currentWord, 1);
-        if (hits.length > 0 && hits[0].word !== currentWord) {
-          // Suffix = the part after what's already typed
-          setWordSuffix(hits[0].word.slice(currentWord.length));
-          return;
-        }
-      }
-    }
+    // ── AI ghost-text completion ─────────────────────────────────────────
+    // Debounce: wait 400ms after the user stops typing before calling the API.
+    // Clear any previous ghost immediately so stale text doesn't linger.
     setWordSuffix("");
+    if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
+
+    const trimmed = before.trim();
+    if (trimmed.length >= 4 && !isLoading) {
+      ghostDebounceRef.current = setTimeout(async () => {
+        const base = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000";
+        const suffix = await fetchAICompletion(trimmed, messages, base);
+        // Only apply if the input hasn't changed since we fired the request
+        setWordSuffix(prev => {
+          // prev is always "" here (we cleared it above), so just set
+          return suffix;
+        });
+      }, 400);
+    }
   };
 
   const applyAutocomplete = (doc: Document) => {
