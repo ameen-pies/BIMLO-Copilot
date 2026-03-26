@@ -602,7 +602,7 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
         # Store callback on instance so node wrappers can access it without going through state
@@ -612,13 +612,16 @@ class RAGEngine:
         # Generate contextual status messages in background — ready before nodes need them
         self._status_msgs = self._generate_status_msgs(user_query)
 
+        # If force_route is set, pre-fill the route so the router skips LLM classification
+        initial_route = force_route if force_route else None
+
         initial_state: AgentState = {
             "query": user_query,
             "top_k": top_k,
             "conversation_history": conversation_history or [],
             "_prev_route": prev_route,
             "_route_log": route_log or [],
-            "route": None,
+            "route": initial_route,
             "retrieved_chunks": [],
             "retrieval_iterations": 0,
             "sub_queries": [],
@@ -882,6 +885,11 @@ Now generate for: "{q}" """
         
         NO hardcoded keywords - the LLM decides based on query intent.
         """
+        # Skip LLM classification when force_route was set by the caller
+        if state.get("route"):
+            print(f"⚡ router: force_route={state['route']} — skipping classification")
+            return state
+
         query = state["query"]
         history = state.get("conversation_history", [])
         
@@ -930,7 +938,7 @@ ROUTES:
 - iterative_rag: like rag, but comparing/contrasting across multiple different documents.
 - transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
-- graph: the user wants a chart, graph, or visual plot of data extracted from the documents — bar chart, line chart, pie chart, scatter plot, histogram, trend over time, comparison chart, etc. Triggered by: graph, chart, plot, visualize, bar chart, pie chart, line graph, histogram, show me a chart, compare visually, trend chart, distribution chart.
+- graph: the user wants a chart, graph, or visual plot of data extracted from the documents — bar chart, line chart, pie chart, scatter plot, histogram, trend over time, comparison chart, etc. This applies regardless of language — detect the INTENT to visualize data even when the query is in French, Arabic, Spanish, German, Italian, Portuguese, or any other language. Examples: EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser/tracer; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik/visualisieren; IT: grafico/diagramma; PT: gráfico/visualizar.
 - define: the user is asking what a specific term, concept, acronym, or niche phrase MEANS — typically triggered by "what is X?", "what does X mean?", "explain X", "define X", where X is a word or short phrase that likely appears in the documents. The answer should explain the concept in depth using the document context, not just summarise what the document says about it.
 
 CRITICAL RULES — read these first:

@@ -1895,7 +1895,7 @@ const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSe
   const groups = analytics.groups ?? [];
 
   return (
-    <div className="flex flex-col gap-3 w-full">
+    <div className="flex flex-col gap-2 w-full">
 
       {/* Natural prose question — same visual weight as any RAG answer */}
       <p className="text-sm leading-relaxed text-foreground">
@@ -1903,7 +1903,7 @@ const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSe
       </p>
 
       {/* Option rows — sit below the prose naturally */}
-      <div className="flex flex-col gap-1.5 mt-0.5">
+      <div className="flex flex-col gap-1.5">
         {groups.map((g, i) => (
           <motion.button
             key={i}
@@ -2730,7 +2730,7 @@ const Chat = () => {
   // ── Shared streaming query runner ────────────────────────────────────────
   // Used by handleSend, handleRedo, and handleEditSubmit so they all get
   // thinking steps and the SSE stream.
-  const runStreamingQuery = useCallback(async (query: string) => {
+  const runStreamingQuery = useCallback(async (query: string, forceRoute?: string) => {
     setThinkingSteps([]);
     setThinkingExpanded(true);
     setIsLoading(true);
@@ -2749,6 +2749,7 @@ const Chat = () => {
           query,
           top_k: 5,
           ...(sessionId ? { session_id: sessionId } : {}),
+          ...(forceRoute ? { force_route: forceRoute } : {}),
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -3651,16 +3652,18 @@ const Chat = () => {
                     />
                   ) : (
                   <div
-                    className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                    className={`group/bubble relative px-4 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
+                        ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit"
                         : msg.interrupted
                           ? "px-3 py-2 bg-transparent border border-dashed border-muted-foreground/20 rounded-bl-md w-fit"
-                          : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
+                          : msg.analytics?.type === "chart_clarification"
+                            ? "pt-3 pb-3 bg-secondary text-secondary-foreground rounded-bl-md w-fit"
+                            : "py-3 bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
                   {/* Copy button — floats right and sticks as you scroll long answers */}
-                  {msg.role === "assistant" && !msg.interrupted && (
+                  {msg.role === "assistant" && !msg.interrupted && msg.analytics?.type !== "chart_clarification" && (
                     <button
                       onClick={() => {
                         const text = msg.rawAnswer ?? msg.content;
@@ -3701,7 +3704,35 @@ const Chat = () => {
                     ) : msg.role === "assistant" && msg.analytics?.type === "chart_clarification" ? (
                       <ChartClarification
                         analytics={msg.analytics as any}
-                        onSelect={(hint) => { setInput(hint); }}
+                        onSelect={async (hint) => {
+                          if (isLoading) return;
+                          const userMsg: Message = {
+                            id: Date.now().toString(),
+                            role: "user",
+                            content: hint,
+                            timestamp: new Date(),
+                          };
+                          setMessages(prev => [...prev, userMsg]);
+                          setOpenSourceKey(null);
+                          setSuggestions([]);
+                          if (!notifyDismissed) setShowNotifyBanner(true);
+                          try {
+                            const assistantMsg = await runStreamingQuery(hint, "graph");
+                            if (!assistantMsg) return;
+                            setMessages(prev => [...prev, assistantMsg]);
+                            setTypingMessageId(assistantMsg.id);
+                            fetchSuggestions(hint, assistantMsg.content);
+                            fireNotification();
+                          } catch (error) {
+                            const errMsg: Message = {
+                              id: (Date.now() + 1).toString(),
+                              role: "assistant",
+                              content: `Sorry, I encountered an error: ${serializeError(error)}`,
+                              timestamp: new Date(),
+                            };
+                            setMessages(prev => [...prev, errMsg]);
+                          }
+                        }}
                       />
                     ) : msg.role === "assistant" && (msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error") ? (
                       <ChartMessage analytics={msg.analytics as any} answer={msg.content} />

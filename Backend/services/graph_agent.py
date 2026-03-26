@@ -90,10 +90,31 @@ def _hint_chart_type(query: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────
 
 _GRAPH_KEYWORDS = [
+    # English
     "graph", "chart", "plot", "visuali", "bar chart", "line chart",
     "pie chart", "histogram", "scatter", "diagram of data",
     "show me a", "draw a", "create a chart", "generate a chart",
     "trend", "compare visually", "visual comparison",
+    # French
+    "graphique", "graphe", "diagramme", "courbe", "histogramme",
+    "camembert", "nuage de points", "tracer", "visualis", "montrer un",
+    "créer un graphique", "faire un graphique", "générer un graphique",
+    "afficher un", "comparaison visuelle",
+    # Arabic
+    "رسم بياني", "مخطط", "رسم", "تصور", "بياني", "عمودي", "دائري",
+    "خطي", "انتشار", "مقارنة بيانية",
+    # Spanish
+    "gráfico", "gráfica", "diagrama", "histograma", "pastel", "dispersión",
+    "visualizar", "trazar", "mostrar gráfico", "crear gráfico", "comparación visual",
+    # German
+    "diagramm", "grafik", "kurve", "balkendiagramm", "kreisdiagramm",
+    "histogramm", "visualisier", "zeig mir ein", "erstell ein diagramm",
+    # Italian
+    "grafico", "diagramma", "istogramma", "torta", "dispersione",
+    "visualizza", "traccia", "crea grafico",
+    # Portuguese
+    "gráfico", "diagrama", "histograma", "pizza", "dispersão",
+    "visualizar", "traçar", "criar gráfico",
 ]
 
 def is_graph_request(query: str) -> bool:
@@ -603,10 +624,24 @@ DOCUMENTS:
     # ── STAGE 0: VAGUENESS + METRIC DISCOVERY ────────────────────────────
 
     _VAGUE_PATTERNS = [
+        # English
         r"^(show|make|create|generate|draw|plot|give me|build)\s+(me\s+)?(a\s+)?(chart|graph|plot|visual)$",
         r"^(chart|graph|plot|visuali[zs]e)\s+(the\s+)?(data|documents?|everything|metrics|numbers|stats|statistics)$",
         r"^(what|show).*(look like|visuali[zs]|chart|graph)",
         r"^(all|every).*(metric|number|stat|data|value)",
+        # French
+        r"^(montre|cr[eé]e|g[eé]n[eè]re|fais|trace|dessine)\s+(moi\s+)?(un\s+)?(graphique|diagramme|courbe|visuel)$",
+        r"^(graphique|diagramme|visualis[ae])\s+(les?\s+)?(donn[eé]es?|documents?|m[eé]triques?|statistiques?)$",
+        r"^(tout|tous|toutes)\s+(les?\s+)?(m[eé]trique|donn[eé]e|stat|nombre|valeur)",
+        # Arabic
+        r"^(أنشئ|اصنع|ارسم|أظهر|أنشأ)\s+(لي\s+)?(رسم|مخطط|بياني)$",
+        r"^(كل|جميع)\s+(البيانات|المقاييس|الأرقام|الإحصاءات)",
+        # Spanish
+        r"^(muestra|crea|genera|haz|traza|dibuja)\s+(me\s+)?(una?\s+)?(gráfica?|diagrama|visual)$",
+        r"^(gráfica?|diagrama|visualiza)\s+(los?\s+)?(datos?|documentos?|métricas?|estadísticas?)$",
+        # German
+        r"^(zeig|erstell|generier|mal|zeichne)\s+(mir\s+)?(ein\s+)?(diagramm|grafik|chart|visual)$",
+        r"^(alle?|jede[rs]?)\s+(daten|metriken|zahlen|statistiken)",
     ]
 
     def _is_vague_request(self, query: str) -> bool:
@@ -625,13 +660,36 @@ DOCUMENTS:
         # Short query (≤6 words) with no numeric hint and no specific noun
         words = q.split()
         if len(words) <= 6:
-            # If it mentions a specific metric word it's not vague
+            # If it mentions a specific metric word it's not vague (multilingual)
             specific_hints = [
+                # English
                 "revenue", "cost", "budget", "salary", "temperature", "speed",
                 "latency", "throughput", "loss", "power", "load", "rate",
                 "count", "total", "average", "percent", "ratio", "score",
                 "traffic", "bandwidth", "frequency", "voltage", "current",
                 "pressure", "distance", "weight", "height", "duration",
+                # French
+                "revenu", "coût", "budget", "salaire", "température", "vitesse",
+                "latence", "débit", "perte", "puissance", "charge", "taux",
+                "total", "moyenne", "pourcentage", "fréquence", "tension",
+                "pression", "distance", "poids", "durée", "trafic",
+                # Arabic
+                "إيراد", "تكلفة", "ميزانية", "راتب", "سرعة", "كمون",
+                "إنتاجية", "طاقة", "حمل", "معدل", "مجموع", "متوسط",
+                "نسبة", "تردد", "ضغط", "مسافة", "وزن", "مدة",
+                # Spanish
+                "ingreso", "costo", "presupuesto", "salario", "velocidad",
+                "latencia", "rendimiento", "pérdida", "potencia", "carga",
+                "tasa", "total", "promedio", "porcentaje", "frecuencia",
+                "tensión", "presión", "distancia", "peso", "duración",
+                # German
+                "umsatz", "kosten", "budget", "gehalt", "geschwindigkeit",
+                "latenz", "durchsatz", "verlust", "leistung", "last",
+                "rate", "gesamt", "durchschnitt", "prozent", "frequenz",
+                # Italian / Portuguese (shared roots)
+                "entrate", "costo", "stipendio", "velocità", "latenza",
+                "rendimento", "potenza", "carico", "tasso", "totale",
+                "receita", "custo", "salário", "taxa", "frequência",
             ]
             if not any(h in q for h in specific_hints):
                 return True
@@ -965,9 +1023,16 @@ GRAPH_NODE_METHOD = '''
 ROUTER_PROMPT_ADDITION = """
 - graph: the user wants a chart, graph, or visual plot of data extracted from
   the documents — bar chart, line chart, pie chart, scatter plot, histogram,
-  trend over time, comparison chart, etc. Triggered by words like: graph, chart,
-  plot, visualize, bar chart, pie chart, line graph, histogram, show me a chart,
-  compare visually, trend chart, distribution chart.
+  trend over time, comparison chart, etc.
+  This route must trigger regardless of the language the user writes in.
+  Examples across languages:
+  EN: graph, chart, plot, visualize, bar chart, pie chart, histogram, show me a chart
+  FR: graphique, diagramme, courbe, histogramme, camembert, visualiser, tracer, montrer un graphique
+  AR: رسم بياني, مخطط, رسم, تصور بياني
+  ES: gráfico, diagrama, histograma, visualizar, trazar
+  DE: Diagramm, Grafik, Balkendiagramm, Kreisdiagramm, visualisieren
+  IT: grafico, diagramma, visualizzare, tracciare
+  PT: gráfico, diagrama, visualizar, traçar
 """
 
 # ────────────────────────────────────────────────────────────────────────────
