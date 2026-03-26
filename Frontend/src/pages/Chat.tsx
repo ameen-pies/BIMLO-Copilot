@@ -1488,7 +1488,8 @@ interface VoiceMessageBubbleProps {
   transcript: string | undefined;
   isExpanded: boolean;
   onToggleTranscript: () => void;
-  waveform?: number[]; // captured amplitude samples from recording
+  waveform?: number[];
+  timestamp: Date;
 }
 
 const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
@@ -1498,12 +1499,21 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
   isExpanded,
   onToggleTranscript,
   waveform,
+  timestamp,
 }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [speed, setSpeed] = useState<0.5 | 1 | 2 | 4>(1);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const animFrameRef = useRef<number>(0);
+
+  const SPEEDS: Array<0.5 | 1 | 2 | 4> = [0.5, 1, 2, 4];
+  const cycleSpeed = () => {
+    const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length] as 0.5 | 1 | 2 | 4;
+    setSpeed(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  };
 
   // Build the bubble waveform from captured samples.
   // We resample to exactly BAR_COUNT bars regardless of how many samples were captured.
@@ -1543,6 +1553,7 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
 
   useEffect(() => {
     const audio = new Audio(blobUrl);
+    audio.playbackRate = speed;
     audioRef.current = audio;
 
     const tick = () => {
@@ -1574,8 +1585,36 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
 
   const isPending = transcript === undefined;
 
+  // ── Waveform scrubber (click + drag to seek) ──────────────────────────────
+  const waveformRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
+
+  const seekTo = (clientX: number) => {
+    const el = waveformRef.current;
+    const audio = audioRef.current;
+    if (!el || !audio) return;
+    const rect = el.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const dur = audio.duration || duration;
+    if (isFinite(dur) && dur > 0) {
+      audio.currentTime = frac * dur;
+      setProgress(frac);
+      setCurrentTime(frac * dur);
+    }
+  };
+
+  const handleWaveMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    seekTo(e.clientX);
+    const onMove = (ev: MouseEvent) => { if (isDraggingRef.current) seekTo(ev.clientX); };
+    const onUp   = () => { isDraggingRef.current = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex flex-col items-end gap-1 w-fit">
       {/* Transcript — above the bubble */}
       <AnimatePresence>
         {isExpanded && transcript && (
@@ -1584,7 +1623,7 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.18 }}
-            className="overflow-hidden w-full max-w-[300px]"
+            className="overflow-hidden w-full"
           >
             <p className="text-[11px] text-muted-foreground/60 leading-relaxed pl-3 border-l border-border/25 italic text-right">
               {transcript}
@@ -1622,7 +1661,7 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
       </button>
 
       {/* Voice bubble */}
-      <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-md px-3 py-2.5 flex items-center gap-2.5 min-w-[220px] max-w-[300px]">
+      <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-md px-3 py-2.5 flex items-center gap-2.5 w-fit">
         {/* Play / pause button */}
         <button
           onClick={togglePlay}
@@ -1640,10 +1679,15 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
           )}
         </button>
 
-        {/* Waveform + time */}
-        <div className="flex-1 flex flex-col gap-1 min-w-0">
-          {/* Accurate waveform bars */}
-          <div className="flex items-center gap-[1.5px] h-[22px]">
+        {/* Waveform scrubber + time */}
+        <div className="flex flex-col gap-1" style={{ width: "160px" }}>
+          {/* Clickable / draggable waveform */}
+          <div
+            ref={waveformRef}
+            onMouseDown={handleWaveMouseDown}
+            className="flex items-center gap-[1.5px] h-[22px] cursor-pointer select-none"
+            title="Click or drag to seek"
+          >
             {bubbleBars.map((h, i) => {
               const frac = i / (bubbleBars.length - 1);
               const isPast = frac <= progress;
@@ -1657,10 +1701,8 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
                     height: `${barH}px`,
                     flex: "1 1 0",
                     borderRadius: "1px",
-                    background: isPast
-                      ? "rgba(255,255,255,0.95)"
-                      : "rgba(255,255,255,0.32)",
-                    transition: "background 0.08s ease",
+                    background: isPast ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.32)",
+                    transition: "background 0.06s ease",
                   }}
                 />
               );
@@ -1671,7 +1713,23 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
             {isPlaying ? formatTime(currentTime) : formatTime(duration)}
           </span>
         </div>
+
+        {/* Speed toggle button */}
+        <button
+          onClick={cycleSpeed}
+          className="shrink-0 h-7 min-w-[32px] px-1 rounded-md bg-primary-foreground/15 hover:bg-primary-foreground/25 transition-colors flex items-center justify-center"
+          title="Change playback speed"
+        >
+          <span className="text-[11px] font-semibold text-primary-foreground/80 leading-none tabular-nums">
+            {speed === 0.5 ? "×½" : speed === 1 ? "×1" : speed === 2 ? "×2" : "×4"}
+          </span>
+        </button>
       </div>
+
+      {/* Timestamp — sits directly under the blue pill */}
+      <span className="text-[10px] text-muted-foreground/50 tabular-nums">
+        {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+      </span>
     </div>
   );
 };
@@ -3317,7 +3375,7 @@ const Chat = () => {
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
                 )}
                 {msg.role === "user" && (
-                  <div className={`order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 ${msg.voiceBlobUrl ? "mt-[26px]" : "mt-0.5"}`}>
+                  <div className="order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
                     <User className="h-4 w-4 text-muted-foreground" />
                   </div>
                 )}
@@ -3378,12 +3436,29 @@ const Chat = () => {
                       </div>
                     );
                   })()}
+                  {/* ── Voice message — rendered directly, bypasses group/bubble wrapper ── */}
+                  {msg.voiceBlobUrl ? (
+                    <VoiceMessageBubble
+                      blobUrl={msg.voiceBlobUrl}
+                      duration={msg.voiceDuration ?? 0}
+                      transcript={msg.voiceTranscript}
+                      isExpanded={expandedTranscripts.has(msg.id)}
+                      waveform={msg.voiceWaveform}
+                      timestamp={msg.timestamp}
+                      onToggleTranscript={() =>
+                        setExpandedTranscripts(prev => {
+                          const next = new Set(prev);
+                          if (next.has(msg.id)) next.delete(msg.id);
+                          else next.add(msg.id);
+                          return next;
+                        })
+                      }
+                    />
+                  ) : (
                   <div
                     className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? msg.voiceBlobUrl
-                          ? "p-0 bg-transparent shadow-none" // voice bubble handles its own bg
-                          : "bg-primary text-primary-foreground rounded-br-md w-fit"
+                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
                         : msg.interrupted
                           ? "px-3 py-2 bg-transparent border border-dashed border-muted-foreground/20 rounded-bl-md w-fit"
                           : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
@@ -3468,30 +3543,15 @@ const Chat = () => {
                           </button>
                         </div>
                       </div>
-                    ) : msg.voiceBlobUrl ? (
-                      /* ── Voice message bubble ── */
-                      <VoiceMessageBubble
-                        blobUrl={msg.voiceBlobUrl}
-                        duration={msg.voiceDuration ?? 0}
-                        transcript={msg.voiceTranscript}
-                        isExpanded={expandedTranscripts.has(msg.id)}
-                        waveform={msg.voiceWaveform}
-                        onToggleTranscript={() =>
-                          setExpandedTranscripts(prev => {
-                            const next = new Set(prev);
-                            if (next.has(msg.id)) next.delete(msg.id);
-                            else next.add(msg.id);
-                            return next;
-                          })
-                        }
-                      />
                     ) : (
                       /* ── Normal user message ── */
                       <span>{msg.content}</span>
                     )}
                   </div>
+                  )} {/* end voice ? ... : <div> */}
 
-                  {/* Timestamp + action bar */}
+                  {/* Timestamp + action bar — hidden for voice messages (timestamp is inside VoiceMessageBubble) */}
+                  {!msg.voiceBlobUrl && (
                   <div className={`flex items-center gap-2 ${msg.role === "user" ? "justify-end" : "justify-start px-1"} group/msgbar`}>
                     {/* User message actions — edit + copy, shown on hover */}
                     {msg.role === "user" && editingMsgId !== msg.id && (
@@ -3552,6 +3612,7 @@ const Chat = () => {
                       </div>
                     )}
                   </div>
+                  )} {/* end !msg.voiceBlobUrl */}
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
                     // Deduplicate by source_number — backend may emit dupes if same chunk cited multiple times
