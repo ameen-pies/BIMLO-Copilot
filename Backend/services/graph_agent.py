@@ -273,9 +273,10 @@ class GraphAgent:
 
     def build_chart(
         self,
-        query:   str,
-        chunks:  List[Dict],
-        language: str = "en",
+        query:              str,
+        chunks:             List[Dict],
+        language:           str = "en",
+        skip_clarification: bool = False,
     ) -> Dict[str, Any]:
         """
         Main method called by graph_node.
@@ -284,6 +285,9 @@ class GraphAgent:
           "chart_config"       — ready Chart.js config + interpretation
           "chart_clarification"— vague query; returns metric groups for user to pick
           "chart_error"        — could not generate
+
+        skip_clarification=True bypasses Stage 0 entirely — used when the user
+        has already responded to a clarification prompt (to prevent looping).
         """
         if not chunks:
             return self._error("No document content found to build a chart from.")
@@ -294,7 +298,8 @@ class GraphAgent:
             )
 
         # ── Stage 0: check if query is vague and needs clarification ─────────
-        if self._is_vague_request(query):
+        # Skipped when the user already answered a clarification (skip_clarification=True)
+        if not skip_clarification and self._is_vague_request(query):
             groups = self._discover_metric_groups(query, chunks, language)
             if groups and len(groups) > 1:
                 print(f"   🤔 GraphAgent: vague query — returning {len(groups)} option groups")
@@ -668,6 +673,13 @@ DOCUMENTS:
                 "count", "total", "average", "percent", "ratio", "score",
                 "traffic", "bandwidth", "frequency", "voltage", "current",
                 "pressure", "distance", "weight", "height", "duration",
+                # BIM / construction / project management
+                "clash", "clashes", "conflict", "conflicts", "milestone", "milestones",
+                "completion", "schedule", "timeline", "deadline", "progress", "status",
+                "coordination", "model", "structural", "architectural", "mep",
+                "framing", "simulation", "review", "inspection", "phase", "phases",
+                "submittal", "rfi", "punch", "defect", "issue", "issues",
+                "quantity", "quantities", "takeoff", "area", "volume",
                 # French
                 "revenu", "coût", "budget", "salaire", "température", "vitesse",
                 "latence", "débit", "perte", "puissance", "charge", "taux",
@@ -916,10 +928,25 @@ GRAPH_NODE_METHOD = '''
         plan = self.judge.plan_response(query, retrieved_docs=chunks,
                                         conversation_history=history_texts)
 
+        # Detect if this query is a clarification follow-up by checking whether
+        # the most recent assistant turn was a chart_clarification.  In that case
+        # skip Stage 0 so the agent doesn't re-ask the same question.
+        prev_messages = state.get("conversation_history", [])
+        # The analytics dict is attached to the state when coming from a prior
+        # clarification; alternatively check if force_route was set by the frontend.
+        was_clarification_response = (
+            state.get("force_route") == "graph"
+            and any(
+                m.get("role") == "assistant"
+                for m in prev_messages[-2:]
+            )
+        )
+
         result = self.graph_agent.build_chart(
             query=query,
             chunks=chunks,
             language=plan.target_language,
+            skip_clarification=was_clarification_response,
         )
 
         # ── Clarification needed — vague query or multiple data sets found ────

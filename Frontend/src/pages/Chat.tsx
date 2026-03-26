@@ -1767,6 +1767,67 @@ interface ChartMessageProps {
   answer:    string;
 }
 
+// ── Chart insights renderer ──────────────────────────────────────────────────
+/**
+ * Splits the plain-prose interpretation into individual sentences and renders
+ * them as labelled insight rows: "Observation", "Trend", "Implication".
+ * Falls back gracefully if the text can't be split.
+ */
+const INSIGHT_LABELS = ["Observation", "Trend", "Implication", "Note"];
+const INSIGHT_ICONS  = [
+  // Bar-chart icon
+  <svg key="obs" className="h-3.5 w-3.5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>,
+  // Trending-up icon
+  <svg key="trend" className="h-3.5 w-3.5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>,
+  // Lightbulb icon
+  <svg key="impl" className="h-3.5 w-3.5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.347a3.252 3.252 0 01-4.78 0l-.347-.347z" /></svg>,
+  // Info icon
+  <svg key="note" className="h-3.5 w-3.5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>,
+];
+
+function splitIntoSentences(text: string): string[] {
+  // Split on sentence-ending punctuation followed by a space + capital letter
+  // Handles abbreviations poorly, but good enough for 2-4 sentence interpretations
+  const raw = text
+    .replace(/([.!?])\s+(?=[A-ZÁÀÂÄÉÈÊËÎÏÔÙÛÜ"'])/g, "$1\n")
+    .split("\n")
+    .map(s => s.trim())
+    .filter(s => s.length > 10);
+  return raw.length >= 2 ? raw : [text]; // fallback: treat whole text as one block
+}
+
+const ChartInsights: React.FC<{ text: string }> = ({ text }) => {
+  const sentences = splitIntoSentences(text);
+  const isSingle  = sentences.length === 1;
+
+  return (
+    <div className="border-t border-primary/10 px-3 pt-3 pb-3 flex flex-col gap-2.5">
+      {isSingle ? (
+        // Graceful fallback — single block with no label
+        <p className="text-[12px] text-muted-foreground leading-relaxed">{text}</p>
+      ) : (
+        sentences.map((sentence, idx) => (
+          <div key={idx} className="flex gap-2.5 items-start">
+            {/* Icon */}
+            <span className="text-primary/60 mt-0.5">
+              {INSIGHT_ICONS[idx % INSIGHT_ICONS.length]}
+            </span>
+            {/* Label + text */}
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-primary/50 leading-none">
+                {INSIGHT_LABELS[idx % INSIGHT_LABELS.length]}
+              </span>
+              <p className="text-[12px] text-muted-foreground leading-relaxed">
+                {sentence}
+              </p>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+};
+
 // ── Chart renderer ──────────────────────────────────────────────────────────
 const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
   const canvasRef       = useRef<HTMLCanvasElement>(null);
@@ -1784,8 +1845,56 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
 
       const cfg = JSON.parse(JSON.stringify(analytics.chart_js));
 
+      // ── Theme-aware colors — read from CSS variables at render time ──────
+      // Works with any CSS-variable-based theme (dark or light).
+      const root   = document.documentElement;
+      const cs     = getComputedStyle(root);
+      const isDark = root.classList.contains("dark");
+
+      // Resolve a CSS variable like "--muted-foreground" to its hex/hsl value
+      const cssVar = (name: string) => cs.getPropertyValue(name).trim();
+
+      // Tailwind shadcn/ui variables (hsl channel values)
+      // We build full hsl() strings from them
+      const hsl = (v: string) => {
+        const raw = cssVar(v);
+        return raw ? `hsl(${raw})` : undefined;
+      };
+
+      const textColor       = hsl("--foreground")         ?? (isDark ? "#f1f5f9" : "#0f172a");
+      const mutedColor      = hsl("--muted-foreground")   ?? (isDark ? "#94a3b8" : "#64748b");
+      const tooltipBg       = isDark ? "rgba(15,23,42,0.92)" : "rgba(255,255,255,0.96)";
+      const tooltipText     = isDark ? "#f1f5f9" : "#0f172a";
+      const tooltipSubtext  = isDark ? "#cbd5e1" : "#475569";
+      const tooltipBorder   = isDark ? "rgba(99,102,241,0.4)" : "rgba(99,102,241,0.25)";
+      const gridColor       = isDark ? "rgba(148,163,184,0.12)" : "rgba(100,116,139,0.15)";
+      const canvasBg        = isDark ? "rgba(15,23,42,0)"       : "rgba(255,255,255,0)";
+
+      // Patch scale colors
+      const scales = cfg?.options?.scales ?? {};
+      for (const axis of Object.values(scales) as any[]) {
+        if (axis?.title)  axis.title.color  = mutedColor;
+        if (axis?.ticks)  axis.ticks.color  = mutedColor;
+        if (axis?.grid)   axis.grid.color   = gridColor;
+      }
+
+      // Patch legend + title + tooltip
+      const plugins = cfg?.options?.plugins ?? {};
+      if (plugins.legend?.labels) {
+        plugins.legend.labels.color = textColor;
+      }
+      if (plugins.title) {
+        plugins.title.color = textColor;
+      }
+      if (plugins.tooltip) {
+        plugins.tooltip.backgroundColor = tooltipBg;
+        plugins.tooltip.titleColor       = tooltipText;
+        plugins.tooltip.bodyColor        = tooltipSubtext;
+        plugins.tooltip.borderColor      = tooltipBorder;
+      }
+
       // Restore serialised function strings (pie tooltip callback)
-      const tooltipCbs = cfg?.options?.plugins?.tooltip?.callbacks;
+      const tooltipCbs = plugins?.tooltip?.callbacks;
       if (tooltipCbs?.label && typeof tooltipCbs.label === "string") {
         try {
           // eslint-disable-next-line no-new-func
@@ -1837,26 +1946,44 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
 
       {/* ── 2. Chart card — bonus visual below the answer ── */}
       <div className="flex flex-col gap-2">
-        {/* Small chart label + source badge */}
-        <div className="flex items-center justify-between gap-2">
+        {/* Small chart label + source badge + download button */}
+        <div className="flex items-center gap-2">
           {analytics.title && (
-            <span className="text-[12px] font-medium text-muted-foreground leading-snug">
+            <span className="text-[12px] font-medium text-muted-foreground leading-snug flex-1">
               {analytics.title}
             </span>
           )}
-          {analytics.sources && analytics.sources.length > 0 && (
-            <span className="shrink-0 text-[10px] px-2 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
-              {analytics.sources[0]}{analytics.sources.length > 1 ? ` +${analytics.sources.length - 1}` : ""}
-            </span>
-          )}
+          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+            {analytics.sources && analytics.sources.length > 0 && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
+                {analytics.sources[0]}{analytics.sources.length > 1 ? ` +${analytics.sources.length - 1}` : ""}
+              </span>
+            )}
+            <button
+              onClick={() => {
+                if (!canvasRef.current) return;
+                const link = document.createElement("a");
+                link.download = `${(analytics.title ?? "chart").replace(/\s+/g, "_")}.png`;
+                link.href = canvasRef.current.toDataURL("image/png");
+                link.click();
+              }}
+              title="Download chart as PNG"
+              className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent hover:border-border transition-all"
+            >
+              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              PNG
+            </button>
+          </div>
         </div>
 
         {/* Canvas */}
-        <div className="rounded-xl border border-white/10 bg-slate-900/70 p-4 shadow-inner">
+        <div className="rounded-xl border border-border bg-card p-4 shadow-inner">
           <canvas ref={canvasRef} />
         </div>
 
-        {/* Key insights — collapsible */}
+        {/* Key insights — collapsible, structured */}
         {hasInterp && (
           <div className="rounded-lg border border-primary/20 bg-primary/5 overflow-hidden">
             <button
@@ -1873,11 +2000,7 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
               </svg>
             </button>
-            {interpExpanded && (
-              <div className="px-3 pb-3 text-[12px] text-muted-foreground leading-relaxed border-t border-primary/10 pt-2">
-                {analytics.interpretation}
-              </div>
-            )}
+            {interpExpanded && <ChartInsights text={analytics.interpretation ?? ""} />}
           </div>
         )}
       </div>
@@ -3663,7 +3786,7 @@ const Chat = () => {
                     }`}
                   >
                   {/* Copy button — floats right and sticks as you scroll long answers */}
-                  {msg.role === "assistant" && !msg.interrupted && msg.analytics?.type !== "chart_clarification" && (
+                  {msg.role === "assistant" && !msg.interrupted && msg.analytics?.type !== "chart_clarification" && msg.analytics?.type !== "chart_config" && msg.analytics?.type !== "chart_error" && (
                     <button
                       onClick={() => {
                         const text = msg.rawAnswer ?? msg.content;
