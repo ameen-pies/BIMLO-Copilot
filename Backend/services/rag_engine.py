@@ -56,6 +56,14 @@ except ImportError:
     _SOURCE_AGENT_AVAILABLE = False
     print("⚠️  source_agent.py not found — using legacy _format_sources")
 
+# Graph Agent — chart generation
+try:
+    from graph_agent import GraphAgent, is_graph_request
+    _GRAPH_AGENT_AVAILABLE = True
+except ImportError:
+    _GRAPH_AGENT_AVAILABLE = False
+    print("⚠️  graph_agent.py not found — graph route disabled")
+
 # Import the new judge
 try:
     from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation
@@ -77,7 +85,7 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -579,8 +587,16 @@ class RAGEngine:
             )
         else:
             self._source_node = None
+        # Graph Agent — chart generation
+        if _GRAPH_AGENT_AVAILABLE:
+            self.graph_agent = GraphAgent(
+                api_key=os.getenv("CF_API_KEY", ""),
+                base_url=os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev"),
+            )
+        else:
+            self.graph_agent = None
         self.graph  = self._build_graph()
-        print("🕸️  LangGraph RAG (Judge-Driven + Source Agent) ready")
+        print("🕸️  LangGraph RAG (Judge-Driven + Source Agent + Graph Agent) ready")
 
     # ------------------------------------------------------------------ #
     #  PUBLIC API                                                         #
@@ -663,6 +679,7 @@ class RAGEngine:
         "transform_node":  ("🔀", "Transforming document…"),
         "analytics_node":  ("📊", "Running analytics…"),
         "define_node":     ("📖", "Looking up definition…"),
+        "graph_node":      ("📈", "Building chart from documents…"),
     }
 
     def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
@@ -701,9 +718,10 @@ Keys and what each step does:
 - transform_node: transforming/translating document
 - analytics_node: running data analysis
 - define_node: explaining a specific term or concept from the documents
+- graph_node: extracting data from documents to build a chart
 
 Example for "what is the budget?":
-{{"router":"Figuring out your question…","retrieve":"Looking up budget details…","check_retrieval":"Checking what we found…","rewrite_query":"Improving budget search…","judge_plan":"Planning budget summary…","synthesise":"Writing up the numbers…","judge_evaluate":"Double-checking the answer…","direct_answer":"Answering directly…","transform_node":"Transforming document…","analytics_node":"Crunching the numbers…","define_node":"Explaining the term…"}}
+{{"router":"Figuring out your question…","retrieve":"Looking up budget details…","check_retrieval":"Checking what we found…","rewrite_query":"Improving budget search…","judge_plan":"Planning budget summary…","synthesise":"Writing up the numbers…","judge_evaluate":"Double-checking the answer…","direct_answer":"Answering directly…","transform_node":"Transforming document…","analytics_node":"Crunching the numbers…","define_node":"Explaining the term…","graph_node":"Building the chart…"}}
 
 Now generate for: "{q}" """
 
@@ -779,6 +797,7 @@ Now generate for: "{q}" """
         workflow.add_node("analytics_node",  _wrap("analytics_node",  self.analytics_node))
         workflow.add_node("transform_node",  _wrap("transform_node",  self.transform_node))
         workflow.add_node("define_node",     _wrap("define_node",     self.define_node))
+        workflow.add_node("graph_node",      _wrap("graph_node",      self.graph_node))
 
         # Entry point
         workflow.set_entry_point("router")
@@ -794,6 +813,7 @@ Now generate for: "{q}" """
                 "analytics": "retrieve",
                 "transform": "retrieve",   # fetch doc content, then transform
                 "define": "define_node",   # goes straight to Wikipedia — no doc retrieval
+                "graph": "retrieve",       # fetch doc content, then build chart
             }
         )
 
@@ -808,6 +828,8 @@ Now generate for: "{q}" """
                 return "transform"
             if s["route"] == "define":
                 return "define"
+            if s["route"] == "graph":
+                return "graph"
             if (s["route"] == "iterative_rag"
                     and s["retrieval_iterations"] < MAX_ITER
                     and not _is_good_retrieval(s["retrieved_chunks"])):
@@ -819,15 +841,17 @@ Now generate for: "{q}" """
             _check_retrieval_route,
             {"rewrite": "rewrite_query", "done": "judge_plan",
              "transform": "transform_node", "define": "define_node",
+             "graph": "graph_node",
              "no_docs": "direct_answer"},
         )
 
         workflow.add_edge("retrieve", "check_retrieval")
         workflow.add_edge("rewrite_query", "retrieve")
 
-        # Transform and define end directly — no judge eval loop
+        # Transform, define, and graph end directly — no judge eval loop
         workflow.add_edge("transform_node", END)
         workflow.add_edge("define_node", END)
+        workflow.add_edge("graph_node", END)
 
         # Judge-driven synthesis flow
         workflow.add_edge("judge_plan", "synthesise")
@@ -906,6 +930,7 @@ ROUTES:
 - iterative_rag: like rag, but comparing/contrasting across multiple different documents.
 - transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
+- graph: the user wants a chart, graph, or visual plot of data extracted from the documents — bar chart, line chart, pie chart, scatter plot, histogram, trend over time, comparison chart, etc. Triggered by: graph, chart, plot, visualize, bar chart, pie chart, line graph, histogram, show me a chart, compare visually, trend chart, distribution chart.
 - define: the user is asking what a specific term, concept, acronym, or niche phrase MEANS — typically triggered by "what is X?", "what does X mean?", "explain X", "define X", where X is a word or short phrase that likely appears in the documents. The answer should explain the concept in depth using the document context, not just summarise what the document says about it.
 
 CRITICAL RULES — read these first:
@@ -932,7 +957,7 @@ Reply with ONE word only — the route name."""
             ).strip().lower()
 
             # Validate — rag checked BEFORE transform so ambiguous responses default safely
-            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define"]
+            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
@@ -1922,6 +1947,91 @@ Remember: ALL text fields must be in {target_lang}."""
             "recommendations": ["Index more documents for better analysis"],
             "data_quality": "medium",
         }
+
+    # ------------------------------------------------------------------ #
+    #  GRAPH NODE                                                         #
+    # ------------------------------------------------------------------ #
+
+    def graph_node(self, state: AgentState) -> AgentState:
+        """
+        Generate a Chart.js config from document data.
+
+        Retrieval already ran (same path as analytics_node), so we have
+        state["retrieved_chunks"].  GraphAgent reads them and returns a
+        Chart.js config stored in state["analytics"] with type="chart_config".
+
+        The frontend checks response["analytics"]["type"] == "chart_config"
+        and renders a Chart.js canvas instead of markdown text.
+        """
+        query  = state["query"]
+        chunks = state["retrieved_chunks"]
+
+        cb = getattr(self, "_status_callback", None)
+        if callable(cb):
+            msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
+            icon, msg = msgs.get("graph_node", ("📈", "Building chart from documents…"))
+            cb("graph_node", icon, msg)
+
+        print(f"📈 graph_node → query={query[:80]}")
+
+        if not self.graph_agent:
+            fallback = "Chart generation is unavailable (graph_agent module not loaded)."
+            return {**state, "answer": fallback, "raw_answer": fallback,
+                    "sources": [], "confidence": 0.0, "analytics": None}
+
+        # Ask the judge for language/tone — same as every other node
+        history = state.get("conversation_history", [])
+        history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
+        plan = self.judge.plan_response(
+            query,
+            retrieved_docs=chunks,
+            conversation_history=history_texts,
+        )
+
+        result = self.graph_agent.build_chart(
+            query=query,
+            chunks=chunks,
+            language=plan.target_language,
+        )
+
+        if result.get("type") == "chart_error":
+            print(f"   ⚠️  graph_node: {result['message']}")
+            fallback_answer = (
+                f"I wasn't able to generate a chart: {result['message']} "
+                f"If your documents contain tables or numerical data, try being "
+                f"more specific — for example: 'plot monthly revenue as a bar chart'."
+            )
+            return {
+                **state,
+                "answer":     fallback_answer,
+                "raw_answer": fallback_answer,
+                "sources":    [],
+                "confidence": 0.0,
+                "analytics":  result,
+            }
+
+        # Short narrative answer to accompany the chart
+        description = result.get("description", "")
+        title       = result.get("title", "Chart")
+        sources_str = ", ".join(result.get("sources", []))
+        answer = (
+            f"Here is the **{title}** chart generated from your documents"
+            f"{(' (' + sources_str + ')') if sources_str else ''}. "
+            f"{description}"
+        ).strip()
+
+        print(f"   ✅ graph_node: chart ready — {title}")
+
+        return {
+            **state,
+            "response_plan": plan,
+            "answer":        answer,
+            "raw_answer":    answer,
+            "sources":       [],          # chart speaks for itself — no source cards
+            "confidence":    _confidence(chunks),
+            "analytics":     result,      # {"type": "chart_config", "chart_js": {...}, ...}
+        }
+
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ interface Message {
   voiceTranscript?: string; // the transcription text
   voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
   interrupted?: true;       // response was stopped mid-generation
+  analytics?: Record<string, any> | null;  // chart_config or chart_error from graph_node
 }
 
 interface Conversation {
@@ -1734,6 +1735,89 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
   );
 };
 
+
+// ---------------------------------------------------------------------------
+// ChartMessage — renders a Chart.js canvas for graph_node responses
+// ---------------------------------------------------------------------------
+
+interface ChartAnalytics {
+  type: "chart_config" | "chart_error";
+  chart_js?: Record<string, any>;
+  chart_type?: string;
+  title?: string;
+  description?: string;
+  sources?: string[];
+  message?: string;
+}
+
+interface ChartMessageProps {
+  analytics: ChartAnalytics;
+  answer: string;
+}
+
+const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chartInstanceRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!canvasRef.current || !analytics.chart_js) return;
+
+    // Dynamically import Chart.js so it doesn't bloat the initial bundle
+    import("chart.js/auto").then(({ Chart }) => {
+      // Destroy any previous instance before re-creating
+      if (chartInstanceRef.current) {
+        chartInstanceRef.current.destroy();
+        chartInstanceRef.current = null;
+      }
+
+      // Deep-clone to prevent Chart.js from mutating the config object
+      const cfg = JSON.parse(JSON.stringify(analytics.chart_js));
+
+      // Restore serialised function strings (e.g. pie tooltip callback)
+      const tooltipCallbacks = cfg?.options?.plugins?.tooltip?.callbacks;
+      if (tooltipCallbacks?.label && typeof tooltipCallbacks.label === "string") {
+        try {
+          // eslint-disable-next-line no-new-func
+          tooltipCallbacks.label = new Function("return " + tooltipCallbacks.label)();
+        } catch {
+          delete tooltipCallbacks.label;
+        }
+      }
+
+      chartInstanceRef.current = new Chart(canvasRef.current!, cfg);
+    });
+
+    return () => {
+      chartInstanceRef.current?.destroy();
+      chartInstanceRef.current = null;
+    };
+  }, [analytics]);
+
+  if (analytics.type === "chart_error") {
+    return (
+      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 leading-relaxed">
+        {answer}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {answer && (
+        <p className="text-sm leading-relaxed">{answer}</p>
+      )}
+      <div className="rounded-xl border border-white/10 bg-slate-900/60 p-4">
+        <canvas ref={canvasRef} />
+      </div>
+      {analytics.sources && analytics.sources.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Data from: {analytics.sources.join(", ")}
+        </p>
+      )}
+    </div>
+  );
+};
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -2594,6 +2678,7 @@ const Chat = () => {
                 rawAnswer: event.raw_answer ?? event.answer,
                 sources: event.sources,
                 confidence: event.confidence,
+                analytics: event.analytics ?? null,
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
@@ -3503,6 +3588,8 @@ const Chat = () => {
                         <Square className="h-2.5 w-2.5 fill-muted-foreground/30 text-muted-foreground/30 shrink-0" />
                         Response stopped
                       </span>
+                    ) : msg.role === "assistant" && (msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error") ? (
+                      <ChartMessage analytics={msg.analytics as any} answer={msg.content} />
                     ) : msg.role === "assistant" ? (
                       <div className="leading-relaxed">{renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick)}</div>
                     ) : editingMsgId === msg.id ? (

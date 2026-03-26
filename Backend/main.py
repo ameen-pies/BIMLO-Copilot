@@ -120,7 +120,7 @@ async def root():
         "version":  "3.0.0",
         "status":   "running",
         "graph":    "LangGraph agentic RAG",
-        "routes":   ["direct", "rag", "iterative_rag", "analytics"],
+        "routes":   ["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph"],
         "docs":     "/docs",
         "health":   "/health",
     }
