@@ -259,15 +259,10 @@ class GraphAgent:
         """
         Main method called by graph_node.
 
-        Returns a dict with at minimum:
-          {
-            "type":         "chart_config",   # or "chart_error"
-            "chart_type":   "bar"|"line"|"pie"|"scatter",
-            "chart_js":     { ...Chart.js config... },
-            "title":        "Human-readable chart title",
-            "description":  "1–2 sentence explanation of what the chart shows",
-            "sources":      ["filename1.pdf", ...],
-          }
+        Returns a dict with type one of:
+          "chart_config"       — ready Chart.js config + interpretation
+          "chart_clarification"— vague query; returns metric groups for user to pick
+          "chart_error"        — could not generate
         """
         if not chunks:
             return self._error("No document content found to build a chart from.")
@@ -276,6 +271,23 @@ class GraphAgent:
             return self._error(
                 "Chart generation unavailable: CF_API_KEY is not set."
             )
+
+        # ── Stage 0: check if query is vague and needs clarification ─────────
+        if self._is_vague_request(query):
+            groups = self._discover_metric_groups(query, chunks, language)
+            if groups and len(groups) > 1:
+                print(f"   🤔 GraphAgent: vague query — returning {len(groups)} option groups")
+                group_names = ", ".join(g["label"] for g in groups[:3])
+                clarif_question = (
+                    f"I found several distinct data sets in your documents that I could chart: "
+                    f"{group_names}{'...' if len(groups) > 3 else ''}. "
+                    f"Which one would you like to visualize?"
+                )
+                return {
+                    "type":     "chart_clarification",
+                    "question": clarif_question,
+                    "groups":   groups,   # [{"label": "...", "description": "...", "hint": "..."}]
+                }
 
         # Determine chart type from query + any explicit user axes hints
         chart_type = _hint_chart_type(query)
@@ -297,6 +309,9 @@ class GraphAgent:
         if not chart_js:
             return self._error("Failed to assemble chart configuration.")
 
+        # Stage 3 — generate interpretation paragraph
+        interpretation = self._interpret_chart(raw_data, query, language)
+
         # Collect source filenames
         sources = list(dict.fromkeys(
             c["metadata"].get("filename", "unknown") for c in chunks
@@ -304,13 +319,14 @@ class GraphAgent:
         ))
 
         return {
-            "type":        "chart_config",
-            "chart_type":  chart_type,
-            "chart_js":    chart_js,
-            "title":       raw_data.get("title", self._default_title(query)),
-            "description": raw_data.get("description", ""),
-            "sources":     sources,
-            "raw_data":    raw_data,   # kept for debugging; frontend may ignore
+            "type":           "chart_config",
+            "chart_type":     chart_type,
+            "chart_js":       chart_js,
+            "title":          raw_data.get("title", self._default_title(query)),
+            "description":    raw_data.get("description", ""),
+            "interpretation": interpretation,
+            "sources":        sources,
+            "raw_data":       raw_data,
         }
 
     # ── STAGE 1: DATA EXTRACTION ──────────────────────────────────────────
@@ -583,6 +599,176 @@ DOCUMENTS:
 
         return config
 
+
+    # ── STAGE 0: VAGUENESS + METRIC DISCOVERY ────────────────────────────
+
+    _VAGUE_PATTERNS = [
+        r"^(show|make|create|generate|draw|plot|give me|build)\s+(me\s+)?(a\s+)?(chart|graph|plot|visual)$",
+        r"^(chart|graph|plot|visuali[zs]e)\s+(the\s+)?(data|documents?|everything|metrics|numbers|stats|statistics)$",
+        r"^(what|show).*(look like|visuali[zs]|chart|graph)",
+        r"^(all|every).*(metric|number|stat|data|value)",
+    ]
+
+    def _is_vague_request(self, query: str) -> bool:
+        """
+        Returns True when the query doesn't specify WHAT to chart.
+        Heuristic: short query with no domain nouns, or matches known vague patterns.
+        """
+        import re as _re
+        q = query.strip().lower().rstrip("?.")
+
+        # Explicit vague patterns
+        for pat in self._VAGUE_PATTERNS:
+            if _re.search(pat, q):
+                return True
+
+        # Short query (≤6 words) with no numeric hint and no specific noun
+        words = q.split()
+        if len(words) <= 6:
+            # If it mentions a specific metric word it's not vague
+            specific_hints = [
+                "revenue", "cost", "budget", "salary", "temperature", "speed",
+                "latency", "throughput", "loss", "power", "load", "rate",
+                "count", "total", "average", "percent", "ratio", "score",
+                "traffic", "bandwidth", "frequency", "voltage", "current",
+                "pressure", "distance", "weight", "height", "duration",
+            ]
+            if not any(h in q for h in specific_hints):
+                return True
+
+        return False
+
+    def _discover_metric_groups(
+        self,
+        query: str,
+        chunks: List[Dict],
+        language: str,
+    ) -> List[Dict[str, str]]:
+        """
+        Ask the LLM to scan the document chunks and return distinct metric groups
+        the user could chart — each group is cohesive (same unit / same domain).
+
+        Returns a list like:
+          [
+            {"label": "Network Performance", "description": "Throughput, latency, packet loss", "hint": "chart network performance metrics"},
+            {"label": "Power & Infrastructure", "description": "Power load, cable length, equipment specs", "hint": "chart power and infrastructure metrics"},
+          ]
+        """
+        context = self._build_context(chunks, max_chars_per_chunk=1200)
+
+        system = (
+            "You are a data analyst helping a user choose what to chart. "
+            "You return ONLY valid JSON — no markdown, no explanation, no backticks."
+        )
+
+        prompt = f"""The user asked: "{query}"
+
+Scan the document content below and identify 2-5 DISTINCT groups of metrics that could each make a meaningful, coherent chart.
+Each group should contain metrics of the same type/unit or the same domain — do NOT mix unrelated numbers.
+
+Return ONLY a JSON array like this:
+[
+  {{
+    "label": "Short group name (2-4 words)",
+    "description": "Comma-separated list of the actual metrics in this group",
+    "hint": "Specific follow-up query the user could send, e.g. 'chart monthly revenue as a bar chart'"
+  }}
+]
+
+Rules:
+- 2 to 5 groups maximum
+- Each group must be internally coherent (same unit, same domain, or same time series)
+- "label" must be short and clear — the user will click it as a button
+- "hint" must be a complete, specific chart request the user could type
+- Language for labels/descriptions: {language}
+- Return ONLY the JSON array. Nothing else.
+
+DOCUMENTS:
+{context}"""
+
+        raw = _call_llm(prompt, system, self.api_key, self.base_url,
+                        max_tokens=600, temperature=0.2)
+        if not raw:
+            return []
+
+        parsed = _parse_json(raw)
+        if not isinstance(parsed, list):
+            # Try to unwrap if nested
+            if isinstance(parsed, dict) and "groups" in parsed:
+                parsed = parsed["groups"]
+            else:
+                print(f"   ⚠️  GraphAgent._discover_metric_groups: unexpected shape")
+                return []
+
+        # Validate each entry
+        valid = []
+        for item in parsed:
+            if isinstance(item, dict) and item.get("label") and item.get("hint"):
+                valid.append({
+                    "label":       str(item["label"])[:60],
+                    "description": str(item.get("description", ""))[:120],
+                    "hint":        str(item["hint"])[:200],
+                })
+        return valid[:5]
+
+    # ── STAGE 3: INTERPRETATION ───────────────────────────────────────────
+
+    def _interpret_chart(
+        self,
+        raw_data: Dict,
+        query:    str,
+        language: str,
+    ) -> str:
+        """
+        Generate a 2-4 sentence human-readable interpretation of the chart:
+        key takeaways, outliers, trends — not just a description of what it shows.
+        """
+        labels   = raw_data.get("labels", [])
+        datasets = raw_data.get("datasets", [])
+        title    = raw_data.get("title", "")
+
+        if not labels or not datasets:
+            return ""
+
+        # Build a compact data summary for the LLM
+        data_lines = []
+        for ds in datasets[:4]:
+            series_name = ds.get("label", "Series")
+            values = ds.get("data", [])
+            pairs  = ", ".join(
+                f"{labels[i]}: {values[i]}"
+                for i in range(min(len(labels), len(values)))
+            )
+            data_lines.append(f"  {series_name}: {pairs}")
+        data_summary = "\n".join(data_lines)
+
+        system = (
+            "You are a data analyst writing chart interpretations. "
+            "You give sharp, specific insights — not generic observations. "
+            "Respond in plain prose with no markdown, no bullet points."
+        )
+
+        prompt = f"""Chart title: "{title}"
+User request: "{query}"
+
+Data:
+{data_summary}
+
+Write a 2-4 sentence interpretation in {language}. Focus on:
+- The most notable value (highest/lowest/outlier)
+- Any clear trend or pattern
+- One practical implication if relevant
+
+Rules:
+- Be specific — reference actual values and labels from the data
+- No bullet points, no markdown, no headers
+- Do NOT start with "This chart shows" or "The chart displays"
+- Output ONLY the interpretation text"""
+
+        raw = _call_llm(prompt, system, self.api_key, self.base_url,
+                        max_tokens=200, temperature=0.4)
+        return raw.strip() if raw else ""
+
     # ── HELPERS ───────────────────────────────────────────────────────────
 
     @staticmethod
@@ -652,14 +838,14 @@ DOCUMENTS:
 GRAPH_NODE_METHOD = '''
     def graph_node(self, state: AgentState) -> AgentState:
         """
-        Generate a Chart.js config from document data.
+        Generate a Chart.js config from document data, alongside a full RAG
+        narrative answer.  The chart is a bonus visual — the text answer is primary.
 
-        Retrieval already ran (same path as analytics_node), so we have
-        state["retrieved_chunks"].  GraphAgent reads them and returns a
-        Chart.js config stored in state["analytics"].
-
-        The frontend checks response["analytics"]["type"] == "chart_config"
-        and renders a <canvas> with Chart.js instead of markdown text.
+        Flow:
+          1. Run GraphAgent.build_chart() to get chart config (or clarification)
+          2. If clarification needed → return prose question + option groups, no chart yet
+          3. If chart ready → synthesise a full narrative answer via LLM, attach chart
+          4. Return both: answer (narrative prose) + analytics (chart config)
         """
         query  = state["query"]
         chunks = state["retrieved_chunks"]
@@ -667,7 +853,6 @@ GRAPH_NODE_METHOD = '''
         self._emit("graph_node", "📈", "Building chart from documents…")
         print(f"📈 graph_node → query={query[:80]}")
 
-        # Ask the judge for language/tone (mirrors other nodes)
         history = state.get("conversation_history", [])
         history_texts = [f"{m[\'role\'].upper()}: {m[\'content\'][:150]}" for m in history[-6:]]
         plan = self.judge.plan_response(query, retrieved_docs=chunks,
@@ -679,8 +864,21 @@ GRAPH_NODE_METHOD = '''
             language=plan.target_language,
         )
 
+        # ── Clarification needed — vague query or multiple data sets found ────
+        if result.get("type") == "chart_clarification":
+            clarif_answer = result.get("question", "Which data would you like to chart?")
+            return {
+                **state,
+                "response_plan": plan,
+                "answer":        clarif_answer,
+                "raw_answer":    clarif_answer,
+                "sources":       [],
+                "confidence":    0.5,
+                "analytics":     result,
+            }
+
+        # ── Chart error — fall back to a regular narrative answer ─────────────
         if result.get("type") == "chart_error":
-            # Fall back to a regular RAG answer explaining the issue
             print(f"   ⚠️  graph_node: {result[\'message\']}")
             fallback_answer = (
                 f"I wasn\'t able to generate a chart: {result[\'message\']} "
@@ -696,24 +894,65 @@ GRAPH_NODE_METHOD = '''
                 "analytics":  result,
             }
 
-        # Build a short narrative answer to accompany the chart
-        description = result.get("description", "")
+        # ── Chart ready — synthesise a real narrative answer alongside it ─────
         title       = result.get("title", "Chart")
+        description = result.get("description", "")
         sources_str = ", ".join(result.get("sources", []))
-        answer = (
-            f"Here is the **{title}** chart generated from your documents"
-            f"{(' (' + sources_str + ')') if sources_str else ''}. "
-            f"{description}"
-        ).strip()
+        interp      = result.get("interpretation", "")
 
-        print(f"   ✅ graph_node: chart ready — {title}")
+        # Build document context for the narrative LLM call
+        context_parts = []
+        for i, c in enumerate(chunks, 1):
+            m = c.get("metadata", {})
+            context_parts.append(
+                f"[Source {i} | {m.get(\'filename\', \'unknown\')}]\n{c.get(\'text\', \'\')[:800]}"
+            )
+        context_text = "\n\n".join(context_parts)
+
+        narrative_prompt = (
+            f"The user asked: \\"{query}\\"\n\n"
+            f"You have just generated a **{title}** chart"
+            f"{(\' from \' + sources_str) if sources_str else \'\'}.\n"
+            f"Chart description: {description}\n"
+            f"Key insight from the data: {interp}\n\n"
+            f"Write a concise, natural answer (3-6 sentences) that:\n"
+            f"1. Directly answers what the user asked in prose\n"
+            f"2. Mentions the most important finding or number from the data\n"
+            f"3. Notes that a chart has been generated below for a visual breakdown\n\n"
+            f"Rules:\n"
+            f"- Do NOT just describe what the chart shows — give a real answer\n"
+            f"- Do NOT use bullet points\n"
+            f"- Write in {plan.target_language}\n\n"
+            f"Document context:\n{context_text}"
+        )
+
+        sys_prompt = (
+            f"You are a helpful document assistant. Answer the user\'s question in "
+            f"{plan.target_language} with a {plan.target_tone} tone. Be concise and direct."
+        )
+
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": narrative_prompt},
+        ]
+
+        if self.llm.enabled:
+            narrative = self.llm.chat(messages, max_tokens=300, temperature=0.4)
+        else:
+            narrative = (
+                f"Here is the **{title}** chart"
+                f"{(\' (\' + sources_str + \')\') if sources_str else \'\'}. "
+                f"{description}"
+            ).strip()
+
+        print(f"   ✅ graph_node: chart + narrative ready — {title}")
 
         return {
             **state,
             "response_plan": plan,
-            "answer":        answer,
-            "raw_answer":    answer,
-            "sources":       [],          # chart speaks for itself
+            "answer":        narrative,
+            "raw_answer":    narrative,
+            "sources":       [],
             "confidence":    _confidence(chunks),
             "analytics":     result,
         }

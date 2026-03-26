@@ -1737,50 +1737,61 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
 
 
 // ---------------------------------------------------------------------------
-// ChartMessage — renders a Chart.js canvas for graph_node responses
+// ChartMessage + ChartClarification — graph_node response renderers
 // ---------------------------------------------------------------------------
 
+interface ChartGroup {
+  label:       string;
+  description: string;
+  hint:        string;
+}
+
 interface ChartAnalytics {
-  type: "chart_config" | "chart_error";
-  chart_js?: Record<string, any>;
-  chart_type?: string;
-  title?: string;
-  description?: string;
-  sources?: string[];
-  message?: string;
+  type: "chart_config" | "chart_clarification" | "chart_error";
+  // chart_config
+  chart_js?:       Record<string, any>;
+  chart_type?:     string;
+  title?:          string;
+  description?:    string;
+  interpretation?: string;
+  sources?:        string[];
+  // chart_clarification
+  question?: string;
+  groups?:   ChartGroup[];
+  // chart_error
+  message?:  string;
 }
 
 interface ChartMessageProps {
   analytics: ChartAnalytics;
-  answer: string;
+  answer:    string;
 }
 
+// ── Chart renderer ──────────────────────────────────────────────────────────
 const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef       = useRef<HTMLCanvasElement>(null);
   const chartInstanceRef = useRef<any>(null);
+  const [interpExpanded, setInterpExpanded] = useState(false);
 
   useEffect(() => {
     if (!canvasRef.current || !analytics.chart_js) return;
 
-    // Dynamically import Chart.js so it doesn't bloat the initial bundle
     import("chart.js/auto").then(({ Chart }) => {
-      // Destroy any previous instance before re-creating
       if (chartInstanceRef.current) {
         chartInstanceRef.current.destroy();
         chartInstanceRef.current = null;
       }
 
-      // Deep-clone to prevent Chart.js from mutating the config object
       const cfg = JSON.parse(JSON.stringify(analytics.chart_js));
 
-      // Restore serialised function strings (e.g. pie tooltip callback)
-      const tooltipCallbacks = cfg?.options?.plugins?.tooltip?.callbacks;
-      if (tooltipCallbacks?.label && typeof tooltipCallbacks.label === "string") {
+      // Restore serialised function strings (pie tooltip callback)
+      const tooltipCbs = cfg?.options?.plugins?.tooltip?.callbacks;
+      if (tooltipCbs?.label && typeof tooltipCbs.label === "string") {
         try {
           // eslint-disable-next-line no-new-func
-          tooltipCallbacks.label = new Function("return " + tooltipCallbacks.label)();
+          tooltipCbs.label = new Function("return " + tooltipCbs.label)();
         } catch {
-          delete tooltipCallbacks.label;
+          delete tooltipCbs.label;
         }
       }
 
@@ -1795,25 +1806,124 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
 
   if (analytics.type === "chart_error") {
     return (
-      <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 leading-relaxed">
-        {answer}
+      <div className="flex flex-col gap-3">
+        {answer && (
+          <div className="leading-relaxed text-sm text-foreground">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+              {answer}
+            </ReactMarkdown>
+          </div>
+        )}
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 leading-relaxed">
+          {analytics.message}
+        </div>
       </div>
     );
   }
 
+  const hasInterp = Boolean(analytics.interpretation);
+
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4 w-full">
+
+      {/* ── 1. Narrative RAG answer — primary content ── */}
       {answer && (
-        <p className="text-sm leading-relaxed">{answer}</p>
+        <div className="leading-relaxed text-sm text-foreground">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+            {answer}
+          </ReactMarkdown>
+        </div>
       )}
-      <div className="rounded-xl border border-white/10 bg-slate-900/60 p-4">
-        <canvas ref={canvasRef} />
+
+      {/* ── 2. Chart card — bonus visual below the answer ── */}
+      <div className="flex flex-col gap-2">
+        {/* Small chart label + source badge */}
+        <div className="flex items-center justify-between gap-2">
+          {analytics.title && (
+            <span className="text-[12px] font-medium text-muted-foreground leading-snug">
+              {analytics.title}
+            </span>
+          )}
+          {analytics.sources && analytics.sources.length > 0 && (
+            <span className="shrink-0 text-[10px] px-2 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
+              {analytics.sources[0]}{analytics.sources.length > 1 ? ` +${analytics.sources.length - 1}` : ""}
+            </span>
+          )}
+        </div>
+
+        {/* Canvas */}
+        <div className="rounded-xl border border-white/10 bg-slate-900/70 p-4 shadow-inner">
+          <canvas ref={canvasRef} />
+        </div>
+
+        {/* Key insights — collapsible */}
+        {hasInterp && (
+          <div className="rounded-lg border border-primary/20 bg-primary/5 overflow-hidden">
+            <button
+              onClick={() => setInterpExpanded(v => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-primary/80 hover:text-primary transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.347a3.252 3.252 0 01-4.78 0l-.347-.347z" />
+                </svg>
+                Key insights
+              </span>
+              <svg className={`h-3.5 w-3.5 transition-transform ${interpExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {interpExpanded && (
+              <div className="px-3 pb-3 text-[12px] text-muted-foreground leading-relaxed border-t border-primary/10 pt-2">
+                {analytics.interpretation}
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      {analytics.sources && analytics.sources.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          Data from: {analytics.sources.join(", ")}
-        </p>
-      )}
+    </div>
+  );
+};
+
+// ── Clarification picker ────────────────────────────────────────────────────
+interface ChartClarificationProps {
+  analytics: ChartAnalytics;
+  onSelect:  (hint: string) => void;
+}
+
+const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSelect }) => {
+  const groups = analytics.groups ?? [];
+
+  return (
+    <div className="flex flex-col gap-3 w-full">
+
+      {/* Natural prose question — same visual weight as any RAG answer */}
+      <p className="text-sm leading-relaxed text-foreground">
+        {analytics.question ?? "I found several types of data in your documents. Which would you like to chart?"}
+      </p>
+
+      {/* Option rows — sit below the prose naturally */}
+      <div className="flex flex-col gap-1.5 mt-0.5">
+        {groups.map((g, i) => (
+          <motion.button
+            key={i}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: i * 0.06 }}
+            onClick={() => onSelect(g.hint)}
+            className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/8 text-left transition-all group/opt"
+          >
+            <span className="text-[13px] font-medium text-foreground group-hover/opt:text-primary transition-colors">
+              {g.label}
+            </span>
+            {g.description && (
+              <span className="text-[11px] text-muted-foreground leading-snug">
+                {g.description}
+              </span>
+            )}
+          </motion.button>
+        ))}
+      </div>
     </div>
   );
 };
@@ -3588,6 +3698,11 @@ const Chat = () => {
                         <Square className="h-2.5 w-2.5 fill-muted-foreground/30 text-muted-foreground/30 shrink-0" />
                         Response stopped
                       </span>
+                    ) : msg.role === "assistant" && msg.analytics?.type === "chart_clarification" ? (
+                      <ChartClarification
+                        analytics={msg.analytics as any}
+                        onSelect={(hint) => { setInput(hint); }}
+                      />
                     ) : msg.role === "assistant" && (msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error") ? (
                       <ChartMessage analytics={msg.analytics as any} answer={msg.content} />
                     ) : msg.role === "assistant" ? (

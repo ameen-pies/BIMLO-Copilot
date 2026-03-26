@@ -1994,6 +1994,23 @@ Remember: ALL text fields must be in {target_lang}."""
             language=plan.target_language,
         )
 
+        # ── Clarification needed: query was too vague ─────────────────────
+        if result.get("type") == "chart_clarification":
+            print(f"   🤔 graph_node: returning clarification options")
+            clarif_answer = result.get(
+                "question",
+                "Your request covers several different types of data. Which would you like to chart?"
+            )
+            return {
+                **state,
+                "answer":     clarif_answer,
+                "raw_answer": clarif_answer,
+                "sources":    [],
+                "confidence": 0.0,
+                "analytics":  result,
+            }
+
+        # ── Chart generation failed ───────────────────────────────────────
         if result.get("type") == "chart_error":
             print(f"   ⚠️  graph_node: {result['message']}")
             fallback_answer = (
@@ -2010,14 +2027,12 @@ Remember: ALL text fields must be in {target_lang}."""
                 "analytics":  result,
             }
 
-        # Short narrative answer to accompany the chart
-        description = result.get("description", "")
+        # ── Chart ready ───────────────────────────────────────────────────
         title       = result.get("title", "Chart")
         sources_str = ", ".join(result.get("sources", []))
         answer = (
             f"Here is the **{title}** chart generated from your documents"
-            f"{(' (' + sources_str + ')') if sources_str else ''}. "
-            f"{description}"
+            f"{(' (' + sources_str + ')') if sources_str else ''}."
         ).strip()
 
         print(f"   ✅ graph_node: chart ready — {title}")
@@ -2027,9 +2042,9 @@ Remember: ALL text fields must be in {target_lang}."""
             "response_plan": plan,
             "answer":        answer,
             "raw_answer":    answer,
-            "sources":       [],          # chart speaks for itself — no source cards
+            "sources":       [],
             "confidence":    _confidence(chunks),
-            "analytics":     result,      # {"type": "chart_config", "chart_js": {...}, ...}
+            "analytics":     result,
         }
 
 
