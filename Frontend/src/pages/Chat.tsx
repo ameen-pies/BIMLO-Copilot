@@ -24,6 +24,11 @@ interface Message {
   confidence?: number;
   timestamp: Date;
   thinkingSteps?: ThinkingStep[];
+  // Voice message fields
+  voiceBlobUrl?: string;   // object URL for the recorded audio
+  voiceDuration?: number;  // seconds
+  voiceTranscript?: string; // the transcription text
+  voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
 }
 
 interface Conversation {
@@ -1472,6 +1477,204 @@ const WikiThumbnail: React.FC<{ wikiUrl: string }> = ({ wikiUrl }) => {
   );
 };
 
+// ---------------------------------------------------------------------------
+// Voice Message Bubble
+// ---------------------------------------------------------------------------
+
+interface VoiceMessageBubbleProps {
+  blobUrl: string;
+  duration: number;
+  transcript: string | undefined;
+  isExpanded: boolean;
+  onToggleTranscript: () => void;
+  waveform?: number[]; // captured amplitude samples from recording
+}
+
+const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
+  blobUrl,
+  duration,
+  transcript,
+  isExpanded,
+  onToggleTranscript,
+  waveform,
+}) => {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const animFrameRef = useRef<number>(0);
+
+  // Build the bubble waveform from captured samples.
+  // We resample to exactly BAR_COUNT bars regardless of how many samples were captured.
+  const BAR_COUNT = 52;
+  const bubbleBars = React.useMemo(() => {
+    if (!waveform || waveform.length === 0) {
+      // Fallback: gentle organic shape so it never looks empty
+      return Array.from({ length: BAR_COUNT }, (_, i) => {
+        const t = i / (BAR_COUNT - 1);
+        return 0.15 + 0.45 * Math.sin(t * Math.PI) + 0.1 * Math.sin(t * Math.PI * 4);
+      });
+    }
+    // Resample: group source samples into BAR_COUNT buckets, take the peak in each
+    return Array.from({ length: BAR_COUNT }, (_, i) => {
+      const start = Math.floor((i / BAR_COUNT) * waveform.length);
+      const end   = Math.ceil(((i + 1) / BAR_COUNT) * waveform.length);
+      const slice = waveform.slice(start, end);
+      return slice.length > 0 ? Math.max(...slice) : 0;
+    });
+  }, [waveform]);
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  };
+
+  const togglePlay = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (isPlaying) {
+      audio.pause();
+    } else {
+      audio.play().catch(() => {});
+    }
+  };
+
+  useEffect(() => {
+    const audio = new Audio(blobUrl);
+    audioRef.current = audio;
+
+    const tick = () => {
+      if (!audioRef.current) return;
+      const dur = audioRef.current.duration || duration;
+      const ct  = audioRef.current.currentTime;
+      setCurrentTime(ct);
+      setProgress(dur > 0 ? ct / dur : 0);
+      animFrameRef.current = requestAnimationFrame(tick);
+    };
+
+    const onPlay  = () => { setIsPlaying(true); tick(); };
+    const onPause = () => { setIsPlaying(false); cancelAnimationFrame(animFrameRef.current); };
+    const onEnded = () => { setIsPlaying(false); setProgress(0); setCurrentTime(0); cancelAnimationFrame(animFrameRef.current); };
+
+    audio.addEventListener("play",  onPlay);
+    audio.addEventListener("pause", onPause);
+    audio.addEventListener("ended", onEnded);
+
+    return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      audio.removeEventListener("play",  onPlay);
+      audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("ended", onEnded);
+      audio.pause();
+      audio.src = "";
+    };
+  }, [blobUrl]);
+
+  const isPending = transcript === undefined;
+
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      {/* Transcript — above the bubble */}
+      <AnimatePresence>
+        {isExpanded && transcript && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="overflow-hidden w-full max-w-[300px]"
+          >
+            <p className="text-[11px] text-muted-foreground/60 leading-relaxed pl-3 border-l border-border/25 italic text-right">
+              {transcript}
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Transcript toggle — above bubble, right-aligned */}
+      <button
+        onClick={onToggleTranscript}
+        className="flex items-center gap-1.5 group/transcript w-fit pr-1"
+        disabled={isPending}
+      >
+        {isPending ? (
+          <span className="text-[11px] text-muted-foreground/40 italic leading-none flex items-center gap-1">
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            Transcribing…
+          </span>
+        ) : (
+          <span className="text-[11px] text-muted-foreground/40 italic leading-none">
+            {isExpanded ? "Hide transcript" : "Show transcript"}
+          </span>
+        )}
+        {!isPending && (
+          <motion.span
+            animate={{ rotate: isExpanded ? 180 : 0 }}
+            transition={{ duration: 0.2 }}
+            className="opacity-0 group-hover/transcript:opacity-60 transition-opacity"
+          >
+            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
+          </motion.span>
+        )}
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground/30 shrink-0" />
+      </button>
+
+      {/* Voice bubble */}
+      <div className="bg-primary text-primary-foreground rounded-2xl rounded-br-md px-3 py-2.5 flex items-center gap-2.5 min-w-[220px] max-w-[300px]">
+        {/* Play / pause button */}
+        <button
+          onClick={togglePlay}
+          className="h-8 w-8 rounded-full bg-primary-foreground/20 hover:bg-primary-foreground/30 flex items-center justify-center shrink-0 transition-colors"
+        >
+          {isPlaying ? (
+            <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor">
+              <rect x="0" y="0" width="4" height="14" rx="1.5" />
+              <rect x="8" y="0" width="4" height="14" rx="1.5" />
+            </svg>
+          ) : (
+            <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor">
+              <path d="M1 1.5v11l10-5.5L1 1.5z" />
+            </svg>
+          )}
+        </button>
+
+        {/* Waveform + time */}
+        <div className="flex-1 flex flex-col gap-1 min-w-0">
+          {/* Accurate waveform bars */}
+          <div className="flex items-center gap-[1.5px] h-[22px]">
+            {bubbleBars.map((h, i) => {
+              const frac = i / (bubbleBars.length - 1);
+              const isPast = frac <= progress;
+              const minH = 2;
+              const maxH = 20;
+              const barH = minH + h * (maxH - minH);
+              return (
+                <div
+                  key={i}
+                  style={{
+                    height: `${barH}px`,
+                    flex: "1 1 0",
+                    borderRadius: "1px",
+                    background: isPast
+                      ? "rgba(255,255,255,0.95)"
+                      : "rgba(255,255,255,0.32)",
+                    transition: "background 0.08s ease",
+                  }}
+                />
+              );
+            })}
+          </div>
+          {/* Time display */}
+          <span className="text-[10px] text-primary-foreground/55 tabular-nums">
+            {isPlaying ? formatTime(currentTime) : formatTime(duration)}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -1530,6 +1733,19 @@ const Chat = () => {
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef   = useRef<Blob[]>([]);
+  const recordingStartRef = useRef<number>(0);
+  // Web Audio API analyser for live waveform
+  const audioCtxRef         = useRef<AudioContext | null>(null);
+  const analyserRef         = useRef<AnalyserNode | null>(null);
+  const animFrameRef        = useRef<number>(0);
+  const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [waveformBars, setWaveformBars]         = useState<number[]>(Array(48).fill(0));
+  const [recordingElapsed, setRecordingElapsed] = useState(0);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Captured amplitude samples (one per ~50 ms) — used to build the bubble waveform
+  const waveformSamplesRef = useRef<number[]>([]);
+  // Track which voice message bubbles have transcription expanded
+  const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set());
 
   const handleVoiceClick = useCallback(async () => {
     // ── Stop recording ───────────────────────────────────────────────────────
@@ -1552,6 +1768,7 @@ const Chat = () => {
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
+      recordingStartRef.current = Date.now();
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) audioChunksRef.current.push(e.data);
@@ -1561,6 +1778,17 @@ const Chat = () => {
         // Stop all mic tracks immediately
         stream.getTracks().forEach((t) => t.stop());
 
+        // ── Clean up Web Audio + timers ───────────────────────────────────
+        cancelAnimationFrame(animFrameRef.current);
+        analyserRef.current = null;
+        audioCtxRef.current?.close().catch(() => {});
+        audioCtxRef.current = null;
+        if (elapsedTimerRef.current) { clearInterval(elapsedTimerRef.current); elapsedTimerRef.current = null; }
+        if (maxDurationTimerRef.current) { clearTimeout(maxDurationTimerRef.current); maxDurationTimerRef.current = null; }
+        setWaveformBars(Array(28).fill(0));
+        setRecordingElapsed(0);
+
+        const duration = (Date.now() - recordingStartRef.current) / 1000;
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
         audioChunksRef.current = [];
 
@@ -1570,6 +1798,26 @@ const Chat = () => {
         }
 
         setVoiceState("transcribing");
+
+        // Create a local object URL for the audio blob so we can play it
+        const blobUrl = URL.createObjectURL(blob);
+        // Snapshot amplitude samples captured during recording
+        const capturedSamples = [...waveformSamplesRef.current];
+        waveformSamplesRef.current = [];
+
+        // Immediately add a voice message bubble (transcript will fill in async)
+        const voiceMsgId = Date.now().toString();
+        const voiceMsg: Message = {
+          id: voiceMsgId,
+          role: "user",
+          content: "", // will be filled with transcript once available
+          voiceBlobUrl: blobUrl,
+          voiceDuration: duration,
+          voiceTranscript: undefined, // pending
+          voiceWaveform: capturedSamples,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, voiceMsg]);
 
         try {
           const formData = new FormData();
@@ -1590,14 +1838,61 @@ const Chat = () => {
           const transcript = data.transcript?.trim();
 
           if (transcript) {
-            setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-            // Focus textarea so the user can immediately edit or send
-            setTimeout(() => textareaRef.current?.focus(), 50);
+            // Update the voice bubble with transcript and set content for RAG
+            setMessages(prev => prev.map(m =>
+              m.id === voiceMsgId
+                ? { ...m, content: transcript, voiceTranscript: transcript }
+                : m
+            ));
+            // Wrap the transcript so the agent knows this was spoken, not typed
+            const voiceQuery = `[Voice message — the user said this aloud, not typed it]\n\n${transcript}`;
+            // Now run the RAG query using the transcript as the question
+            setIsLoading(true);
+            if (!notifyDismissed) setShowNotifyBanner(true);
+            try {
+              const assistantMsg = await runStreamingQuery(voiceQuery);
+              if (!assistantMsg) return;
+              setMessages(prev => {
+                const updated = [...prev, assistantMsg];
+                const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
+                const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+                setConversations(convs => {
+                  const existing = convs.find(c => c.id === activeConvId);
+                  if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+                  return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
+                });
+                return updated;
+              });
+              setTypingMessageId(assistantMsg.id);
+              fetchSuggestions(transcript, assistantMsg.content);
+              fireNotification();
+            } catch (error) {
+              const msg = serializeError(error);
+              const errorMsg: Message = {
+                id: (Date.now() + 1).toString(),
+                role: "assistant",
+                content: `Sorry, I encountered an error: ${msg}. Please try again.`,
+                timestamp: new Date(),
+              };
+              setMessages(prev => [...prev, errorMsg]);
+              toast({ title: "Query failed", description: msg, variant: "destructive" });
+            }
           } else {
+            // No speech detected — mark transcript as empty
+            setMessages(prev => prev.map(m =>
+              m.id === voiceMsgId
+                ? { ...m, voiceTranscript: "(no speech detected)" }
+                : m
+            ));
             toast({ title: "Nothing detected", description: "No speech was recognised — please try again.", variant: "destructive" });
           }
         } catch (err) {
           console.error("Transcription error:", err);
+          setMessages(prev => prev.map(m =>
+            m.id === voiceMsgId
+              ? { ...m, voiceTranscript: "(transcription failed)" }
+              : m
+          ));
           toast({ title: "Transcription failed", description: err instanceof Error ? err.message : "Could not reach the transcription service.", variant: "destructive" });
         } finally {
           setVoiceState("idle");
@@ -1606,6 +1901,59 @@ const Chat = () => {
 
       recorder.start();
       setVoiceState("recording");
+      setRecordingElapsed(0);
+
+      // ── Web Audio API — live waveform analyser ────────────────────────────
+      try {
+        const audioCtx = new AudioContext();
+        audioCtxRef.current = audioCtx;
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.78;
+        source.connect(analyser);
+        analyserRef.current = analyser;
+
+        const BAR_COUNT = 48;
+        const freqData = new Uint8Array(analyser.frequencyBinCount);
+        waveformSamplesRef.current = [];
+        let lastSampleTime = 0;
+
+        const tick = (timestamp: number) => {
+          analyser.getByteFrequencyData(freqData);
+          // Map frequency bins to bar heights (0–1), focus on vocal range (0–60% of bins)
+          const bars = Array.from({ length: BAR_COUNT }, (_, i) => {
+            const binIdx = Math.floor((i / BAR_COUNT) * (freqData.length * 0.6));
+            const raw = freqData[binIdx] / 255;
+            const centreFactor = 1 - Math.abs((i / (BAR_COUNT - 1)) - 0.5) * 0.35;
+            return Math.min(1, raw * centreFactor * 1.4);
+          });
+          setWaveformBars(bars);
+
+          // Capture amplitude sample every ~50 ms for bubble waveform
+          if (timestamp - lastSampleTime >= 50) {
+            lastSampleTime = timestamp;
+            const avg = bars.reduce((s, v) => s + v, 0) / bars.length;
+            waveformSamplesRef.current.push(avg);
+          }
+
+          animFrameRef.current = requestAnimationFrame(tick);
+        };
+        animFrameRef.current = requestAnimationFrame(tick);
+      } catch {
+        // Web Audio unavailable — waveform stays flat, recording still works
+      }
+
+      // ── Elapsed timer ─────────────────────────────────────────────────────
+      elapsedTimerRef.current = setInterval(() => {
+        setRecordingElapsed(s => s + 1);
+      }, 1000);
+
+      // ── 60-second hard stop ───────────────────────────────────────────────
+      maxDurationTimerRef.current = setTimeout(() => {
+        mediaRecorderRef.current?.stop();
+      }, 60_000);
+
     } catch (err) {
       console.error("Microphone error:", err);
       toast({ title: "Microphone access denied", description: "Allow microphone access in your browser settings.", variant: "destructive" });
@@ -3019,7 +3367,9 @@ const Chat = () => {
                   <div
                     className={`group/bubble relative px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? "bg-primary text-primary-foreground rounded-br-md w-fit"
+                        ? msg.voiceBlobUrl
+                          ? "p-0 bg-transparent shadow-none" // voice bubble handles its own bg
+                          : "bg-primary text-primary-foreground rounded-br-md w-fit"
                         : "bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
@@ -3096,6 +3446,23 @@ const Chat = () => {
                           </button>
                         </div>
                       </div>
+                    ) : msg.voiceBlobUrl ? (
+                      /* ── Voice message bubble ── */
+                      <VoiceMessageBubble
+                        blobUrl={msg.voiceBlobUrl}
+                        duration={msg.voiceDuration ?? 0}
+                        transcript={msg.voiceTranscript}
+                        isExpanded={expandedTranscripts.has(msg.id)}
+                        waveform={msg.voiceWaveform}
+                        onToggleTranscript={() =>
+                          setExpandedTranscripts(prev => {
+                            const next = new Set(prev);
+                            if (next.has(msg.id)) next.delete(msg.id);
+                            else next.add(msg.id);
+                            return next;
+                          })
+                        }
+                      />
                     ) : (
                       /* ── Normal user message ── */
                       <span>{msg.content}</span>
@@ -3591,7 +3958,69 @@ const Chat = () => {
                     <Plus className="h-5 w-5" />
                   </Button>
 
-                  {/* Auto-expanding textarea with ghost-text word completion */}
+                  {/* Auto-expanding textarea with ghost-text word completion — hidden while recording */}
+                  {voiceState === "recording" ? (
+                    /* ── Live waveform visualizer — replaces the textarea during recording ── */
+                    <div className="flex-1 flex items-center gap-2 py-0">
+                      {/* Delete recording button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Cancel recording without transcribing
+                          if (maxDurationTimerRef.current) { clearTimeout(maxDurationTimerRef.current); maxDurationTimerRef.current = null; }
+                          if (elapsedTimerRef.current) { clearInterval(elapsedTimerRef.current); elapsedTimerRef.current = null; }
+                          cancelAnimationFrame(animFrameRef.current);
+                          analyserRef.current = null;
+                          audioCtxRef.current?.close().catch(() => {});
+                          audioCtxRef.current = null;
+                          waveformSamplesRef.current = [];
+                          setWaveformBars(Array(48).fill(0));
+                          setRecordingElapsed(0);
+                          // Forcibly stop the recorder without triggering onstop → transcribe flow
+                          const recorder = mediaRecorderRef.current;
+                          if (recorder) {
+                            recorder.onstop = () => {};  // override handler
+                            recorder.stream?.getTracks().forEach(t => t.stop());
+                            try { recorder.stop(); } catch {}
+                            mediaRecorderRef.current = null;
+                          }
+                          setVoiceState("idle");
+                        }}
+                        className="h-7 w-7 shrink-0 flex items-center justify-center rounded-full text-destructive/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
+                        title="Discard recording"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+
+                      {/* Waveform bars */}
+                      <div className="flex-1 flex items-center gap-[1.5px] h-8">
+                        {waveformBars.map((level, i) => {
+                          const minH = 2;
+                          const maxH = 28;
+                          const h = minH + level * (maxH - minH);
+                          const opacity = 0.3 + level * 0.7;
+                          return (
+                            <div
+                              key={i}
+                              style={{
+                                height: `${h}px`,
+                                opacity,
+                                flex: "1 1 0",
+                                borderRadius: "1px",
+                                background: "hsl(var(--primary))",
+                                transition: "height 0.06s ease-out, opacity 0.06s ease-out",
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Elapsed timer */}
+                      <span className="text-[11px] text-primary/70 font-mono tabular-nums shrink-0 w-8 text-right">
+                        {String(Math.floor(recordingElapsed / 60)).padStart(2, "0")}:{String(recordingElapsed % 60).padStart(2, "0")}
+                      </span>
+                    </div>
+                  ) : (
                   <div className="flex-1 relative">
                     <textarea
                       ref={textareaRef}
@@ -3621,6 +4050,7 @@ const Chat = () => {
                       </span>
                     )}
                   </div>
+                  )}
 
                   {/* Notify toggle */}
                   {notifyDismissed && (
@@ -3640,7 +4070,7 @@ const Chat = () => {
                     </button>
                   )}
 
-                  {/* Voice wave button */}
+                  {/* Voice / Stop-recording button */}
                   <button
                     type="button"
                     onClick={handleVoiceClick}
@@ -3648,16 +4078,16 @@ const Chat = () => {
                     onMouseLeave={() => setIsHoveringVoice(false)}
                     disabled={voiceState === "transcribing" || isLoading}
                     className={[
-                      "h-8 w-8 shrink-0 flex items-center justify-center rounded-lg transition-colors mb-0.5 group",
+                      "h-8 w-8 shrink-0 flex items-center justify-center rounded-lg transition-colors group",
                       voiceState === "recording"
-                        ? "text-destructive animate-pulse"
+                        ? "text-destructive hover:text-destructive/80 hover:bg-destructive/10"
                         : voiceState === "transcribing"
                         ? "text-primary opacity-60 cursor-wait"
                         : "text-muted-foreground hover:text-primary",
                     ].join(" ")}
                     title={
                       voiceState === "recording"
-                        ? "Recording… click to stop"
+                        ? "Stop recording"
                         : voiceState === "transcribing"
                         ? "Transcribing…"
                         : "Voice message"
@@ -3665,20 +4095,21 @@ const Chat = () => {
                   >
                     {voiceState === "transcribing" ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : voiceState === "recording" ? (
+                      /* Stop icon — solid red square */
+                      <Square className="h-3.5 w-3.5 fill-current" />
                     ) : (
                       <svg width="22" height="18" viewBox="0 0 22 18" fill="none" xmlns="http://www.w3.org/2000/svg" className="overflow-visible">
                         {[
-                          { x: 1,  baseH: 4,  hoverH: 6,  recH: 6,  delay: "0ms"   },
-                          { x: 4,  baseH: 8,  hoverH: 14, recH: 16, delay: "60ms"  },
-                          { x: 7,  baseH: 12, hoverH: 18, recH: 18, delay: "120ms" },
-                          { x: 10, baseH: 16, hoverH: 18, recH: 18, delay: "180ms" },
-                          { x: 13, baseH: 12, hoverH: 18, recH: 18, delay: "120ms" },
-                          { x: 16, baseH: 8,  hoverH: 14, recH: 16, delay: "60ms"  },
-                          { x: 19, baseH: 4,  hoverH: 6,  recH: 6,  delay: "0ms"   },
+                          { x: 1,  baseH: 4,  hoverH: 6,  delay: "0ms"   },
+                          { x: 4,  baseH: 8,  hoverH: 14, delay: "60ms"  },
+                          { x: 7,  baseH: 12, hoverH: 18, delay: "120ms" },
+                          { x: 10, baseH: 16, hoverH: 18, delay: "180ms" },
+                          { x: 13, baseH: 12, hoverH: 18, delay: "120ms" },
+                          { x: 16, baseH: 8,  hoverH: 14, delay: "60ms"  },
+                          { x: 19, baseH: 4,  hoverH: 6,  delay: "0ms"   },
                         ].map((bar, i) => {
-                          const activeH = voiceState === "recording"
-                            ? bar.recH
-                            : isHoveringVoice ? bar.hoverH : bar.baseH;
+                          const activeH = isHoveringVoice ? bar.hoverH : bar.baseH;
                           return (
                             <rect
                               key={i}

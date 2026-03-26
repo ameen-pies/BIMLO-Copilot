@@ -2,20 +2,16 @@
 voice_transcriber.py — Voice-to-text transcription endpoint
 
 Accepts an audio blob (webm/ogg/mp4/wav) recorded in the browser,
-transcribes it via OpenAI Whisper (or falls back to the CF Worker if
-a Whisper-compatible endpoint is configured there), and returns the
-transcript as plain text so Chat.tsx can inject it into the input field
-exactly like a typed message.
+transcribes it via Groq's Whisper API (whisper-large-v3-turbo),
+and returns the transcript so Chat.tsx can inject it into the input field.
 
 Mount in your main FastAPI app:
-    from voice_transcriber import router as voice_router
+    from services.voice_transcriber import router as voice_router
     app.include_router(voice_router)
 
 Env vars:
-    OPENAI_API_KEY      — if set, Whisper API is used (best quality)
-    CF_API_KEY          — fallback: your existing CF Worker
-    CF_API_URL          — fallback CF Worker base URL
-    WHISPER_LANGUAGE    — optional ISO-639-1 code, e.g. "en" (default: auto-detect)
+    GROQ_API_KEY        — required, your Groq API key
+    WHISPER_LANGUAGE    — optional ISO-639-1 code e.g. "en" (default: auto-detect)
     MAX_AUDIO_MB        — reject uploads larger than this (default: 25)
 """
 
@@ -30,7 +26,6 @@ from typing import Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
 
-# ── Load .env (same pattern as suggest.py) ──────────────────────────────────
 try:
     from dotenv import load_dotenv
     _here = os.path.dirname(os.path.abspath(__file__))
@@ -47,13 +42,10 @@ except ImportError:
 # CONFIG
 # ────────────────────────────────────────────────────────────────────────────
 
-_OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
-_CF_API_KEY      = os.getenv("CF_API_KEY", "")
-_CF_API_URL      = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-_WHISPER_LANG    = os.getenv("WHISPER_LANGUAGE", "")          # "" = auto-detect
-_MAX_AUDIO_MB    = int(os.getenv("MAX_AUDIO_MB", "25"))
+_GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+_GROQ_MODEL   = "whisper-large-v3-turbo"   # fast + accurate, free tier friendly
+_MAX_AUDIO_MB = int(os.getenv("MAX_AUDIO_MB", "25"))
 
-# MIME types the browser's MediaRecorder API can produce
 _ALLOWED_MIME = {
     "audio/webm",
     "audio/ogg",
@@ -62,10 +54,9 @@ _ALLOWED_MIME = {
     "audio/wav",
     "audio/x-wav",
     "audio/x-m4a",
-    "video/webm",   # Chrome sometimes uses this for webm audio
+    "video/webm",
 }
 
-# Map MIME → file extension expected by Whisper
 _MIME_EXT = {
     "audio/webm":  "webm",
     "video/webm":  "webm",
@@ -83,114 +74,71 @@ _MIME_EXT = {
 # ────────────────────────────────────────────────────────────────────────────
 
 class TranscribeResponse(BaseModel):
-    transcript: str          # clean text ready to inject into the chat input
-    language:   str = ""     # detected language code, if available
-    duration_s: float = 0.0  # audio duration returned by Whisper, if available
-    backend:    str = ""     # "whisper" | "cf_worker" — for debugging
+    transcript: str
+    language:   str   = ""
+    duration_s: float = 0.0
+    backend:    str   = ""
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# WHISPER TRANSCRIPTION  (OpenAI API)
+# GROQ WHISPER TRANSCRIPTION
 # ────────────────────────────────────────────────────────────────────────────
 
-def _transcribe_whisper(audio_bytes: bytes, mime_type: str) -> Optional[TranscribeResponse]:
+def _transcribe_groq(audio_bytes: bytes, mime_type: str) -> Optional[TranscribeResponse]:
     """
-    Call OpenAI Whisper API with the raw audio bytes.
-    Returns None if the call fails so the caller can try the CF fallback.
+    Send audio to Groq's Whisper endpoint.
+    Groq's API is OpenAI-compatible — same multipart format, different base URL + key.
     """
-    api_key = os.getenv("OPENAI_API_KEY", "")
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    print(f"🔑 Groq Whisper: key present={bool(api_key)}, prefix={api_key[:8] if api_key else 'MISSING'}")
+
     if not api_key:
+        print("⚠️  Transcription skipped: GROQ_API_KEY not set")
         return None
 
     ext = _MIME_EXT.get(mime_type, "webm")
-    filename = f"recording.{ext}"
+    filename    = f"recording.{ext}"
+    upload_mime = f"audio/{ext}"   # strip codec suffix — Groq rejects "audio/webm;codecs=opus"
 
     files = {
-        "file": (filename, io.BytesIO(audio_bytes), mime_type),
+        "file": (filename, io.BytesIO(audio_bytes), upload_mime),
     }
     data: dict = {
-        "model": "whisper-1",
-        "response_format": "verbose_json",   # gives us language + duration
+        "model":           _GROQ_MODEL,
+        "response_format": "verbose_json",
     }
-    lang = os.getenv("WHISPER_LANGUAGE", "")
+    lang = os.getenv("WHISPER_LANGUAGE", "").strip()
     if lang:
         data["language"] = lang
 
     try:
         resp = requests.post(
-            "https://api.openai.com/v1/audio/transcriptions",
+            _GROQ_API_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files=files,
             data=data,
             timeout=30,
         )
+
         if resp.status_code == 200:
-            result = resp.json()
+            result     = resp.json()
             transcript = (result.get("text") or "").strip()
             if not transcript:
-                print("⚠️  Whisper returned empty transcript")
+                print("⚠️  Groq Whisper returned empty transcript")
                 return None
-            print(f"✅ Whisper transcript ({len(transcript)} chars): {transcript[:80]}…")
+            print(f"✅ Groq transcript ({len(transcript)} chars): {transcript[:80]}…")
             return TranscribeResponse(
                 transcript=transcript,
                 language=result.get("language", ""),
                 duration_s=float(result.get("duration", 0)),
-                backend="whisper",
+                backend="groq_whisper",
             )
         else:
-            print(f"⚠️  Whisper API error {resp.status_code}: {resp.text[:200]}")
+            print(f"⚠️  Groq Whisper error {resp.status_code}: {resp.text[:300]}")
             return None
+
     except Exception as e:
-        print(f"⚠️  Whisper request failed: {e}")
-        return None
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# CF WORKER FALLBACK  (mirrors pattern from suggest.py / rag_engine.py)
-# ────────────────────────────────────────────────────────────────────────────
-
-def _transcribe_cf(audio_bytes: bytes, mime_type: str) -> Optional[TranscribeResponse]:
-    """
-    Send audio to the CF Worker's /transcribe task.
-    The worker is expected to forward it to a Whisper-compatible model.
-    Returns None on failure.
-    """
-    cf_api_key = os.getenv("CF_API_KEY", "")
-    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-
-    if not cf_api_key:
-        print("⚠️  voice_transcriber: no CF_API_KEY set, cannot use CF fallback")
-        return None
-
-    ext = _MIME_EXT.get(mime_type, "webm")
-    filename = f"recording.{ext}"
-
-    try:
-        resp = requests.post(
-            cf_api_url,
-            headers={"Authorization": f"Bearer {cf_api_key}"},
-            files={"audio": (filename, io.BytesIO(audio_bytes), mime_type)},
-            data={"task": "transcribe", "language": os.getenv("WHISPER_LANGUAGE", "")},
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            result = resp.json()
-            transcript = (result.get("response") or result.get("transcript") or "").strip()
-            if not transcript:
-                print("⚠️  CF Worker returned empty transcript")
-                return None
-            print(f"✅ CF transcript ({len(transcript)} chars): {transcript[:80]}…")
-            return TranscribeResponse(
-                transcript=transcript,
-                language=result.get("language", ""),
-                duration_s=float(result.get("duration", 0)),
-                backend="cf_worker",
-            )
-        else:
-            print(f"⚠️  CF Worker transcribe error {resp.status_code}: {resp.text[:200]}")
-            return None
-    except Exception as e:
-        print(f"⚠️  CF Worker transcribe request failed: {e}")
+        print(f"⚠️  Groq Whisper request failed: {e}")
         return None
 
 
@@ -203,8 +151,8 @@ router = APIRouter()
 
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_audio(
-    audio: UploadFile = File(...),
-    mime_type: str    = Form("audio/webm"),  # sent by the frontend
+    audio:     UploadFile = File(...),
+    mime_type: str        = Form("audio/webm"),
 ) -> TranscribeResponse:
     """
     POST /transcribe
@@ -212,16 +160,10 @@ async def transcribe_audio(
       audio     — the recorded audio blob
       mime_type — MIME type string (e.g. "audio/webm;codecs=opus")
 
-    Returns: { "transcript": "...", "language": "en", "duration_s": 4.2, "backend": "whisper" }
-
-    Transcription priority:
-      1. OpenAI Whisper API  (if OPENAI_API_KEY is set)
-      2. CF Worker fallback  (if CF_API_KEY is set)
-      3. 503 if neither is available
+    Returns: { "transcript": "...", "language": "en", "duration_s": 4.2, "backend": "groq_whisper" }
     """
 
-    # ── Validate MIME ────────────────────────────────────────────────────────
-    # Strip codec suffix: "audio/webm;codecs=opus" → "audio/webm"
+    # Strip codec suffix: "audio/webm;codecs=opus" -> "audio/webm"
     base_mime = mime_type.split(";")[0].strip().lower()
     if base_mime not in _ALLOWED_MIME:
         raise HTTPException(
@@ -229,9 +171,8 @@ async def transcribe_audio(
             detail=f"Unsupported audio type '{base_mime}'. Allowed: {sorted(_ALLOWED_MIME)}",
         )
 
-    # ── Read & size-check ────────────────────────────────────────────────────
     audio_bytes = await audio.read()
-    max_bytes = _MAX_AUDIO_MB * 1024 * 1024
+    max_bytes   = _MAX_AUDIO_MB * 1024 * 1024
     if len(audio_bytes) > max_bytes:
         raise HTTPException(
             status_code=413,
@@ -243,15 +184,18 @@ async def transcribe_audio(
     print(f"🎙️  Received audio: {len(audio_bytes)} bytes, type: {base_mime}")
     t0 = time.time()
 
-    # ── Try backends in order ────────────────────────────────────────────────
-    result = _transcribe_whisper(audio_bytes, base_mime)
-    if result is None:
-        result = _transcribe_cf(audio_bytes, base_mime)
+    result = _transcribe_groq(audio_bytes, base_mime)
 
     if result is None:
+        key_set = bool(os.getenv("GROQ_API_KEY", "").strip())
         raise HTTPException(
             status_code=503,
-            detail="Transcription failed. Set OPENAI_API_KEY or ensure CF Worker is reachable.",
+            detail=(
+                "Transcription failed: GROQ_API_KEY is not set. "
+                "Add GROQ_API_KEY=your_key to your .env file and restart the server."
+                if not key_set else
+                "Transcription failed: Groq Whisper returned an error — check backend logs for details."
+            ),
         )
 
     print(f"⏱️  Transcription done in {time.time() - t0:.2f}s via {result.backend}")
