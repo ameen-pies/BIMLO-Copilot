@@ -17,6 +17,7 @@ from services.vector_store import VectorStoreManager
 from services.rag_engine import RAGEngine
 from services.suggest import router as suggest_router
 from services.voice_transcriber import router as voice_router
+from services.autocomplete import router as autocomplete_router
 
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
@@ -43,6 +44,7 @@ rag_engine    = RAGEngine(vector_store)
 
 app.include_router(suggest_router)
 app.include_router(voice_router)
+app.include_router(autocomplete_router)
 
 DATA_DIR    = os.getenv("DATA_DIR", "/home/claude/bimlo-copilot/data")
 UPLOAD_DIR  = os.path.join(DATA_DIR, "uploads")

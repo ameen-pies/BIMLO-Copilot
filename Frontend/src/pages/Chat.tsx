@@ -1469,27 +1469,31 @@ async function fetchAICompletion(
   typed: string,
   recentMessages: { role: string; content: string }[],
   apiBase: string,
+  availableDocs: string[] = [],
 ): Promise<string> {
   if (typed.trim().length < 4) return "";
+
+  // Use only the last assistant reply as context — keeps the prompt tiny for speed
+  const lastAssistant = [...recentMessages].reverse().find(m => m.role === "assistant");
+  const sessionContext = lastAssistant ? lastAssistant.content.slice(0, 300) : "";
+
   try {
     const res = await fetch(`${apiBase}/autocomplete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        partial: typed,
-        history: recentMessages.slice(-6).map(m => ({
-          role: m.role,
-          content: m.content.slice(0, 200),
-        })),
+        partial:         typed,
+        session_context: sessionContext,
+        available_docs:  availableDocs.slice(0, 8),
+        max_tokens:      28,
       }),
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return "";
     const data = await res.json();
-    const suffix = (data.suffix ?? "").trim();
-    // Sanity: reject if too long (> 80 chars) or empty
-    if (!suffix || suffix.length > 80) return "";
-    return suffix;
+    const completion = (data.completion ?? "").trim();
+    if (!completion || completion.length > 80) return "";
+    return completion;
   } catch {
     return "";
   }
@@ -2067,7 +2071,9 @@ function buildInitialCfg(raw: Record<string, any>, isDark: boolean): Record<stri
 
   const pl = cfg.options.plugins;
   pl.legend  = { ...(pl.legend ?? {}),  labels: { ...(pl.legend?.labels ?? {}), color: textColor, padding: 18, usePointStyle: true, pointStyleWidth: 10, font: { size: 12, weight: "500" } } };
-  pl.title   = { ...(pl.title  ?? {}),  display: true, color: textColor, font: { size: 14, weight: "600" }, padding: { bottom: 16 } };
+  // Disable canvas title — rendered as a React <span> above the canvas instead,
+  // so it automatically picks up Tailwind theme classes with no JS required.
+  pl.title   = { display: false };
   pl.tooltip = { ...(pl.tooltip ?? {}), backgroundColor: tooltipBg, titleColor: tooltipTxt, bodyColor: tooltipSub, borderColor: tooltipBrd, borderWidth: 1, padding: { x: 12, y: 10 }, cornerRadius: 10, boxPadding: 4 };
 
   const cbs = pl?.tooltip?.callbacks;
@@ -2131,22 +2137,24 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
     return () => { chartInstanceRef.current?.destroy(); chartInstanceRef.current = null; };
   }, [analytics]);
 
-  // Smooth theme update — no destroy, just patch + update("none")
+  // Smooth theme update — debounced via rAF so every ChartMessage on screen
+  // batches into a single paint frame instead of firing one-after-another.
+  // Root cause of the 2fps lag: N charts × synchronous update() calls.
   useEffect(() => {
+    let rafId = 0;
     const observer = new MutationObserver(mutations => {
-      for (const m of mutations) {
-        if (m.attributeName !== "class") continue;
+      if (!mutations.some(m => m.attributeName === "class")) return;
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
         const chart = chartInstanceRef.current;
-        if (!chart || !analytics.chart_js) break;
-        const isDark     = getIsDark();
-        // Swap the gradient plugin so it uses the new palette
+        if (!chart || !analytics.chart_js) return;
+        const isDark = getIsDark();
         chart.config.plugins = [makeGradientPlugin(analytics.chart_js!, isDark)];
         applyThemeToChart(chart, analytics.chart_js!, isDark);
-        break;
-      }
+      });
     });
-    observer.observe(document.documentElement, { attributes: true });
-    return () => observer.disconnect();
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
   }, [analytics]);
 
   if (analytics.type === "chart_error") {
@@ -2179,12 +2187,11 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
 
       {/* ── 2. Chart card ── */}
       <div className="flex flex-col gap-2">
+        {/* Title + action row — pure React DOM, so Tailwind theme classes apply automatically */}
         <div className="flex items-center gap-2">
-          {analytics.title && (
-            <span className="text-[12px] font-medium text-muted-foreground leading-snug flex-1 truncate">
-              {analytics.title}
-            </span>
-          )}
+          <span className="text-[13px] font-semibold text-foreground leading-snug flex-1 truncate">
+            {analytics.title || analytics.chart_js?.options?.plugins?.title?.text || ""}
+          </span>
           <div className="flex items-center gap-1.5 shrink-0 ml-auto">
             {analytics.sources && analytics.sources.length > 0 && (
               <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
@@ -3275,13 +3282,10 @@ const Chat = () => {
     if (trimmed.length >= 4 && !isLoading) {
       ghostDebounceRef.current = setTimeout(async () => {
         const base = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000";
-        const suffix = await fetchAICompletion(trimmed, messages, base);
-        // Only apply if the input hasn't changed since we fired the request
-        setWordSuffix(prev => {
-          // prev is always "" here (we cleared it above), so just set
-          return suffix;
-        });
-      }, 400);
+        const docNames = documents.map((d: { filename: string }) => d.filename);
+        const suffix = await fetchAICompletion(trimmed, messages, base, docNames);
+        setWordSuffix(suffix);
+      }, 280);
     }
   };
 
@@ -3318,12 +3322,16 @@ const Chat = () => {
         return;
       }
     }
-    // ── Word-completion: Tab accepts, Escape dismisses ──────────────────────
+    // ── Word-completion: Tab/→ accepts, Escape dismisses ──────────────────────
     if (wordSuffix) {
-      if (e.key === "Tab") {
+      if (e.key === "Tab" || e.key === "ArrowRight") {
         e.preventDefault();
         setInput(prev => prev + wordSuffix);
         setWordSuffix("");
+        requestAnimationFrame(() => {
+          const ta = textareaRef.current;
+          if (ta) { const end = ta.value.length; ta.setSelectionRange(end, end); }
+        });
         return;
       }
       if (e.key === "Escape") {
@@ -3331,8 +3339,10 @@ const Chat = () => {
         setWordSuffix("");
         return;
       }
-      // Any other key that doesn't continue the word clears the ghost
-      if (e.key === " " || e.key === "Enter" || e.key === "Backspace") {
+      // Any navigation or editing key clears the ghost
+      if (e.key === " " || e.key === "Enter" || e.key === "Backspace" ||
+          e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "ArrowDown" ||
+          e.key === "Home" || e.key === "End") {
         setWordSuffix("");
       }
     }
@@ -4465,17 +4475,17 @@ const Chat = () => {
           </div>
         </div>
 
-        {/* Notification permission pill */}
+        {/* Notification permission pill — floats above input bar */}
         <AnimatePresence>
           {showNotifyBanner && (
             <motion.div
-              initial={{ opacity: 0, y: 6, scale: 0.97 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 6, scale: 0.97 }}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.18 }}
-              className="flex justify-center pb-2"
+              className={`fixed left-0 right-0 flex justify-center z-50 pointer-events-none transition-all duration-200 ${suggestions.length > 0 || suggestionsLoading ? 'bottom-[160px]' : 'bottom-[125px]'}`}
             >
-              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-card shadow-sm text-xs text-muted-foreground">
+              <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
                 <Bell className="h-3 w-3 text-primary shrink-0" />
                 <span>Notify when done?</span>
                 <button
@@ -4506,7 +4516,7 @@ const Chat = () => {
         </AnimatePresence>
 
         {/* Input */}
-        <div className="border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
+        <div className="relative border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto">
 
             {/* ── Contextual suggestion chips ── */}
