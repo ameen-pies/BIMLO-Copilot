@@ -2340,6 +2340,7 @@ const Chat = () => {
   // ── Voice recording ───────────────────────────────────────────────────────
   type VoiceState = "idle" | "recording" | "transcribing";
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [showSilenceWarning, setShowSilenceWarning] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef   = useRef<Blob[]>([]);
   const recordingStartRef = useRef<number>(0);
@@ -2527,6 +2528,8 @@ const Chat = () => {
         const freqData = new Uint8Array(analyser.frequencyBinCount);
         waveformSamplesRef.current = [];
         let lastSampleTime = 0;
+        let lastHeardTime = performance.now();
+        let silenceToastShown = false;
 
         const tick = (timestamp: number) => {
           analyser.getByteFrequencyData(freqData);
@@ -2544,6 +2547,18 @@ const Chat = () => {
             lastSampleTime = timestamp;
             const avg = bars.reduce((s, v) => s + v, 0) / bars.length;
             waveformSamplesRef.current.push(avg);
+
+            // Silence detection — if avg amplitude above threshold, reset the clock
+            if (avg > 0.04) {
+              lastHeardTime = performance.now();
+              if (silenceToastShown) {
+                silenceToastShown = false;
+                setShowSilenceWarning(false);
+              }
+            } else if (!silenceToastShown && performance.now() - lastHeardTime > 3000) {
+              silenceToastShown = true;
+              setShowSilenceWarning(true);
+            }
           }
 
           animFrameRef.current = requestAnimationFrame(tick);
@@ -3181,6 +3196,7 @@ const Chat = () => {
 
     setOpenSourceKey(null);
     setSuggestions([]);
+    setShowSilenceWarning(false);
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -3920,7 +3936,26 @@ const Chat = () => {
           </div>
         </header>
 
-        {/* Messages */}
+        {/* Silence warning banner */}
+        <AnimatePresence>
+          {showSilenceWarning && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="fixed top-14 left-0 right-0 flex justify-center pt-2 z-50 pointer-events-none"
+            >
+              <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium shadow-sm">
+                <span>😢</span>
+                <span>We're having trouble hearing you — check your mic is connected and unmuted.</span>
+                <button onClick={() => setShowSilenceWarning(false)} className="ml-1 hover:text-red-300 transition-colors">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
         <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.map((msg) => (
@@ -4017,7 +4052,7 @@ const Chat = () => {
                   <div
                     className={`group/bubble relative px-4 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit"
+                        ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit break-words min-w-0 max-w-full"
                         : msg.interrupted
                           ? "px-3 py-2 bg-transparent border border-dashed border-muted-foreground/20 rounded-bl-md w-fit"
                           : msg.analytics?.type === "chart_clarification"
@@ -4483,7 +4518,7 @@ const Chat = () => {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
               transition={{ duration: 0.18 }}
-              className={`fixed left-0 right-0 flex justify-center z-50 pointer-events-none transition-all duration-200 ${suggestions.length > 0 || suggestionsLoading ? 'bottom-[160px]' : 'bottom-[125px]'}`}
+              className={`fixed left-0 right-0 flex justify-center z-50 pointer-events-none transition-all duration-200 ${suggestions.length > 0 || suggestionsLoading || isLoading ? 'bottom-[160px]' : 'bottom-[125px]'}`}
             >
               <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
                 <Bell className="h-3 w-3 text-primary shrink-0" />
