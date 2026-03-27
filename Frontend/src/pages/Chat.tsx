@@ -4514,11 +4514,15 @@ const Chat = () => {
         <AnimatePresence>
           {showNotifyBanner && (
             <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
+              initial={{ opacity: 0, y: 8, bottom: 125 }}
+              animate={{
+                opacity: 1,
+                y: 0,
+                bottom: suggestions.length > 0 || suggestionsLoading ? 160 : 125,
+              }}
               exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.18 }}
-              className={`fixed left-0 right-0 flex justify-center z-50 pointer-events-none transition-all duration-200 ${suggestions.length > 0 || suggestionsLoading || isLoading ? 'bottom-[160px]' : 'bottom-[125px]'}`}
+              transition={{ duration: 0.18, bottom: { duration: 0.22, ease: "easeInOut" } }}
+              className="fixed left-0 right-0 flex justify-center z-50 pointer-events-none"
             >
               <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
                 <Bell className="h-3 w-3 text-primary shrink-0" />
