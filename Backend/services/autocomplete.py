@@ -109,42 +109,27 @@ def _call_cf_autocomplete(
     max_tokens: int = 30,
 ) -> str:
     """
-    Hit the CF Worker synchronously — same pattern as suggest._call_cf().
-    Returns only the completion suffix (not the full string).
-    Empty string on any failure → frontend shows nothing, no error.
+    Call the LLM for inline autocomplete (CF primary, Groq fallback).
+    Returns only the completion suffix. Empty string on any failure.
     """
-    cf_api_key = os.getenv("CF_API_KEY", "").strip()
-    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+    from llm_client import call_llm
 
-    if not cf_api_key or len(partial.strip()) < 3:
+    if len(partial.strip()) < 3:
         return ""
 
     prompt = _build_prompt(partial, session_context, available_docs)
 
-    payload = {
-        "prompt":       prompt,
-        "systemPrompt": _SYSTEM,
-        "history":      [],
-        "max_tokens":   max_tokens,
-        "temperature":  0.0,        # deterministic = fastest + most predictable
-        "task":         "classify", # lightest CF task type → lowest latency
-    }
-    headers = {
-        "Authorization": f"Bearer {cf_api_key}",
-        "Content-Type":  "application/json",
-    }
-
-    try:
-        resp = requests.post(cf_api_url, headers=headers, json=payload, timeout=8)
-        if resp.status_code == 200:
-            raw = (resp.json().get("response") or "").strip()
-            return _clean_completion(raw, partial)
-        else:
-            print(f"⚠️  autocomplete: CF {resp.status_code}: {resp.text[:80]}")
-    except Exception as e:
-        print(f"⚠️  autocomplete: {e}")
-
-    return ""
+    raw = call_llm(
+        prompt=prompt,
+        system_prompt=_SYSTEM,
+        history=[],
+        max_tokens=max_tokens,
+        temperature=0.0,
+        task="classify",
+    )
+    if not raw:
+        return ""
+    return _clean_completion(raw.strip(), partial)
 
 
 def _clean_completion(raw: str, partial: str) -> str:

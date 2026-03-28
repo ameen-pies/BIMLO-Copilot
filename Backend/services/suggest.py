@@ -75,16 +75,10 @@ Return exactly this format:
 
 def _call_cf(user_query: str, assistant_reply: str, available_docs: List[str], max_retries: int = 2) -> List[str]:
     """
-    Hit the CF Worker with a suggestion prompt.
+    Call the LLM for suggestions (CF primary, Groq fallback via shared gateway).
     Returns contextual chips first, then general/cross-doc chips last.
     """
-    # Read at call time so .env is guaranteed loaded
-    cf_api_key = os.getenv("CF_API_KEY", "")
-    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-
-    if not cf_api_key:
-        print("⚠️  suggest: CF_API_KEY not set")
-        return []
+    from llm_client import call_llm
 
     docs_section = ""
     if available_docs:
@@ -98,41 +92,19 @@ def _call_cf(user_query: str, assistant_reply: str, available_docs: List[str], m
         f"Return ONLY the JSON object, nothing else."
     )
 
-    payload = {
-        "prompt":       prompt,
-        "systemPrompt": SYSTEM_PROMPT,
-        "history":      [],
-        "max_tokens":   150,
-        "temperature":  0.7,
-        "task":         "suggest",
-    }
-    headers = {
-        "Authorization": f"Bearer {cf_api_key}",
-        "Content-Type":  "application/json",
-    }
-
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(cf_api_url, headers=headers, json=payload, timeout=20)
-            if resp.status_code == 200:
-                data = resp.json()
-                raw = data.get("response") or ""
-                if isinstance(raw, list):
-                    # Already parsed as list — treat as flat suggestions
-                    return [str(s).strip()[:50] for s in raw if str(s).strip()][:5]
-                elif not isinstance(raw, str):
-                    raw = str(raw)
-                return _parse_suggestions(raw.strip())
-            elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"⚠️  suggest: CF returned {resp.status_code}: {resp.text[:120]}")
-                break
-        except Exception as e:
-            print(f"⚠️  suggest: request failed — {e}")
-            break
-
-    return []
+    raw = call_llm(
+        prompt=prompt,
+        system_prompt=SYSTEM_PROMPT,
+        history=[],
+        max_tokens=150,
+        temperature=0.7,
+        task="suggest",
+    )
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(s).strip()[:50] for s in raw if str(s).strip()][:5]
+    return _parse_suggestions(raw.strip())
 
 
 def _parse_suggestions(raw: str) -> List[str]:
@@ -225,13 +197,9 @@ class ExpandResponse(BaseModel):
 def _expand_cf(label: str, is_general: bool, last_user_query: str,
                last_ai_reply: str, available_docs: List[str]) -> str:
     """
-    Ask the CF worker to turn a short chip label into a full, polished prompt.
+    Turn a short chip label into a full, polished prompt via the LLM gateway.
     """
-    cf_api_key = os.getenv("CF_API_KEY", "")
-    cf_api_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-
-    if not cf_api_key:
-        return label
+    from llm_client import call_llm
 
     docs_hint = f"\nAvailable documents: {', '.join(available_docs[:8])}" if available_docs else ""
 
@@ -264,33 +232,23 @@ def _expand_cf(label: str, is_general: bool, last_user_query: str,
         "Output only the prompt text itself — no quotes, no explanation."
     )
 
-    payload = {
-        "prompt":       prompt,
-        "systemPrompt": system,
-        "history":      [],
-        "max_tokens":   80,
-        "temperature":  0.6,
-        "task":         "suggest",
-    }
-    headers = {
-        "Authorization": f"Bearer {cf_api_key}",
-        "Content-Type":  "application/json",
-    }
-
     try:
-        resp = requests.post(cf_api_url, headers=headers, json=payload, timeout=15)
-        if resp.status_code == 200:
-            raw = resp.json().get("response") or ""
-            if not isinstance(raw, str):
-                raw = str(raw)
-            expanded = raw.strip().strip('"').strip("'").strip()
-            # Sanity check — if model hallucinated something huge, fall back
+        expanded = call_llm(
+            prompt=prompt,
+            system_prompt=system,
+            history=[],
+            max_tokens=80,
+            temperature=0.6,
+            task="suggest",
+        )
+        if expanded:
+            expanded = expanded.strip().strip('"').strip("'").strip()
             if 5 < len(expanded) < 300:
                 return expanded
     except Exception as e:
         print(f"⚠️  expand-suggestion: {e}")
 
-    return label  # fallback to original label
+    return label
 
 
 @router.post("/expand-suggestion", response_model=ExpandResponse)

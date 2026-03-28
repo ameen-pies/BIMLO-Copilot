@@ -9,8 +9,10 @@ from dotenv import load_dotenv
 from collections import deque
 
 load_dotenv()
-print(f"🔑 GROQ_API_KEY loaded: {'Yes' if os.getenv('GROQ_API_KEY') else 'No'}")
-print(f"🔑 API Key (first 20 chars): {os.getenv('GROQ_API_KEY', 'NOT FOUND')[:20]}...")
+groq_ok = bool(os.getenv("GROQ_API_KEY"))
+cf_ok   = bool(os.getenv("CF_API_KEY"))
+print(f"🔑 Groq API: {'✅ configured' if groq_ok else '❌ missing GROQ_API_KEY'}")
+print(f"🔑 CF API:   {'✅ configured' if cf_ok   else '⚠️  missing CF_API_KEY (Groq-only mode)'}")
 
 from services.document_processor import DocumentProcessor
 from services.vector_store import VectorStoreManager
@@ -18,6 +20,12 @@ from services.rag_engine import RAGEngine
 from services.suggest import router as suggest_router
 from services.voice_transcriber import router as voice_router
 from services.autocomplete import router as autocomplete_router
+from services.report_agent import (
+    router as report_router,
+    SharedContext,
+)
+# SharedContext also exposes set_analytics — call it after every query
+# so the report agent can embed charts generated in analytics routes.
 
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
@@ -42,9 +50,14 @@ doc_processor = DocumentProcessor()
 vector_store  = VectorStoreManager()
 rag_engine    = RAGEngine(vector_store)
 
+# Give the report agent direct VS access for fallback retrieval when
+# SharedContext has no cached chunks for a session (e.g. timing race).
+SharedContext.set_vector_store(vector_store)
+
 app.include_router(suggest_router)
 app.include_router(voice_router)
 app.include_router(autocomplete_router)
+app.include_router(report_router)
 
 DATA_DIR    = os.getenv("DATA_DIR", "/home/claude/bimlo-copilot/data")
 UPLOAD_DIR  = os.path.join(DATA_DIR, "uploads")
@@ -197,11 +210,34 @@ async def query_documents(request: QueryRequest):
         # Store this turn in server-side history (clean, no [N] citation markers)
         import re as _re
         clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
-        append_turn(session_id, "user",      request.query)
-        append_turn(session_id, "assistant", clean_answer)
+        append_turn(session_id, "user", request.query)
+
+        if result.get("report_id") and result.get("report_title"):
+            from services.report_agent import _reports_store as _rs
+            _rpt = _rs.get(result["report_id"], {})
+            _content = _rpt.get("content") or ""
+            _source_docs = ", ".join(_rpt.get("source_docs") or []) or "unknown"
+            _word_count = len(_content.split())
+            _section_count = len(_re.findall(r'^#{1,2}\s', _content, _re.M))
+            _preview = _content[:400].strip()
+            memory_note = (
+                f"{clean_answer}\n\n"
+                f"[REPORT GENERATED]\n"
+                f"Title: {result['report_title']}\n"
+                f"Sources: {_source_docs}\n"
+                f"Size: {_section_count} sections, {_word_count} words\n"
+                f"Opening: {_preview}"
+            )
+            append_turn(session_id, "assistant", memory_note)
+        else:
+            append_turn(session_id, "assistant", clean_answer)
+
         if result.get("route"):
             _session_routes[session_id] = result["route"]
             log_route(session_id, result["route"], request.query)
+        # Keep ReportAgent in sync with latest history + retrieved chunks
+        SharedContext.set_history(session_id, get_history(session_id))
+        SharedContext.set_chunks(session_id, result.get("retrieved_chunks", []))
 
         print(f"✅ Done (route={result.get('route')}, confidence={result['confidence']})")
 
@@ -250,23 +286,52 @@ async def query_stream(request: QueryRequest):
                 route_log=route_log,
                 status_callback=status_callback,
                 force_route=request.force_route,
+                session_id=session_id,
             )
             # Persist session
             import re as _re
             clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
-            append_turn(session_id, "user",      request.query)
-            append_turn(session_id, "assistant", clean_answer)
+            append_turn(session_id, "user", request.query)
+
+            # If a report was generated, write a structured memory note into history
+            # so every future node (direct, rag, etc.) knows what was produced.
+            if result.get("report_id") and result.get("report_title"):
+                from services.report_agent import _reports_store as _rs
+                _rpt = _rs.get(result["report_id"], {})
+                _content = _rpt.get("content") or ""
+                _source_docs = ", ".join(_rpt.get("source_docs") or []) or "unknown"
+                _word_count = len(_content.split())
+                _section_count = len(_re.findall(r'^#{1,2}\s', _content, _re.M))
+                _preview = _content[:400].strip()
+                memory_note = (
+                    f"{clean_answer}\n\n"
+                    f"[REPORT GENERATED]\n"
+                    f"Title: {result['report_title']}\n"
+                    f"Sources: {_source_docs}\n"
+                    f"Size: {_section_count} sections, {_word_count} words\n"
+                    f"Opening: {_preview}"
+                )
+                append_turn(session_id, "assistant", memory_note)
+            else:
+                append_turn(session_id, "assistant", clean_answer)
+
             if result.get("route"):
                 _session_routes[session_id] = result["route"]
                 log_route(session_id, result["route"], request.query)
+            # Keep ReportAgent in sync with latest history + retrieved chunks
+            SharedContext.set_history(session_id, get_history(session_id))
+            SharedContext.set_chunks(session_id, result.get("retrieved_chunks", []))
+            SharedContext.set_analytics(session_id, result.get("analytics"))
             # Strip non-JSON-serializable debug fields before putting on queue
             safe_result = {
-                "answer":     result.get("answer", ""),
-                "raw_answer": result.get("raw_answer") or result.get("answer", ""),
-                "sources":    result.get("sources", []),
-                "confidence": result.get("confidence", 0.0),
-                "route":      result.get("route"),
-                "analytics":  result.get("analytics"),
+                "answer":       result.get("answer", ""),
+                "raw_answer":   result.get("raw_answer") or result.get("answer", ""),
+                "sources":      result.get("sources", []),
+                "confidence":   result.get("confidence", 0.0),
+                "route":        result.get("route"),
+                "analytics":    result.get("analytics"),
+                "report_id":    result.get("report_id"),
+                "report_title": result.get("report_title"),
             }
             q.put({"type": "result", "session_id": session_id, **safe_result})
         except Exception as e:
@@ -283,7 +348,7 @@ async def query_stream(request: QueryRequest):
         while True:
             # Poll queue without blocking the event loop
             try:
-                item = await loop.run_in_executor(None, lambda: q.get(timeout=60))
+                item = await loop.run_in_executor(None, lambda: q.get(timeout=300))
             except Exception:
                 break
             if item is DONE_SENTINEL:
@@ -306,6 +371,226 @@ async def clear_session(session_id: str):
     """Clear conversation history for a session (e.g. when user starts a new chat)."""
     clear_history(session_id)
     return {"status": "success", "message": f"Session {session_id} cleared"}
+
+
+
+@app.post("/title")
+async def generate_title(request: dict):
+    """
+    Generate a short, smart title for a conversation or report.
+    Body: { "type": "chat" | "report", "text": "...", "messages": [...] }
+    Returns: { "title": "..." }
+    """
+    from llm_client import call_llm
+
+    title_type = request.get("type", "chat")
+    text       = (request.get("text") or "").strip()
+    messages   = request.get("messages", [])
+
+    if title_type == "chat":
+        # Build a short excerpt from the first few messages
+        excerpt = "\n".join(
+            f"{'User' if m.get('role') == 'user' else 'Assistant'}: {str(m.get('content', ''))[:150]}"
+            for m in messages[:6]
+        )
+        system = (
+            "You generate ultra-short conversation titles. "
+            "Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end. "
+            "Capture the TOPIC or ACTION — not the phrasing. "
+            "Good: 'Telecom Site Survey Analysis', 'Network Coverage Question', 'Hello and Greeting', 'Revenue Chart Request'. "
+            "Bad: 'Make me a report on', 'What is the', 'User asked about'. "
+            "Reply with ONLY the title, nothing else."
+        )
+        prompt = f"Conversation:\n{excerpt}\n\nTitle:"
+    else:
+        # Report title
+        system = (
+            "You generate short, specific report titles. "
+            "Rules: 4-8 words, Title Case, NO quotes, NO punctuation at the end. "
+            "Must name the real subject/entity/metric — never start with 'Report', 'Analysis', 'Summary'. "
+            "Good: 'Telecom Site Survey Field Results', 'Network Infrastructure Cost Breakdown', 'Q3 Revenue by Region'. "
+            "Bad: 'Report on telecom_site_survey.txt', 'Analysis of the document', 'Summary Report'. "
+            "Reply with ONLY the title, nothing else."
+        )
+        prompt = f"Report request: \"{text}\"\n\nTitle:"
+
+    try:
+        raw = call_llm(prompt, system_prompt=system, max_tokens=30, temperature=0.3, task="classify")
+        title = raw.strip().strip('"').strip("'").strip()
+        if not title or len(title) > 100:
+            raise ValueError("bad title")
+        return {"title": title}
+    except Exception as e:
+        print(f"⚠️  /title error: {e}")
+        return {"title": ""}
+
+
+@app.post("/intent/report")
+async def report_intent_check(request: dict):
+    """
+    Smart intent check — returns {wants_report: bool, explicit_docs: [str]}.
+
+    Detection is a 3-layer pipeline:
+      Layer 1 — Instant regex (zero latency, catches obvious patterns)
+      Layer 2 — LLM classifier with robust JSON parsing
+      Layer 3 — Keyword fallback (catches any LLM parse failures)
+
+    Extracts explicit doc mentions so the report agent can target those files.
+    """
+    from llm_client import call_llm
+    import re as _re
+    import json as _json
+    import ast as _ast
+
+    text = (request.get("text") or "").strip()
+    if not text:
+        return {"wants_report": False, "explicit_docs": []}
+
+    available_docs: List[str] = request.get("available_docs", [])
+
+    # ── Layer 1: Instant regex fast-path ─────────────────────────────────────
+    # Catches the most common patterns across EN/FR without any LLM call.
+    # If this fires we still call the LLM — but only for file extraction,
+    # skipping the wants_report classification entirely.
+    REPORT_RE = _re.compile(
+        r'\b(?:'
+        # English: action + report
+        r'(?:make|create|generate|write|build|produce|prepare|draft|do|give\s+me|get\s+me)'
+        r'\s+(?:me\s+)?(?:a\s+|an\s+)?(?:full\s+|detailed\s+|brief\s+)?report'
+        r'|report\s+(?:on|about|for|regarding|from)'
+        r'|(?:make|create|generate|write|do)\s+(?:me\s+)?(?:a\s+)?(?:summary\s+)?document'
+        r'|generate\s+(?:a\s+)?(?:pdf|word\s+doc|summary\s+report)'
+        r'|download\s+(?:a\s+)?report'
+        # French
+        r'|rapport\s+sur'
+        r'|fais?\s+(?:moi\s+)?(?:un\s+)?rapport'
+        r'|cr[eé]e?\s+(?:un\s+)?rapport'
+        r'|g[eé]n[eè]re?\s+(?:un\s+)?rapport'
+        r')',
+        _re.IGNORECASE,
+    )
+    regex_hit = bool(REPORT_RE.search(text))
+
+    # ── Layer 2: LLM classifier ───────────────────────────────────────────────
+    def _resolve_docs(mentioned: list) -> list:
+        """Match partial doc mentions against available_docs."""
+        explicit: list = []
+        for mention in (mentioned or []):
+            ml = mention.lower().strip()
+            if not ml:
+                continue
+            for doc in available_docs:
+                dl = doc.lower()
+                if ml in dl or dl in ml or _re.search(_re.escape(ml), dl):
+                    if doc not in explicit:
+                        explicit.append(doc)
+        return explicit
+
+    def _parse_llm_json(raw: str) -> Optional[dict]:
+        """Robustly extract JSON from LLM response (fences, single quotes, etc.)."""
+        if not raw:
+            return None
+        clean = _re.sub(r"```(?:json)?|```", "", raw).strip()
+
+        # Try standard JSON
+        try:
+            result = _json.loads(clean)
+            if isinstance(result, dict):
+                return result
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+        # Try extracting first {...} block (LLM sometimes adds preamble)
+        m = _re.search(r'\{[\s\S]*?\}', clean)
+        if m:
+            try:
+                result = _json.loads(m.group(0))
+                if isinstance(result, dict):
+                    return result
+            except Exception:
+                pass
+
+        # Try Python repr (single quotes, True/False/None)
+        try:
+            result = _ast.literal_eval(clean)
+            if isinstance(result, dict):
+                return result
+        except (ValueError, SyntaxError):
+            pass
+
+        return None
+
+    try:
+        system = (
+            "You are an intent and entity classifier for a document Q&A assistant. "
+            "Reply with ONLY a raw JSON object — no markdown fences, no explanation whatsoever. "
+            'Exact format: {"wants_report": true, "mentioned_files": ["filename.pdf"]} '
+            "Set wants_report=true ONLY when the user explicitly asks for a report, document, "
+            "summary document, or structured written output to download or read later. "
+            "TRUE examples: 'make a report on X', 'generate a report about X', "
+            "'create a PDF report', 'write a document summarising Y', 'do a report on file Z'. "
+            "FALSE examples: plain questions, 'what is X?', 'show me a chart', 'summarise this' "
+            "(quick summary, not a standalone document). "
+            "mentioned_files: list any filenames or file references the user typed. "
+            "Use partial names too (e.g. 'survey' if they said 'the survey file'). "
+            "Return [] if no files mentioned."
+        )
+        doc_list = ", ".join(available_docs[:15]) if available_docs else "(none uploaded)"
+        prompt = (
+            f"Available documents: {doc_list}\n\n"
+            f'User message: """{text}"""'
+        )
+
+        raw_answer = call_llm(
+            prompt=prompt,
+            system_prompt=system,
+            max_tokens=150,
+            temperature=0.0,
+            task="classify",
+        )
+
+        parsed = _parse_llm_json(raw_answer)
+
+        if isinstance(parsed, dict):
+            # If regex already confirmed a report request, trust it over LLM
+            wants = bool(parsed.get("wants_report", False)) or regex_hit
+            explicit_docs = _resolve_docs(parsed.get("mentioned_files", []))
+            print(
+                f"📋 intent/report → {'✅ YES' if wants else '❌ NO '} "
+                f"[regex={'hit' if regex_hit else 'miss'}, llm={parsed.get('wants_report')}] "
+                f"| files={explicit_docs} | '{text[:60]}'"
+            )
+            return {"wants_report": wants, "explicit_docs": explicit_docs}
+
+        # ── Layer 3: Keyword fallback (LLM parse failed) ──────────────────────
+        # At this point regex_hit is the most reliable signal.
+        if regex_hit:
+            # Still try to extract file mentions from the raw answer or the message
+            # by matching available_docs directly against the user text
+            explicit_docs = _resolve_docs(
+                [w for w in _re.split(r'[\s,]+', text) if len(w) > 3]
+            )
+            print(
+                f"📋 intent/report → ✅ YES [regex=hit, llm-parse-failed] "
+                f"| files={explicit_docs} | '{text[:60]}'"
+            )
+            return {"wants_report": True, "explicit_docs": explicit_docs}
+
+        # Also check raw_answer for any YES-like word before giving up
+        wants_from_text = bool(_re.search(
+            r'\b(?:true|yes|oui|report|document)\b', (raw_answer or ""), _re.I
+        ))
+        print(
+            f"📋 intent/report → {'✅ YES' if wants_from_text else '❌ NO '} "
+            f"[regex=miss, llm-parse-failed, text-scan={'hit' if wants_from_text else 'miss'}] "
+            f"| '{text[:60]}'"
+        )
+        return {"wants_report": wants_from_text, "explicit_docs": []}
+
+    except Exception as e:
+        # Even on total failure, honour the regex hit
+        print(f"⚠️  intent check error: {e} — regex fallback: {regex_hit}")
+        return {"wants_report": regex_hit, "explicit_docs": []}
 
 
 @app.post("/generate-report")

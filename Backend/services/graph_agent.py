@@ -133,41 +133,21 @@ def is_graph_request(query: str) -> bool:
 def _call_llm(
     prompt: str,
     system_prompt: str,
-    api_key: str,
-    base_url: str,
+    api_key: str,       # kept for signature compatibility — routing handled inside call_llm
+    base_url: str,      # kept for signature compatibility
     max_tokens: int = 1200,
     temperature: float = 0.0,
     task: str = "plan",
 ) -> str:
-    payload = {
-        "prompt":       prompt,
-        "systemPrompt": system_prompt,
-        "history":      [],
-        "max_tokens":   max_tokens,
-        "temperature":  temperature,
-        "task":         task,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type":  "application/json",
-    }
-    for attempt in range(3):
-        try:
-            resp = requests.post(base_url, headers=headers, json=payload, timeout=45)
-            if resp.status_code == 200:
-                raw = resp.json().get("response") or ""
-                return raw if isinstance(raw, str) else str(raw)
-            elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"   ⚠️  GraphAgent LLM {resp.status_code}: {resp.text[:120]}")
-                return ""
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                print(f"   ⚠️  GraphAgent LLM failed: {e}")
-    return ""
+    from llm_client import call_llm
+    return call_llm(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        history=[],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        task=task,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────

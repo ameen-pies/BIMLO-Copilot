@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -31,6 +31,10 @@ interface Message {
   voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
   interrupted?: true;       // response was stopped mid-generation
   analytics?: Record<string, any> | null;  // chart_config or chart_error from graph_node
+  reportId?: string | null;                // report card rendered below the response
+  reportTitle?: string | null;             // title from SSE event — no fetch needed
+  reportMeta?: { word_count: number; section_count: number; source_docs: string[]; version: number } | null;
+  reportGenerating?: boolean;              // true while the report is being created
 }
 
 interface Conversation {
@@ -39,6 +43,39 @@ interface Conversation {
   preview: string;
   timestamp: Date;
   messages: Message[];
+}
+
+// ---------------------------------------------------------------------------
+// Report types
+// ---------------------------------------------------------------------------
+
+interface ChartRecord {
+  section_id:     string;
+  chart_id:       string;
+  chart_js:       Record<string, unknown>;
+  title:          string;
+  description:    string;
+  interpretation: string;
+}
+
+interface VersionInfo {
+  version:     number;
+  title:       string;
+  instruction: string;
+  created_at:  string;
+}
+
+interface ReportRecord {
+  report_id:   string;
+  title:       string;
+  content:     string;
+  summary?:    string;   // conversational summary returned by the agent
+  charts:      ChartRecord[];
+  source_docs: string[];
+  created_at:  string;
+  updated_at:  string;
+  version:     number;
+  versions:    VersionInfo[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2299,6 +2336,9 @@ const Chat = () => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string>("default");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  // Keep ref in sync so async callbacks always read the latest value
+  useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
@@ -2307,6 +2347,24 @@ const Chat = () => {
   const [convsPanelOpen, setConvsPanelOpen] = useState(false);
   const convsPanelOpenRef = useRef(false);
   convsPanelOpenRef.current = convsPanelOpen;
+  const [reportsPanelOpen, setReportsPanelOpen] = useState(false);
+  const reportsPanelOpenRef = useRef(false);
+  reportsPanelOpenRef.current = reportsPanelOpen;
+  const [reports, setReports] = useState<ReportRecord[]>([]);
+  const [activeReport, setActiveReport] = useState<ReportRecord | null>(null);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [isPatchingReport, setIsPatchingReport] = useState(false);
+  const [reportEditInstruction, setReportEditInstruction] = useState("");
+  const [reportEditMode, setReportEditMode] = useState(false);
+  const [downloadingReportId, setDownloadingReportId] = useState<string | null>(null);
+  const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
+  const reportsPanelRef = useRef<HTMLDivElement>(null);
+  // Version history
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const [restoringVersion, setRestoringVersion] = useState<number | null>(null);
+  // Previewed version content — null means show the live activeReport content
+  const [previewedVersion, setPreviewedVersion] = useState<{ version: number; content: string; charts: ChartRecord[]; title: string } | null>(null);
+  const reportEditInputRef = useRef<HTMLTextAreaElement>(null);
   const [bubbleDoc, setBubbleDoc] = useState<Document | null>(null);
   const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
   const bubbleViewerRef = useRef<ViewerState | null>(null);
@@ -2333,6 +2391,8 @@ const Chat = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputAreaRef = useRef<HTMLDivElement>(null);
+  const [notifyBottomOffset, setNotifyBottomOffset] = useState(125);
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
 
   const { toast } = useToast();
@@ -2686,6 +2746,46 @@ const Chat = () => {
   const getApiBase = () =>
     ((typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000");
 
+  /**
+   * After the first assistant reply, call the backend /title endpoint to get a
+   * short, specific conversation title and update the sidebar entry.
+   * Fires once per conversation (only while title still looks auto-generated).
+   */
+  const generateSmartTitle = useCallback(async (
+    convId: string,
+    messages: Message[],
+    currentTitle: string,
+  ) => {
+    const userMsgs = messages.filter(m => m.role === "user");
+    if (userMsgs.length < 1) return;
+    const firstUserText = userMsgs[0]?.content ?? "";
+    // Re-title whenever the title still looks like a raw first-message slice
+    // (either exact match or truncated version). Be permissive — smart titles
+    // are cheap and always better than raw user phrasing.
+    const norm = (s: string) => s.trim().toLowerCase().replace(/…$/, "").slice(0, 50);
+    const looksRaw = norm(currentTitle) === norm(firstUserText);
+    if (!looksRaw) return;
+
+    try {
+      const res = await fetch(`${getApiBase()}/title`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "chat",
+          messages: messages.slice(0, 6).map(m => ({ role: m.role, content: m.content.slice(0, 150) })),
+        }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const smartTitle = (data.title ?? "").trim();
+      if (!smartTitle || smartTitle.length > 80) return;
+      setConversations(convs => convs.map(c => c.id === convId ? { ...c, title: smartTitle } : c));
+    } catch {
+      // Silent fail — title stays as-is
+    }
+  }, []);
+
   // Fetch a raw file from the backend and cache it as a blob URL
   const fetchBlobUrl = async (doc: Document): Promise<{ url: string; type: "pdf" | "image" | "txt" }> => {
     const cached = blobUrlMapRef.current.get(doc.document_id);
@@ -2876,6 +2976,17 @@ const Chat = () => {
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [input]);
 
+  // Track input area height so notify banner floats the right distance above it
+  useEffect(() => {
+    const el = inputAreaRef.current;
+    if (!el) return;
+    const update = () => setNotifyBottomOffset(el.offsetHeight + 8);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [suggestions, suggestionsLoading]);
+
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -2915,9 +3026,31 @@ const Chat = () => {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  // Close reports panel when clicking outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!reportsPanelOpenRef.current) return;
+      const target = e.target as HTMLElement;
+      if (!target.closest("[data-reports-panel]")) {
+        reportsPanelOpenRef.current = false;
+        setReportsPanelOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // Focus report edit textarea when edit mode opens
+  useEffect(() => {
+    if (reportEditMode && reportEditInputRef.current) {
+      reportEditInputRef.current.focus();
+    }
+  }, [reportEditMode]);
+
   // Load documents on mount
   useEffect(() => {
     loadDocuments();
+    loadReports();
   }, []);
 
   // ==========================================================================
@@ -2936,6 +3069,379 @@ const Chat = () => {
         variant: "destructive",
       });
     }
+  };
+
+  // ==========================================================================
+  // REPORT MANAGEMENT
+  // ==========================================================================
+
+  const loadReports = async () => {
+    try {
+      const base = getApiBase();
+      const res = await fetch(`${base}/reports`);
+      if (res.ok) {
+        const data: ReportRecord[] = await res.json();
+        setReports(data);
+      }
+    } catch (err) {
+      console.error("Failed to load reports:", err);
+    }
+  };
+
+  const handleGenerateReport = async (prompt: string, sid?: string, explicitDocs: string[] = []) => {
+    const resolvedSid = sid || sessionIdRef.current || sessionId;
+    if (!resolvedSid || isGeneratingReport) return;
+    setIsGeneratingReport(true);
+
+    // Show loading skeleton on the last assistant message immediately
+    setMessages(prev => {
+      const msgs = [...prev];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === "assistant") {
+          msgs[i] = { ...msgs[i], reportGenerating: true, reportId: null };
+          break;
+        }
+      }
+      return msgs;
+    });
+
+    try {
+      const base = getApiBase();
+      const res = await fetch(`${base}/reports`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          session_id:     resolvedSid,
+          available_docs: documents.map(d => d.filename),
+          explicit_docs:  explicitDocs,
+          include_charts: true,
+          language:       "en",
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const report: ReportRecord = await res.json();
+      setReports(prev => [report, ...prev]);
+      setActiveReport(report);
+      reportsPanelOpenRef.current = true;
+      setReportsPanelOpen(true);
+      // Replace the last assistant message content with the agent's summary,
+      // then attach the reportId so the card renders below it.
+      const summaryText = report.summary?.trim()
+        || `The report "${report.title}" has been generated with ${(report.content.match(/^#{1,2}\s/gm) || []).length} sections.`;
+      setMessages(prev => {
+        const msgs = [...prev];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === "assistant") {
+            msgs[i] = {
+              ...msgs[i],
+              content:          summaryText,
+              rawAnswer:        summaryText,
+              reportId:         report.report_id,
+              reportGenerating: false,
+            };
+            break;
+          }
+        }
+        setConversations(convs => convs.map(conv => {
+          if (conv.id !== activeConvId) return conv;
+          return { ...conv, messages: msgs };
+        }));
+        return msgs;
+      });
+      toast({ title: "Report ready", description: report.title });
+    } catch (err) {
+      // Clear the loading skeleton on failure
+      setMessages(prev => {
+        const msgs = [...prev];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === "assistant") {
+            msgs[i] = { ...msgs[i], reportGenerating: false };
+            break;
+          }
+        }
+        return msgs;
+      });
+      console.error("Report generation failed:", err);
+      toast({ title: "Report generation failed", description: serializeError(err), variant: "destructive" });
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  };
+
+  const handlePatchReport = async () => {
+    if (!activeReport || !reportEditInstruction.trim() || isPatchingReport) return;
+    setIsPatchingReport(true);
+    try {
+      const base = getApiBase();
+      const res = await fetch(`${base}/reports/${activeReport.report_id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: reportEditInstruction.trim(),
+          session_id:  sessionId ?? "",
+          language:    "en",
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const updated: ReportRecord = await res.json();
+      setActiveReport(updated);
+      setReports(prev => prev.map(r => r.report_id === updated.report_id ? updated : r));
+      setReportEditInstruction("");
+      setReportEditMode(false);
+      toast({ title: "Report updated", description: `v${updated.version}` });
+    } catch (err) {
+      console.error("Patch failed:", err);
+      toast({ title: "Edit failed", description: serializeError(err), variant: "destructive" });
+    } finally {
+      setIsPatchingReport(false);
+    }
+  };
+
+  const handleDeleteReport = async (reportId: string) => {
+    setDeletingReportId(reportId);
+    try {
+      const base = getApiBase();
+      await fetch(`${base}/reports/${reportId}`, { method: "DELETE" });
+      setReports(prev => prev.filter(r => r.report_id !== reportId));
+      if (activeReport?.report_id === reportId) {
+        setActiveReport(null);
+        setReportEditMode(false);
+      }
+    } catch (err) {
+      console.error("Delete failed:", err);
+    } finally {
+      setDeletingReportId(null);
+    }
+  };
+
+  const handleDownloadReport = async (report: ReportRecord, fmt: "pdf" | "md" = "pdf") => {
+    setDownloadingReportId(report.report_id);
+    try {
+      const base = getApiBase();
+      const res = await fetch(`${base}/reports/${report.report_id}/download?fmt=${fmt}`);
+      if (!res.ok) throw new Error("Download failed");
+      const blob     = await res.blob();
+      const url      = URL.createObjectURL(blob);
+      const a        = document.createElement("a");
+      a.href         = url;
+      const safeName = report.title.replace(/\s+/g, "_").slice(0, 40);
+      // If server fell back from pdf to md (Content-Type check)
+      const ct       = res.headers.get("Content-Type") ?? "";
+      const ext      = ct.includes("pdf") ? "pdf" : ct.includes("markdown") ? "md" : fmt;
+      a.download     = `${safeName}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast({ title: "Download failed", description: serializeError(err), variant: "destructive" });
+    } finally {
+      setDownloadingReportId(null);
+    }
+  };
+
+  const handleRestoreVersion = async (report: ReportRecord, version: number) => {
+    setRestoringVersion(version);
+    try {
+      const base = getApiBase();
+      const res  = await fetch(`${base}/reports/${report.report_id}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version }),
+      });
+      if (!res.ok) throw new Error("Restore failed");
+      const updated: ReportRecord = await res.json();
+      setActiveReport(updated);
+      setReports(prev => prev.map(r => r.report_id === updated.report_id ? updated : r));
+      setShowVersionHistory(false);
+      toast({ title: `Restored to v${version}`, description: `Now at v${updated.version}` });
+    } catch (err) {
+      toast({ title: "Restore failed", description: serializeError(err), variant: "destructive" });
+    } finally {
+      setRestoringVersion(null);
+    }
+  };
+
+  // ── ReportCard — compact single-row card rendered below the assistant bubble ──
+  // Accepts either a full ReportRecord OR inline SSE data (title + meta) so it
+  // never needs to wait on a secondary fetch or React state propagation.
+  const ReportCard = ({
+    report,
+    inlineTitle,
+    inlineMeta,
+    isLoading: cardLoading = false,
+  }: {
+    report: ReportRecord | null;
+    inlineTitle?: string | null;
+    inlineMeta?: { word_count: number; section_count: number; source_docs: string[]; version: number } | null;
+    isLoading?: boolean;
+  }) => {
+    const isDownloading = report ? downloadingReportId === report.report_id : false;
+
+    // Resolve display values — prefer full report, fall back to inline SSE data
+    const title        = report?.title ?? inlineTitle ?? null;
+    const wordCount    = report ? report.content.split(/\s+/).length : (inlineMeta?.word_count ?? 0);
+    const sectionCount = report ? (report.content.match(/^#{1,2}\s/gm) || []).length : (inlineMeta?.section_count ?? 0);
+    const sourceDocs   = report?.source_docs ?? inlineMeta?.source_docs ?? [];
+    const version      = report?.version ?? inlineMeta?.version ?? 1;
+
+    // Show spinner only if we have no title at all yet (truly still building)
+    if (cardLoading && !title) {
+      return (
+        <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg border border-border bg-muted/30">
+          <Loader2 className="h-3.5 w-3.5 text-primary animate-spin shrink-0" />
+          <span className="text-xs text-muted-foreground italic">Building report…</span>
+        </div>
+      );
+    }
+
+    // We have at least a title — render the card (download may be disabled until report is ready)
+    return (
+      <div className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border bg-muted/20 hover:bg-muted/40 hover:border-primary/30 transition-all duration-150 group">
+        <ScrollText className="h-5 w-5 text-primary/70 shrink-0" />
+
+        {/* Title + meta — click to open panel */}
+        <div
+          className="flex-1 min-w-0 cursor-pointer"
+          onClick={async () => {
+            if (report) {
+              setActiveReport(report);
+            } else if (inlineTitle) {
+              // Report not in state yet — try fetching by ID when user clicks
+              const fullReport = reports.find(r => r.title === inlineTitle) ?? null;
+              if (fullReport) setActiveReport(fullReport);
+            }
+            reportsPanelOpenRef.current = true;
+            setReportsPanelOpen(true);
+          }}
+        >
+          <span className="text-sm font-semibold text-foreground truncate block group-hover:text-primary transition-colors">
+            {title}
+          </span>
+          <span className="text-xs text-muted-foreground/70 mt-0.5 block">
+            {sectionCount > 0 && `${sectionCount} sections · `}{wordCount > 0 ? `${wordCount.toLocaleString()} words` : ""}
+            {version > 1 && ` · v${version}`}
+            {sourceDocs.length > 0 && ` · ${sourceDocs.length} source${sourceDocs.length === 1 ? "" : "s"}`}
+          </span>
+        </div>
+
+        {/* Download buttons — only enabled once we have the full report object */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors disabled:opacity-40"
+            onClick={e => { e.stopPropagation(); if (report) handleDownloadReport(report, "md"); }}
+            disabled={!report || isDownloading}
+            title={report ? "Download Markdown" : "Report loading…"}
+          >
+            MD
+          </button>
+          <button
+            className="text-xs font-medium text-primary hover:text-primary/70 px-2 py-1 rounded transition-colors disabled:opacity-40 flex items-center gap-1"
+            onClick={e => { e.stopPropagation(); if (report) handleDownloadReport(report, "pdf"); }}
+            disabled={!report || isDownloading}
+            title={report ? "Download PDF" : "Report loading…"}
+          >
+            {isDownloading && <Loader2 className="h-3 w-3 animate-spin" />}
+            PDF
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ── AssistantContent — renders main markdown response, strips legacy report markers ──
+  const AssistantContent = ({
+    raw, msgId, sources, onSourceClick,
+  }: {
+    raw: string;
+    msgId: string;
+    sources: Source[] | undefined;
+    onSourceClick: (n: number, id: string) => void;
+  }) => {
+    const cleanRaw = raw.replace(/__REPORT_CARD__:[a-zA-Z0-9_-]+/g, "").trim();
+    return (
+      <div className="leading-relaxed">
+        {renderContent(cleanRaw, msgId, sources, onSourceClick)}
+      </div>
+    );
+  };
+
+  // Inline chart renderer — draws a Chart.js chart into a canvas
+  const ReportInlineChart = ({ chart }: { chart: ChartRecord }) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const chartRef  = useRef<any>(null);
+    useEffect(() => {
+      if (!canvasRef.current) return;
+      const win = window as any;
+      if (!win.Chart) return;
+      if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
+      try {
+        const config = JSON.parse(JSON.stringify(chart.chart_js));
+        chartRef.current = new win.Chart(canvasRef.current, config);
+      } catch (e) { console.error("Report chart render error:", e); }
+      return () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; } };
+    }, [chart.chart_id]);
+    return (
+      <div className="my-4 rounded-xl border border-border bg-muted/30 p-4">
+        <p className="text-xs font-semibold text-foreground mb-3">{chart.title}</p>
+        <div style={{ position: "relative", height: 200 }}>
+          <canvas ref={canvasRef} />
+        </div>
+        {chart.interpretation && (
+          <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed italic">{chart.interpretation}</p>
+        )}
+      </div>
+    );
+  };
+
+  // Render report markdown content, injecting charts at placeholder positions
+  const renderReportContent = (record: ReportRecord) => {
+    const chartMap: Record<string, ChartRecord> = {};
+    for (const c of (record.charts ?? [])) chartMap[c.chart_id] = c;
+    const CHART_RE = /<!-- CHART:([a-zA-Z0-9_-]+) -->/g;
+    const segments: Array<{ type: "text" | "chart"; value: string }> = [];
+    let last = 0; let m: RegExpExecArray | null;
+    const content = record.content;
+    while ((m = CHART_RE.exec(content)) !== null) {
+      if (m.index > last) segments.push({ type: "text", value: content.slice(last, m.index) });
+      segments.push({ type: "chart", value: m[1] });
+      last = m.index + m[0].length;
+    }
+    if (last < content.length) segments.push({ type: "text", value: content.slice(last) });
+
+    return segments.map((seg, i) => {
+      if (seg.type === "chart") {
+        const chart = chartMap[seg.value];
+        return chart ? <ReportInlineChart key={`rc-${i}`} chart={chart} /> : null;
+      }
+      return (
+        <ReactMarkdown
+          key={`rm-${i}`}
+          remarkPlugins={[remarkGfm]}
+          components={{
+            h1: ({ children }) => <h1 className="text-base font-bold mt-5 mb-2 text-foreground">{children}</h1>,
+            h2: ({ children }) => <h2 className="text-sm font-bold mt-4 mb-1.5 text-foreground border-b border-border pb-1">{children}</h2>,
+            h3: ({ children }) => <h3 className="text-sm font-semibold mt-3 mb-1 text-foreground">{children}</h3>,
+            p: ({ children }) => <p className="mb-2 text-foreground/90 leading-relaxed text-xs">{children}</p>,
+            ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5 text-foreground/90 text-xs">{children}</ul>,
+            ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5 text-foreground/90 text-xs">{children}</ol>,
+            li: ({ children }) => <li className="ml-2">{children}</li>,
+            strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
+            em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
+            hr: () => <hr className="border-border my-4" />,
+            blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground my-2 text-xs">{children}</blockquote>,
+            code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
+              inline
+                ? <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
+                : <pre className="bg-muted rounded-lg p-3 text-xs font-mono overflow-x-auto my-3 whitespace-pre-wrap"><code>{children}</code></pre>,
+            table: ({ children }) => <div className="overflow-x-auto my-3"><table className="text-xs border-collapse w-full">{children}</table></div>,
+            th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-left text-xs">{children}</th>,
+            td: ({ children }) => <td className="border border-border px-2 py-1 text-xs">{children}</td>,
+          }}
+        >
+          {seg.value}
+        </ReactMarkdown>
+      );
+    });
   };
 
   const handleDragEnter = (e: React.DragEvent) => {
@@ -3154,7 +3660,29 @@ const Chat = () => {
               accumulatedSteps.push(step);
               setThinkingSteps(prev => [...prev, step]);
             } else if (event.type === "result") {
-              if (event.session_id) setSessionId(event.session_id);
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              const reportId: string | undefined = event.report_id;
+              // If the router sent us to report_node, schedule a background fetch for the
+              // reports panel — but the card itself uses inline SSE data, no fetch needed.
+              if (reportId) {
+                // Background fetch — populates reports panel & enables downloads.
+                // Retry up to 3× with backoff since the server may not have saved yet.
+                const _fetchReport = (attempt = 0) => {
+                  fetch(`${base}/reports/${reportId}`)
+                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+                    .then(report => {
+                      setReports(prev => [report, ...prev.filter((r: ReportRecord) => r.report_id !== reportId)]);
+                      setActiveReport(report);
+                      reportsPanelOpenRef.current = true;
+                      setReportsPanelOpen(true);
+                      toast({ title: "Report ready", description: report.title });
+                    })
+                    .catch(() => { if (attempt < 5) setTimeout(() => _fetchReport(attempt + 1), 3000 * (attempt + 1)); });
+                };
+                // Small initial delay — report save happens synchronously before SSE fires,
+                // but disk write may lag slightly. Start at 500ms.
+                setTimeout(() => _fetchReport(), 500);
+              }
               resultMsg = {
                 id: Date.now().toString(),
                 role: "assistant",
@@ -3163,6 +3691,9 @@ const Chat = () => {
                 sources: event.sources,
                 confidence: event.confidence,
                 analytics: event.analytics ?? null,
+                reportId: reportId ?? null,
+                reportTitle: event.report_title ?? null,
+                reportMeta: event.report_meta ?? null,
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
@@ -3187,13 +3718,122 @@ const Chat = () => {
     }
   }, [sessionId]);
 
+  /**
+   * Stream a report directly from /report-stream.
+   * Emits the same status/result SSE events as /query-stream so the same
+   * thinking-steps UI lights up. Returns a Message with reportId attached.
+   */
+  const runReportStream = useCallback(async (
+    query: string,
+    explicitDocs: string[],
+  ): Promise<Message | null> => {
+    setThinkingSteps([]);
+    setThinkingExpanded(true);
+    setIsLoading(true);
+
+    try {
+      const base =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+
+      abortControllerRef.current = new AbortController();
+
+      const res = await fetch(`${base}/report-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt:         query,
+          session_id:     sessionIdRef.current ?? "",
+          available_docs: documents.map(d => d.filename),
+          explicit_docs:  explicitDocs,
+          include_charts: true,
+        }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(serializeError(body) || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let resultMsg: Message | null = null;
+      const accumulatedSteps: ThinkingStep[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "status") {
+              const step: ThinkingStep = { node: event.node, icon: event.icon, message: event.message, ts: Date.now() };
+              accumulatedSteps.push(step);
+              setThinkingSteps(prev => [...prev, step]);
+            } else if (event.type === "result") {
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              const reportId: string | undefined = event.report_id;
+              if (reportId) {
+                const _fetchReport2 = (attempt = 0) => {
+                  fetch(`${base}/reports/${reportId}`)
+                    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+                    .then(report => {
+                      setReports(prev => [report, ...prev.filter((r: ReportRecord) => r.report_id !== reportId)]);
+                      setActiveReport(report);
+                      reportsPanelOpenRef.current = true;
+                      setReportsPanelOpen(true);
+                      toast({ title: "Report ready", description: report.title });
+                    })
+                    .catch(() => { if (attempt < 5) setTimeout(() => _fetchReport2(attempt + 1), 3000 * (attempt + 1)); });
+                };
+                setTimeout(() => _fetchReport2(), 500);
+              }
+              resultMsg = {
+                id:          Date.now().toString(),
+                role:        "assistant",
+                content:     event.answer,
+                rawAnswer:   event.raw_answer ?? event.answer,
+                sources:     event.sources ?? [],
+                confidence:  event.confidence ?? 1.0,
+                analytics:   null,
+                reportId:    reportId ?? null,
+                reportTitle: event.report_title ?? null,
+                reportMeta:  event.report_meta ?? null,
+                timestamp:   new Date(),
+              };
+            } else if (event.type === "error") {
+              throw new Error(event.message);
+            }
+          } catch { /* malformed SSE line */ }
+        }
+      }
+
+      if (resultMsg) {
+        resultMsg = { ...resultMsg, thinkingSteps: accumulatedSteps };
+      }
+      setThinkingSteps([]);
+      return resultMsg;
+    } catch (error) {
+      setThinkingSteps([]);
+      if (error instanceof Error && error.name === "AbortError") return null;
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [sessionId, documents]);
+
   const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
-    // Unlock audio on first real user gesture so the beep works later.
     ensureAudio();
-
     setOpenSourceKey(null);
     setSuggestions([]);
     setShowSilenceWarning(false);
@@ -3209,22 +3849,48 @@ const Chat = () => {
     if (!notifyDismissed) setShowNotifyBanner(true);
 
     try {
+      // ── RAG path (router decides: rag / report / graph / analytics / etc.) ──
       const assistantMsg = await runStreamingQuery(trimmedInput);
       if (!assistantMsg) return;
+      let updatedMessages: Message[] = [];
       setMessages(prev => {
-        const updated = [...prev, assistantMsg];
-        const title = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
-        const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-        setConversations(convs => {
-          const existing = convs.find(c => c.id === activeConvId);
-          if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-          return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
-        });
-        return updated;
+        updatedMessages = [...prev, assistantMsg];
+        return updatedMessages;
+      });
+      const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+      const preview  = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+      setConversations(convs => {
+        const existing = convs.find(c => c.id === activeConvId);
+        if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updatedMessages, preview, timestamp: new Date() } : c);
+        return [{ id: activeConvId, title: rawTitle, preview, timestamp: new Date(), messages: updatedMessages, sessionId } as any, ...convs];
       });
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
+      // Smart conversation title:
+      // • Report route → call /title with the prompt so the sidebar shows
+      //   "Telecom Site Survey Field Results" instead of the raw user message.
+      // • All other routes → call generateSmartTitle with the first few messages.
+      const convId = activeConvId;
+      if (assistantMsg.reportId) {
+        try {
+          const titleRes = await fetch(`${(typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000"}/title`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "report", text: trimmedInput }),
+            signal: AbortSignal.timeout(8000),
+          });
+          if (titleRes.ok) {
+            const { title: reportConvTitle } = await titleRes.json();
+            if (reportConvTitle?.trim()) {
+              setConversations(convs => convs.map(c => c.id === convId ? { ...c, title: reportConvTitle.trim() } : c));
+            }
+          }
+        } catch { /* silent — title stays as raw input */ }
+      } else {
+        const currentTitle = conversations.find(c => c.id === convId)?.title ?? rawTitle;
+        generateSmartTitle(convId, updatedMessages, currentTitle);
+      }
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = {
@@ -3759,6 +4425,422 @@ const Chat = () => {
               </AnimatePresence>
             </div>
 
+            {/* ── Reports bubble ── */}
+            {reports.length > 0 && (
+            <div
+              className="relative z-[9999]"
+              data-reports-panel
+              ref={reportsPanelRef}
+            >
+                {/* Pill button */}
+                <button
+                  onClick={() => {
+                    const next = !reportsPanelOpenRef.current;
+                    reportsPanelOpenRef.current = next;
+                    setReportsPanelOpen(next);
+                    if (!next) { setActiveReport(null); setReportEditMode(false); setPreviewedVersion(null); }
+                  }}
+                  className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+                    reportsPanelOpen
+                      ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                      : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+                  }`}
+                  title="Generated Reports"
+                >
+                  <BookOpen className="h-3.5 w-3.5 shrink-0" />
+                  <span>Reports</span>
+                  <span className={`inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-full text-[10px] font-bold ${
+                    reportsPanelOpen ? "bg-primary-foreground/20 text-primary-foreground" : "bg-primary/15 text-primary"
+                  }`}>
+                    {reports.length}
+                  </span>
+                  {isGeneratingReport && (
+                    <Loader2 className="h-3 w-3 animate-spin ml-0.5" />
+                  )}
+                </button>
+
+                {/* Dropdown panel */}
+                <div
+                  className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-[9999] flex flex-col"
+                  style={{
+                    transformOrigin: "top right",
+                    width:     activeReport ? 540 : 300,
+                    height:    activeReport ? 620 : "auto",
+                    maxHeight: activeReport ? 620 : 440,
+                    overflow:  activeReport ? "hidden" : "visible",
+                    transition: "width 0.22s cubic-bezier(0.4,0,0.2,1), height 0.22s cubic-bezier(0.4,0,0.2,1), opacity 0.18s, transform 0.18s",
+                    opacity:       reportsPanelOpen ? 1 : 0,
+                    transform:     reportsPanelOpen ? "scale(1) translateY(0)" : "scale(0.92) translateY(-6px)",
+                    pointerEvents: reportsPanelOpen ? "auto" : "none",
+                    minHeight: 0,
+                  }}
+                >
+                  {/* ── List view ── */}
+                  {!activeReport && (
+                    <>
+                      <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+                        <div className="flex items-center gap-2">
+                          <BookOpen className="h-4 w-4 text-primary" />
+                          <span className="text-sm font-semibold text-foreground">Generated Reports</span>
+                          <span className="text-xs text-muted-foreground">({reports.length})</span>
+                        </div>
+                        <button onClick={() => { reportsPanelOpenRef.current = false; setReportsPanelOpen(false); }} className="p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="max-h-72 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                        <div className="p-2 space-y-0.5">
+                          {reports.map(report => (
+                            <div
+                              key={report.report_id}
+                              className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-muted/60 cursor-pointer transition-colors"
+                              onClick={async () => {
+                                // List items are slim (no charts array) — fetch full record before opening
+                                try {
+                                  const res = await fetch(`${getApiBase()}/reports/${report.report_id}`);
+                                  if (res.ok) setActiveReport(await res.json());
+                                  else setActiveReport(report);
+                                } catch { setActiveReport(report); }
+                              }}
+                            >
+                              <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                                {(report.charts?.length ?? 0) > 0
+                                  ? <BarChart2 className="h-3.5 w-3.5 text-primary" />
+                                  : <FileText className="h-3.5 w-3.5 text-primary" />
+                                }
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-foreground truncate">{report.title}</p>
+                                <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
+                                  {new Date(report.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                  {report.version > 1 && <span className="text-primary/60">v{report.version}</span>}
+                                  {(report.charts?.length ?? 0) > 0 && (
+                                    <span className="inline-flex items-center gap-0.5 text-primary/70">
+                                      <BarChart2 className="h-2.5 w-2.5" />{report.charts.length}
+                                    </span>
+                                  )}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                                <Eye className="h-3 w-3 text-muted-foreground/40" />
+                                <button
+                                  onClick={e => { e.stopPropagation(); handleDownloadReport(report, "pdf"); }}
+                                  className="p-0.5 rounded text-muted-foreground/50 hover:text-primary transition-colors"
+                                  title="Download"
+                                >
+                                  {downloadingReportId === report.report_id
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <ScrollText className="h-3 w-3" />
+                                  }
+                                </button>
+                                <button
+                                  onClick={e => { e.stopPropagation(); handleDeleteReport(report.report_id); }}
+                                  className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
+                                  title="Delete"
+                                >
+                                  {deletingReportId === report.report_id
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <Trash2 className="h-3 w-3" />
+                                  }
+                                </button>
+                              </div>
+                              <ChevronRight className="h-3 w-3 text-muted-foreground/30 shrink-0" />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Footer hint */}
+                      <div className="px-4 py-3 border-t border-border shrink-0">
+                        <p className="text-[10px] text-muted-foreground/60 text-center flex items-center justify-center gap-1">
+                          <Sparkles className="h-2.5 w-2.5" />
+                          Ask the AI to "generate a report on…" to create one
+                        </p>
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── Expanded report viewer ── */}
+                  {activeReport && (
+                    <>
+                      {/* Viewer header */}
+                      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0">
+                        <button
+                          onClick={() => { setActiveReport(null); setReportEditMode(false); setReportEditInstruction(""); setShowVersionHistory(false); setPreviewedVersion(null); }}
+                          className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors shrink-0"
+                          title="Back to reports"
+                        >
+                          <ArrowLeft className="h-3.5 w-3.5" />
+                        </button>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-foreground truncate">
+                            {previewedVersion ? previewedVersion.title : activeReport.title}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
+                            {new Date(activeReport.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                            {previewedVersion ? (
+                              <span className="text-amber-500/80 font-medium">viewing v{previewedVersion.version}</span>
+                            ) : (
+                              activeReport.version > 1 && <span className="text-primary/60">v{activeReport.version}</span>
+                            )}
+                            {isPatchingReport && (
+                              <span className="inline-flex items-center gap-1 text-primary animate-pulse">
+                                <RefreshCw className="h-2.5 w-2.5 animate-spin" />editing…
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {/* Version history toggle */}
+                          {activeReport.versions && activeReport.versions.length > 1 && (
+                            <button
+                              onClick={() => setShowVersionHistory(v => !v)}
+                              className={`p-1.5 rounded-lg transition-colors text-[10px] flex items-center gap-1 ${showVersionHistory ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-muted/50"}`}
+                              title="Version history"
+                            >
+                              <Clock className="h-3.5 w-3.5" />
+                              <span className="hidden sm:inline">v{activeReport.version}</span>
+                            </button>
+                          )}
+                          {/* PDF download */}
+                          <button
+                            onClick={() => handleDownloadReport(activeReport, "pdf")}
+                            className="p-1.5 rounded-lg text-muted-foreground hover:text-primary hover:bg-muted/50 transition-colors"
+                            title="Download PDF"
+                          >
+                            {downloadingReportId === activeReport.report_id
+                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              : <ScrollText className="h-3.5 w-3.5" />
+                            }
+                          </button>
+                          <button
+                            onClick={() => handleDeleteReport(activeReport.report_id)}
+                            className="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-muted/50 transition-colors"
+                            title="Delete report"
+                          >
+                            {deletingReportId === activeReport.report_id
+                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              : <Trash2 className="h-3.5 w-3.5" />
+                            }
+                          </button>
+                          <button
+                            onClick={() => { reportsPanelOpenRef.current = false; setReportsPanelOpen(false); setActiveReport(null); setReportEditMode(false); setShowVersionHistory(false); setPreviewedVersion(null); }}
+                            className="p-1.5 rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/50 transition-colors"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Source doc tags */}
+                      {(activeReport.source_docs?.length ?? 0) > 0 && (
+                        <div className="flex flex-wrap gap-1 px-4 py-2 border-b border-border shrink-0">
+                          {activeReport.source_docs.slice(0, 5).map(doc => (
+                            <span key={doc} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-medium">
+                              <FileText className="h-2.5 w-2.5" />
+                              {doc.length > 22 ? doc.slice(0, 20) + "…" : doc}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* ── Version history drawer ── */}
+                      {showVersionHistory && activeReport.versions && activeReport.versions.length > 1 && (
+                        <div className="border-b border-border shrink-0">
+                          {/* Header */}
+                          <div className="px-4 py-2 flex items-center justify-between bg-muted/30">
+                            <span className="text-[10px] font-semibold text-foreground/70 uppercase tracking-widest flex items-center gap-1.5">
+                              <Clock className="h-3 w-3 text-primary" />
+                              Version History
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {previewedVersion && (
+                                <button
+                                  onClick={() => setPreviewedVersion(null)}
+                                  className="text-[10px] text-primary hover:text-primary/80 font-medium flex items-center gap-1 transition-colors"
+                                >
+                                  <ArrowLeft className="h-2.5 w-2.5" />
+                                  Back to current
+                                </button>
+                              )}
+                              <span className="text-[9px] text-muted-foreground/60 bg-muted px-1.5 py-0.5 rounded-full">
+                                {activeReport.versions.length} versions
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Horizontal scrollable version cards */}
+                          <div className="flex gap-2 px-4 py-3 overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                            {[...activeReport.versions].reverse().map(snap => {
+                              const isLive       = snap.version === activeReport.version;
+                              const isPreviewing = previewedVersion?.version === snap.version;
+                              const isActive     = isPreviewing || (isLive && !previewedVersion);
+                              const isRestoring  = restoringVersion === snap.version;
+                              return (
+                                <button
+                                  key={snap.version}
+                                  disabled={isRestoring}
+                                  onClick={async () => {
+                                    if (isRestoring) return;
+                                    // Already viewing this card — no-op
+                                    if (isActive) return;
+                                    // Clicking the live version while previewing something else → go back to live
+                                    if (isLive) { setPreviewedVersion(null); return; }
+                                    // Fetch + preview a past version
+                                    try {
+                                      const res = await fetch(`${getApiBase()}/reports/${activeReport.report_id}/versions/${snap.version}`);
+                                      if (res.ok) {
+                                        const full = await res.json();
+                                        setPreviewedVersion({ version: snap.version, content: full.content, charts: full.charts ?? [], title: full.title });
+                                      }
+                                    } catch { /* ignore */ }
+                                  }}
+                                  className={[
+                                    "shrink-0 flex flex-col items-start gap-1 px-3 py-2.5 rounded-xl border text-left w-44",
+                                    "transition-all duration-150",
+                                    isActive
+                                      ? "bg-primary/10 border-primary/40 shadow-sm ring-1 ring-primary/20"
+                                      : "bg-muted/40 border-border/60 hover:bg-muted/70 hover:border-border",
+                                    isRestoring ? "opacity-50 cursor-wait" : "cursor-pointer",
+                                  ].join(" ")}
+                                >
+                                  {/* Badge row */}
+                                  <div className="flex items-center gap-1.5 w-full">
+                                    <span className={[
+                                      "inline-flex items-center justify-center h-5 w-5 rounded-full text-[9px] font-bold shrink-0",
+                                      isActive
+                                        ? "bg-primary text-primary-foreground"
+                                        : "bg-muted-foreground/15 text-muted-foreground border border-border",
+                                    ].join(" ")}>
+                                      {snap.version}
+                                    </span>
+                                    <span className={[
+                                      "text-[11px] font-semibold truncate flex-1",
+                                      isActive ? "text-primary" : "text-foreground/70",
+                                    ].join(" ")}>
+                                      {isLive ? "Current" : `v${snap.version}`}
+                                    </span>
+                                    {isRestoring
+                                      ? <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
+                                      : isLive && (
+                                        <span className="shrink-0 text-[8px] bg-primary/15 text-primary px-1.5 py-0.5 rounded-full font-medium">live</span>
+                                      )
+                                    }
+                                  </div>
+
+                                  {/* Title */}
+                                  <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1 w-full text-left">
+                                    {snap.title}
+                                  </p>
+
+                                  {/* Date */}
+                                  <p className="text-[9px] text-muted-foreground/60 leading-snug">
+                                    {new Date(snap.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                                  </p>
+
+                                  {/* Edit instruction snippet */}
+                                  {snap.instruction && (
+                                    <p className="text-[9px] text-muted-foreground/50 italic leading-snug line-clamp-2 w-full text-left">
+                                      "{snap.instruction.slice(0, 50)}{snap.instruction.length > 50 ? "…" : ""}"
+                                    </p>
+                                  )}
+
+                                  {/* Restore button — only for non-live, non-restoring */}
+                                  {!isLive && !isRestoring && (
+                                    <button
+                                      onClick={e => { e.stopPropagation(); handleRestoreVersion(activeReport, snap.version); }}
+                                      className={[
+                                        "mt-1 w-full text-[9px] font-medium px-2 py-1 rounded-lg border transition-colors",
+                                        isActive
+                                          ? "border-primary/30 text-primary hover:bg-primary/15"
+                                          : "border-border/50 text-muted-foreground/60 hover:text-primary hover:border-primary/30",
+                                      ].join(" ")}
+                                      title="Make this the active version"
+                                    >
+                                      ↩ Restore
+                                    </button>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Preview mode banner */}
+                          {previewedVersion && (
+                            <div className="mx-4 mb-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/8 border border-amber-500/20">
+                              <Eye className="h-3 w-3 shrink-0 text-amber-500/70" />
+                              <span className="text-[10px] font-medium flex-1 text-amber-600 dark:text-amber-400">
+                                Previewing v{previewedVersion.version} — read-only
+                              </span>
+                              <button
+                                onClick={() => setPreviewedVersion(null)}
+                                className="text-[10px] text-amber-600/80 dark:text-amber-400/80 underline underline-offset-2 hover:opacity-100 opacity-70 transition-opacity"
+                              >
+                                Return to current
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Report content */}
+                      <div className={`flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent min-h-0 px-4 py-3 transition-opacity duration-200 ${previewedVersion ? "opacity-80" : ""}`}>
+                        {renderReportContent(previewedVersion
+                          ? { ...activeReport, content: previewedVersion.content, charts: previewedVersion.charts, title: previewedVersion.title }
+                          : activeReport
+                        )}
+                      </div>
+
+                      {/* Edit bar */}
+                      <div className="px-3 py-2.5 border-t border-border shrink-0">
+                        {!reportEditMode ? (
+                          <button
+                            onClick={() => setReportEditMode(true)}
+                            className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground px-2 py-1 rounded-lg hover:bg-muted/60 transition-colors w-full justify-center"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Edit report
+                          </button>
+                        ) : (
+                          <div className="flex items-end gap-2 w-full bg-muted/40 rounded-xl border border-border px-3 py-2">
+                            <textarea
+                              ref={reportEditInputRef}
+                              value={reportEditInstruction}
+                              onChange={e => setReportEditInstruction(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handlePatchReport(); }
+                                if (e.key === "Escape") { setReportEditMode(false); setReportEditInstruction(""); }
+                              }}
+                              placeholder='e.g. "Add a conclusion" or "Edit the budget section to include Q3 data"'
+                              rows={2}
+                              className="flex-1 resize-none bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none"
+                            />
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                onClick={() => { setReportEditMode(false); setReportEditInstruction(""); }}
+                                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                              <button
+                                onClick={handlePatchReport}
+                                disabled={!reportEditInstruction.trim() || isPatchingReport}
+                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary text-primary-foreground text-[11px] font-medium disabled:opacity-50 transition-colors hover:bg-primary/90"
+                              >
+                                {isPatchingReport ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                                Apply
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* ── Documents bubble ── */}
             <div className="relative" data-docs-panel>
               <button
@@ -4135,7 +5217,13 @@ const Chat = () => {
                     ) : msg.role === "assistant" && (msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error") ? (
                       <ChartMessage analytics={msg.analytics as any} answer={msg.content} />
                     ) : msg.role === "assistant" ? (
-                      <div className="leading-relaxed">{renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick)}</div>
+                      <AssistantContent
+                        raw={msg.rawAnswer ?? msg.content}
+                        msgId={msg.id}
+                        sources={msg.sources}
+                        onSourceClick={handleSourceClick}
+                      />
+                    
                     ) : editingMsgId === msg.id ? (
                       /* ── Inline edit mode ── */
                       <div className="flex flex-col gap-2 -mx-1">
@@ -4410,6 +5498,25 @@ const Chat = () => {
                       </div>
                     );
                   })()}
+
+                  {/* ── Report card — shown below source cards ── */}
+                  {msg.role === "assistant" && (msg.reportId || msg.reportGenerating || msg.reportTitle) && (() => {
+                    // Resolve the full report object from state (for downloads/panel).
+                    // The card renders immediately using inline SSE data (reportTitle/reportMeta)
+                    // and doesn't wait on this lookup.
+                    const rpt: ReportRecord | null =
+                      msg.reportId ? (reports.find(r => r.report_id === msg.reportId) ?? (activeReport?.report_id === msg.reportId ? activeReport : null)) : null;
+                    return (
+                      <div className="mt-2">
+                        <ReportCard
+                          report={rpt}
+                          inlineTitle={msg.reportTitle}
+                          inlineMeta={msg.reportMeta}
+                          isLoading={msg.reportGenerating === true && !msg.reportTitle}
+                        />
+                      </div>
+                    );
+                  })()}
                 </div>
 
               </motion.div>
@@ -4514,14 +5621,11 @@ const Chat = () => {
         <AnimatePresence>
           {showNotifyBanner && (
             <motion.div
-              initial={{ opacity: 0, y: 8, bottom: 125 }}
-              animate={{
-                opacity: 1,
-                y: 0,
-                bottom: suggestions.length > 0 || suggestionsLoading ? 160 : 125,
-              }}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.18, bottom: { duration: 0.22, ease: "easeInOut" } }}
+              transition={{ duration: 0.18 }}
+              style={{ bottom: notifyBottomOffset }}
               className="fixed left-0 right-0 flex justify-center z-50 pointer-events-none"
             >
               <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
@@ -4555,7 +5659,7 @@ const Chat = () => {
         </AnimatePresence>
 
         {/* Input */}
-        <div className="relative border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
+        <div ref={inputAreaRef} className="relative border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto">
 
             {/* ── Contextual suggestion chips ── */}

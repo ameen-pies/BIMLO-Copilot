@@ -112,25 +112,13 @@ class LLMJudge:
         self.enabled  = self._setup()
 
     def _setup(self) -> bool:
-        if not self.api_key:
-            print("⚠️  LLM Judge — CF_API_KEY not set, using fallback")
-            return False
-        try:
-            resp = requests.post(
-                self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={"prompt": "hi", "max_tokens": 5},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                print(f"🧠 LLM Judge [Workers AI]: connected")
-                return True
-            else:
-                print(f"❌ LLM Judge: API returned {resp.status_code}: {resp.text[:200]}")
-                return False
-        except Exception as e:
-            print(f"❌ LLM Judge: connection failed — {e}")
-            return False
+        from llm_client import check_llm_available
+        available, provider = check_llm_available()
+        if available:
+            print(f"🧠 LLM Judge: ready via {provider}")
+        else:
+            print("❌ LLM Judge: no LLM provider available (set CF_API_KEY or GROQ_API_KEY)")
+        return available
     
     def plan_response(
         self,
@@ -295,33 +283,23 @@ Respond ONLY with this JSON:
     def _call_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 500,
                   system_prompt: str = "", history: Optional[List[Dict]] = None,
                   task: str = "plan") -> str:
-        """Call the Cloudflare Workers AI proxy."""
-        payload = {
-            "prompt":       prompt,
-            "systemPrompt": system_prompt,
-            "history":      history or [],
-            "max_tokens":   max_tokens,
-            "temperature":  temperature,
-            "task":         task,
-        }
-        resp = requests.post(
-            self.base_url,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=30,
+        """Call the LLM via the shared gateway (CF primary, Groq fallback)."""
+        from llm_client import call_llm
+        raw = call_llm(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history=history or [],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            task=task,
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data.get("response") or ""
-            # CF worker can return response as a list (model outputting JSON directly)
-            # or as a string — normalise to str in all cases
-            if isinstance(raw, list):
-                import json as _json
-                raw = _json.dumps(raw)
-            elif not isinstance(raw, str):
-                raw = str(raw)
-            return raw.strip()
-        raise Exception(f"CF Workers API {resp.status_code}: {resp.text[:200]}")
+        # Normalise: CF worker can return a list when the model outputs JSON directly
+        if isinstance(raw, list):
+            import json as _json
+            raw = _json.dumps(raw)
+        elif not isinstance(raw, str):
+            raw = str(raw)
+        return raw.strip()
     
     def _parse_plan(self, raw_json: str) -> ResponsePlan:
         """Parse LLM output into ResponsePlan — resilient to malformed/list-wrapped output."""

@@ -64,6 +64,36 @@ except ImportError:
     _GRAPH_AGENT_AVAILABLE = False
     print("⚠️  graph_agent.py not found — graph route disabled")
 
+# Import report_agent at module level so rag_engine and the FastAPI router
+# share the SAME module instance — and therefore the SAME _reports_store dict.
+#
+# CRITICAL: main.py imports this as `services.report_agent`. If we import it
+# here as bare `report_agent` (thanks to sys.path manipulation above), Python
+# creates a SECOND module object with its own empty _reports_store — causing
+# every GET /reports/{id} to 404 even though the report was saved.
+#
+# Fix: resolve via sys.modules so we always get the same instance that
+# main.py registered, falling back to a fresh import only when standalone.
+_report_agent_module = None
+_REPORT_AGENT_AVAILABLE = False
+try:
+    import importlib as _importlib
+    # Prefer the already-loaded services.report_agent (matches main.py)
+    if "services.report_agent" in sys.modules:
+        _report_agent_module = sys.modules["services.report_agent"]
+    else:
+        # Try package path first so it registers under services.report_agent
+        try:
+            _report_agent_module = _importlib.import_module("services.report_agent")
+        except ModuleNotFoundError:
+            # Standalone / pytest from services/ dir
+            _report_agent_module = _importlib.import_module("report_agent")
+    _REPORT_AGENT_AVAILABLE = True
+except Exception as _e:
+    _report_agent_module = None
+    _REPORT_AGENT_AVAILABLE = False
+    print(f"⚠️  report_agent not available — report route disabled ({_e})")
+
 # Import the new judge
 try:
     from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation
@@ -85,7 +115,7 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -104,6 +134,9 @@ class AgentState(TypedDict):
     sources: List[Dict]
     confidence: float
     analytics: Optional[Dict]
+    report_id: Optional[str]    # set by report_node
+    report_title: Optional[str] # set by report_node
+    session_id: str              # passed in from main.py
 
     # routing context from previous turn
     _prev_route: str
@@ -126,50 +159,27 @@ RELEVANCE_THRESHOLD = 0.65
 
 class CloudflareClient:
     """
-    LLM client for the self-hosted Cloudflare Workers AI proxy.
+    LLM client — CF Workers AI primary, Groq automatic fallback.
 
-    Request format  -> POST /
-        {
-          "prompt":       "<current user turn>",
-          "systemPrompt": "<optional system instruction>",
-          "history":      [{"role": "user"|"assistant", "content": "..."}],
-          "max_tokens":   1200
-        }
+    Uses the shared llm_client.call_llm() gateway so ALL agents get
+    Groq fallback for free without any per-service changes.
 
-    Response format <- { "response": "<generated text>" }
-
-    Accepts the same messages[] format used throughout the engine and
-    auto-decomposes it into the worker's prompt/systemPrompt/history shape.
+    _setup() no longer marks the client as disabled when CF is down:
+    as long as at least one provider (CF or Groq) is reachable the
+    client is enabled and calls will succeed.
     """
 
     def __init__(self):
-        self.api_key  = os.getenv("CF_API_KEY", "")
-        self.base_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-        self.enabled  = self._setup()
-
-    def _setup(self) -> bool:
-        if not self.api_key:
-            print("❌ CloudflareClient: CF_API_KEY not set")
-            return False
-        try:
-            resp = requests.post(
-                self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={"prompt": "hi", "max_tokens": 5},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                print(f"✅ CloudflareClient [Workers AI]: connected -> {self.base_url}")
-                return True
-            else:
-                print(f"❌ CloudflareClient: API returned {resp.status_code}: {resp.text[:200]}")
-                return False
-        except Exception as e:
-            print(f"❌ CloudflareClient: connection failed — {e}")
-            return False
+        # Import here to avoid circular imports at module load time
+        from llm_client import check_llm_available
+        self.enabled, provider = check_llm_available()
+        if self.enabled:
+            print(f"✅ CloudflareClient: LLM ready via {provider}")
+        else:
+            print("❌ CloudflareClient: no LLM provider available (set CF_API_KEY or GROQ_API_KEY)")
 
     # ------------------------------------------------------------------
-    # Core chat method — same signature as the old GroqClient
+    # Core chat method — same signature as before
     # ------------------------------------------------------------------
 
     def chat(
@@ -177,18 +187,18 @@ class CloudflareClient:
         messages: List[Dict],
         temperature: float = 0.2,
         max_tokens: int = 1200,
-        max_retries: int = 3,
+        max_retries: int = 3,   # kept for API compatibility, handled inside call_llm
         task: str = "synthesise",
     ) -> str:
         """
-        Send messages[] to the CF worker.
-        The worker expects: { prompt, systemPrompt, history[], max_tokens }
-          - system role  → systemPrompt
-          - prior turns  → history[]  (worker caps at MAX_HISTORY=10)
-          - last user msg → prompt
+        Send messages[] to the LLM (CF primary, Groq fallback).
+        Decomposes the messages[] array into prompt/systemPrompt/history
+        for the CF worker; Groq receives the full messages[] directly.
         """
         if not self.enabled:
             return ""
+
+        from llm_client import call_llm
 
         system_prompt = ""
         history: List[Dict] = []
@@ -208,38 +218,14 @@ class CloudflareClient:
         prompt  = history[-1]["content"]
         history = history[:-1]
 
-        payload = {
-            "prompt":       prompt,
-            "systemPrompt": system_prompt,
-            "history":      history,
-            "max_tokens":   max_tokens,
-            "temperature":  temperature,
-            "task":         task,
-        }
-
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return (data.get("response") or "").strip()
-                elif resp.status_code == 429:
-                    wait = 2 ** attempt
-                    print(f"⏳ CF rate-limit — waiting {wait}s")
-                    time.sleep(wait)
-                    continue
-                else:
-                    print(f"❌ CF error {resp.status_code}: {resp.text[:200]}")
-                    return ""
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-                    continue
-                print(f"❌ CF request failed: {e}")
-                return ""
-        return ""
+        return call_llm(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history=history,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            task=task,
+        )
 
 
 # Aliases — everything that used GroqClient/OllamaClient/GeminiClient still works
@@ -602,7 +588,7 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "") -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
         # Store callback on instance so node wrappers can access it without going through state
@@ -634,6 +620,9 @@ class RAGEngine:
             "sources": [],
             "confidence": 0.0,
             "analytics": None,
+            "report_id": None,
+            "report_title": None,
+            "session_id": session_id,
             "error": None,
         }
         
@@ -654,6 +643,9 @@ class RAGEngine:
             "confidence": final_state["confidence"],
             "route": final_state["route"],
             "analytics": final_state.get("analytics"),
+            "report_id": final_state.get("report_id"),
+            "report_title": final_state.get("report_title"),
+            "retrieved_chunks": final_state.get("retrieved_chunks", []),
             "error": final_state.get("error"),
         }
         
@@ -683,6 +675,7 @@ class RAGEngine:
         "analytics_node":  ("📊", "Running analytics…"),
         "define_node":     ("📖", "Looking up definition…"),
         "graph_node":      ("📈", "Building chart from documents…"),
+        "report_node":     ("📄", "Writing your report…"),
     }
 
     def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
@@ -801,6 +794,7 @@ Now generate for: "{q}" """
         workflow.add_node("transform_node",  _wrap("transform_node",  self.transform_node))
         workflow.add_node("define_node",     _wrap("define_node",     self.define_node))
         workflow.add_node("graph_node",      _wrap("graph_node",      self.graph_node))
+        workflow.add_node("report_node",     _wrap("report_node",     self.report_node))
 
         # Entry point
         workflow.set_entry_point("router")
@@ -817,6 +811,7 @@ Now generate for: "{q}" """
                 "transform": "retrieve",   # fetch doc content, then transform
                 "define": "define_node",   # goes straight to Wikipedia — no doc retrieval
                 "graph": "retrieve",       # fetch doc content, then build chart
+                "report": "retrieve",      # fetch doc content, then write report
             }
         )
 
@@ -833,6 +828,8 @@ Now generate for: "{q}" """
                 return "define"
             if s["route"] == "graph":
                 return "graph"
+            if s["route"] == "report":
+                return "report"
             if (s["route"] == "iterative_rag"
                     and s["retrieval_iterations"] < MAX_ITER
                     and not _is_good_retrieval(s["retrieved_chunks"])):
@@ -845,6 +842,7 @@ Now generate for: "{q}" """
             {"rewrite": "rewrite_query", "done": "judge_plan",
              "transform": "transform_node", "define": "define_node",
              "graph": "graph_node",
+             "report": "report_node",
              "no_docs": "direct_answer"},
         )
 
@@ -855,6 +853,7 @@ Now generate for: "{q}" """
         workflow.add_edge("transform_node", END)
         workflow.add_edge("define_node", END)
         workflow.add_edge("graph_node", END)
+        workflow.add_edge("report_node", END)
 
         # Judge-driven synthesis flow
         workflow.add_edge("judge_plan", "synthesise")
@@ -939,6 +938,7 @@ ROUTES:
 - transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
 - graph: the user wants a chart, graph, or visual plot of data extracted from the documents — bar chart, line chart, pie chart, scatter plot, histogram, trend over time, comparison chart, etc. This applies regardless of language — detect the INTENT to visualize data even when the query is in French, Arabic, Spanish, German, Italian, Portuguese, or any other language. Examples: EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser/tracer; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik/visualisieren; IT: grafico/diagramma; PT: gráfico/visualizar.
+- report: the user explicitly asks to generate, create, make, write, or produce a report, document, PDF, or structured written output — e.g. "make a report on X", "generate a report about X", "create a report for file Y", "do a report on Z", "rapport sur X" (French). Must be an explicit request for a standalone written deliverable, NOT just a question or summary request.
 - define: the user is asking what a specific term, concept, acronym, or niche phrase MEANS — typically triggered by "what is X?", "what does X mean?", "explain X", "define X", where X is a word or short phrase that likely appears in the documents. The answer should explain the concept in depth using the document context, not just summarise what the document says about it.
 
 CRITICAL RULES — read these first:
@@ -965,7 +965,7 @@ Reply with ONE word only — the route name."""
             ).strip().lower()
 
             # Validate — rag checked BEFORE transform so ambiguous responses default safely
-            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph"]
+            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph", "report"]
             if route not in valid_routes:
                 # Extract route if LLM added extra text
                 for valid in valid_routes:
@@ -1017,6 +1017,13 @@ Reply with ONE word only — the route name."""
         # default to direct rather than RAG.
         doc_signals = ["document", "file", "show", "find", "what does", "according",
                        "tell me about", "explain", "summarize", "summary", "report"]
+        # Report route in fallback
+        report_kws = ["make a report", "create a report", "generate a report", "write a report",
+                      "do a report", "make me a report", "rapport sur", "fais un rapport",
+                      "produce a report", "build a report", "prepare a report"]
+        if any(kw in query for kw in report_kws):
+            print("report (fallback)")
+            return {**state, "route": "report"}
         is_short = len(query.split()) <= 8
         has_doc_signal = any(kw in query for kw in doc_signals)
         has_question_word = any(query.startswith(w) for w in ["what", "who", "when", "where", "how", "why", "which"])
@@ -2054,6 +2061,173 @@ Remember: ALL text fields must be in {target_lang}."""
             "confidence":    _confidence(chunks),
             "analytics":     result,
         }
+
+    # ------------------------------------------------------------------ #
+    #  REPORT NODE                                                        #
+    # ------------------------------------------------------------------ #
+
+    def report_node(self, state: AgentState) -> AgentState:
+        """
+        Generate a full structured report from retrieved chunks.
+        Runs _generate_report_content in a sub-thread and emits keepalive
+        status pings every 5 s so the SSE connection never idles out during
+        the long multi-LLM-call generation (can take 30-90 s).
+        """
+        import threading as _threading
+        import uuid as _uuid
+        from datetime import datetime as _dt
+
+        query      = state["query"]
+        chunks     = state["retrieved_chunks"]
+        history    = state.get("conversation_history", [])
+        session_id = state.get("session_id", "")
+
+        cb = getattr(self, "_status_callback", None)
+        if callable(cb):
+            msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
+            icon, msg = msgs.get("report_node", ("📄", "Writing your report…"))
+            cb("report_node", icon, msg)
+
+        print(f"📄 report_node → query={query[:80]}")
+
+        try:
+            if not _REPORT_AGENT_AVAILABLE or _report_agent_module is None:
+                raise ImportError("report_agent module not available")
+
+            # Use module-level references so we write into the SAME _reports_store
+            # dict that the FastAPI GET /reports/{id} endpoint reads from.
+            SharedContext            = _report_agent_module.SharedContext
+            _generate_report_content = _report_agent_module._generate_report_content
+            _reports_store           = _report_agent_module._reports_store
+            _save_report_to_disk     = _report_agent_module._save_report_to_disk
+
+            # Sync context so report_agent has the latest chunks + history
+            if session_id:
+                SharedContext.set_chunks(session_id, chunks)
+                SharedContext.set_history(session_id, history)
+
+            # Build available / explicit doc lists from chunks
+            available_docs: list = list({
+                c.get("metadata", {}).get("filename", "")
+                for c in chunks
+                if c.get("metadata", {}).get("filename")
+            })
+            explicit_docs: list = []
+            if available_docs:
+                ql = query.lower()
+                for doc in available_docs:
+                    stem = doc.lower().rsplit(".", 1)[0]
+                    if stem in ql or doc.lower() in ql:
+                        explicit_docs.append(doc)
+
+            # ── Run the heavy generation in a sub-thread ──────────────────────
+            # report_node itself is already running in a thread (from main.py).
+            # We spin a second thread so we can emit keepalive status pings every
+            # 5 s while generation runs — this prevents the SSE stream from being
+            # dropped by browsers / proxies that close idle connections after ~30 s.
+            result_box: list  = [None]   # [result_dict] on success
+            error_box:  list  = [None]   # [exception]   on failure
+            done_event = _threading.Event()
+
+            def _generate():
+                try:
+                    result_box[0] = _generate_report_content(
+                        prompt        = query,
+                        chunks        = chunks,
+                        history       = history,
+                        language      = None,
+                        available_docs= available_docs,
+                        explicit_docs = explicit_docs,
+                    )
+                except Exception as _e:
+                    error_box[0] = _e
+                finally:
+                    done_event.set()
+
+            gen_thread = _threading.Thread(target=_generate, daemon=True)
+            gen_thread.start()
+
+            # Emit a keepalive ping every 5 s while waiting (max 10 min)
+            _progress_msgs = [
+                ("📄", "Analysing document content…"),
+                ("🗂️",  "Planning report structure…"),
+                ("✍️",  "Writing sections…"),
+                ("✍️",  "Writing sections…"),
+                ("✍️",  "Still writing — large document…"),
+                ("✍️",  "Still writing — large document…"),
+                ("💾",  "Finalising report…"),
+            ]
+            _ping_idx = 0
+            while not done_event.wait(timeout=5):
+                if callable(cb):
+                    _icon, _msg = _progress_msgs[min(_ping_idx, len(_progress_msgs) - 1)]
+                    cb("report_node", _icon, _msg)
+                _ping_idx += 1
+
+            gen_thread.join(timeout=5)
+
+            if error_box[0] is not None:
+                raise error_box[0]
+
+            result = result_box[0]
+            if result is None:
+                raise RuntimeError("_generate_report_content returned None")
+
+            # ── Save report ───────────────────────────────────────────────────
+            report_id = str(_uuid.uuid4())
+            now       = _dt.now().isoformat()
+            report    = {
+                "report_id":   report_id,
+                "title":       result["title"],
+                "content":     result["content"],
+                "charts":      result.get("charts", []),
+                "source_docs": result["source_docs"],
+                "language":    result["language"],
+                "summary":     result.get("summary", ""),
+                "created_at":  now,
+                "updated_at":  now,
+                "version":     1,
+                "versions": [{
+                    "version":     1,
+                    "title":       result["title"],
+                    "instruction": query,
+                    "created_at":  now,
+                    "content":     result["content"],
+                }],
+                "session_id":  session_id,
+            }
+            _reports_store[report_id] = report
+            _save_report_to_disk(report)
+
+            answer = (
+                result.get("summary")
+                or f'Your report **"{result["title"]}"** is ready — click the panel to view or download it.'
+            )
+            print(f"   ✅ report_node: saved → {report_id} ({result['title']!r})")
+
+            return {
+                **state,
+                "answer":     answer,
+                "raw_answer": answer,
+                "sources":    [],
+                "confidence": 1.0,
+                "analytics":    None,
+                "report_id":    report_id,
+                "report_title": result["title"],
+            }
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            err = f"Report generation failed: {e}"
+            print(f"   ❌ report_node: {err}")
+            return {
+                **state,
+                "answer":     err,
+                "raw_answer": err,
+                "sources":    [],
+                "confidence": 0.0,
+                "analytics":  None,
+            }
 
 
 
