@@ -388,7 +388,103 @@ def _on_page(canvas, doc, title: str, date_str: str):
     canvas.restoreState()
 
 
-def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = None) -> bytes:
+def _chart_to_png_pdf(chart_cfg: Dict) -> Optional[bytes]:
+    """
+    Render a Chart.js-style config dict to PNG bytes using matplotlib.
+    Used exclusively by _generate_pdf_reportlab to embed charts in PDF.
+    Returns None on any failure (chart is silently skipped in that case).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import io as _io
+        import numpy as _np
+
+        data       = chart_cfg.get("data", {})
+        labels     = data.get("labels", [])
+        datasets   = data.get("datasets", [])
+        chart_type = chart_cfg.get("type", "bar")
+        options    = chart_cfg.get("options", {})
+        title_text = (
+            options.get("plugins", {}).get("title", {}).get("text", "")
+            or chart_cfg.get("title", "")
+        )
+
+        if not labels or not datasets:
+            return None
+
+        _C = ["#6366f1","#10b981","#f59e0b","#ef4444",
+              "#3b82f6","#ec4899","#8b5cf6","#14b8a6","#f97316","#a855f7"]
+
+        fig, ax = plt.subplots(figsize=(7, 3.8))
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("#f9fafb")
+
+        if chart_type == "pie":
+            vals = [float(v) if isinstance(v, (int, float)) else 0.0
+                    for v in (datasets[0].get("data", []) if datasets else [])]
+            ax.pie(vals, labels=labels, colors=_C[:len(vals)],
+                   autopct="%1.1f%%", startangle=90,
+                   textprops={"fontsize": 8})
+            ax.set_facecolor("white")
+
+        elif chart_type == "line":
+            x = _np.arange(len(labels))
+            for i, ds in enumerate(datasets):
+                vals = [float(v) if isinstance(v, (int, float)) else 0.0
+                        for v in ds.get("data", [])]
+                ax.plot(x, vals, marker="o", markersize=4,
+                        color=_C[i % len(_C)],
+                        label=ds.get("label", f"Series {i+1}"), linewidth=2)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+            ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+            ax.set_axisbelow(True)
+            if len(datasets) > 1:
+                ax.legend(fontsize=8)
+
+        else:  # bar
+            x    = _np.arange(len(labels))
+            n    = len(datasets)
+            w    = 0.7 / max(n, 1)
+            for i, ds in enumerate(datasets):
+                vals = [float(v) if isinstance(v, (int, float)) else 0.0
+                        for v in ds.get("data", [])]
+                ax.bar(x + (i - (n-1)/2) * w, vals, width=w * 0.9,
+                       color=_C[i % len(_C)],
+                       label=ds.get("label", f"Series {i+1}"), zorder=3)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+            ax.yaxis.grid(True, linestyle="--", alpha=0.5, zorder=0)
+            ax.set_axisbelow(True)
+            if n > 1:
+                ax.legend(fontsize=8)
+
+        scales = options.get("scales", {})
+        if scales.get("x", {}).get("title", {}).get("text"):
+            ax.set_xlabel(scales["x"]["title"]["text"], fontsize=9)
+        if scales.get("y", {}).get("title", {}).get("text"):
+            ax.set_ylabel(scales["y"]["title"]["text"], fontsize=9)
+        if title_text:
+            ax.set_title(title_text, fontsize=10, fontweight="bold", pad=8)
+
+        ax.tick_params(axis="both", labelsize=8)
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+
+        plt.tight_layout(pad=1.2)
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception as _e:
+        print(f"   ⚠️  _chart_to_png_pdf: {_e}")
+        return None
+
+
+def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = None,
+                            charts: Optional[List[Dict]] = None) -> bytes:
     """
     Convert a Markdown report into a polished PDF using ReportLab.
 
@@ -497,9 +593,48 @@ def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = N
         story.append(Paragraph(docs_text, styles["cover_meta"]))
     story.append(PageBreak())
 
-    # ── Report content ────────────────────────────────────────────────────────
-    content_story = _md_to_story(content, styles)
-    story.extend(content_story)
+    # ── Report content — with chart injection ────────────────────────────────
+    # Build a chart_id → chart_config lookup for quick access
+    charts_lookup: Dict[str, Dict] = {}
+    if charts:
+        for ch in charts:
+            charts_lookup[ch["chart_id"]] = ch
+
+    if charts_lookup:
+        # Split content on <!-- CHART:id --> markers and interleave images
+        import re as _re
+        parts = _re.split(r'<!-- CHART:([a-zA-Z0-9_-]+) -->', content)
+        # parts alternates: text, chart_id, text, chart_id, ...
+        for idx, part in enumerate(parts):
+            if idx % 2 == 0:
+                # text segment
+                story.extend(_md_to_story(part, styles))
+            else:
+                # chart_id
+                ch = charts_lookup.get(part)
+                if ch:
+                    # Chart title
+                    ch_title = ch.get("title", "")
+                    if ch_title:
+                        story.append(Spacer(1, 6))
+                        story.append(Paragraph(f"<b>{ch_title}</b>", styles["h3"]))
+                    # Render chart_js config → PNG
+                    png_bytes = _chart_to_png_pdf(ch.get("chart_js", {}))
+                    if png_bytes:
+                        from io import BytesIO as _BIO
+                        img_buf = _BIO(png_bytes)
+                        chart_img = Image(img_buf, width=14 * cm, height=7.5 * cm)
+                        chart_img.hAlign = "CENTER"
+                        story.append(Spacer(1, 4))
+                        story.append(chart_img)
+                        story.append(Spacer(1, 4))
+                    # Interpretation note
+                    interp = ch.get("interpretation", "")
+                    if interp:
+                        story.append(Paragraph(f"<i>{interp}</i>", styles["blockquote"]))
+    else:
+        content_story = _md_to_story(content, styles)
+        story.extend(content_story)
 
     # ── Sources footer ────────────────────────────────────────────────────────
     if source_docs:
@@ -550,14 +685,20 @@ def _minimal_pdf_fallback(title: str, content: str) -> bytes:
     return buf.getvalue()
 
 
-def _generate_pdf(title: str, content: str, source_docs: List[str] = None) -> bytes:
+def _generate_md(content: str) -> str:
+    """Strip <!-- CHART:id --> placeholders from Markdown (charts are PDF-only)."""
+    import re as _re
+    return _re.sub(r'\n*<!-- CHART:[a-zA-Z0-9_-]+ -->\n*', '\n\n', content).strip()
+
+
+def _generate_pdf(title: str, content: str, source_docs: List[str] = None,
+                  charts: Optional[List[Dict]] = None) -> bytes:
     """
     Public entry: always returns valid PDF bytes.
-    Tries ReportLab first (always available), pdflatex as optional quality upgrade.
+    Charts are rendered as embedded PNG images in the PDF only.
     """
-    # ReportLab is the primary and reliable path
     print("   PDF: rendering with ReportLab...")
-    return _generate_pdf_reportlab(title, content, source_docs or [])
+    return _generate_pdf_reportlab(title, content, source_docs or [], charts or [])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -569,10 +710,11 @@ class SharedContext:
     In-process store for per-session RAG state.
     Written by main.py after every /query; read by report_agent and other agents.
     """
-    _history:      Dict[str, List[Dict]] = {}
-    _chunks:       Dict[str, List[Dict]] = {}
-    _analytics:    Dict[str, Any]        = {}
-    _vector_store: Any                   = None   # injected once by main.py at startup
+    _history:               Dict[str, List[Dict]] = {}
+    _chunks:                Dict[str, List[Dict]] = {}
+    _analytics:             Dict[str, Any]        = {}
+    _vector_store:          Any                   = None
+    _pending_chart_clarif:  Dict[str, bool]       = {}  # True while awaiting chart clarification answer
 
     @classmethod
     def set_vector_store(cls, vs: Any) -> None:
@@ -602,6 +744,14 @@ class SharedContext:
     @classmethod
     def get_analytics(cls, session_id: str) -> Any:
         return cls._analytics.get(session_id)
+
+    @classmethod
+    def set_pending_chart_clarif(cls, session_id: str, pending: bool) -> None:
+        cls._pending_chart_clarif[session_id] = pending
+
+    @classmethod
+    def get_pending_chart_clarif(cls, session_id: str) -> bool:
+        return cls._pending_chart_clarif.get(session_id, False)
 
     @classmethod
     def fetch_chunks_for_report(
@@ -795,6 +945,7 @@ def _generate_report_content(
     available_docs: List[str],
     explicit_docs: List[str],
     analytics: Any = None,
+    requested_charts: Optional[List[Dict]] = None,  # pre-built chart configs from clarification flow
 ) -> Dict[str, Any]:
     """
     Generate a fully grounded, query-aware report.
@@ -1025,26 +1176,182 @@ def _generate_report_content(
 
         sections_md.append(f"## {heading}\n\n{sec_content.strip()}")
 
-    # ── Step 3: Embed analytics chart note if available ───────────────────────
+    # ── Step 3: Build and embed charts ───────────────────────────────────────
     charts_for_report: List[Dict] = []
 
+    # Helper: render a Chart.js-style data dict → PNG bytes via matplotlib
+    def _chart_to_png(chart_cfg: Dict) -> Optional[bytes]:
+        """Convert a chart_js config dict to PNG bytes using matplotlib."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import io as _io
+            import numpy as _np
+
+            data = chart_cfg.get("data", {})
+            labels = data.get("labels", [])
+            datasets = data.get("datasets", [])
+            chart_type = chart_cfg.get("type", "bar")
+            options = chart_cfg.get("options", {})
+            title_text = (
+                options.get("plugins", {}).get("title", {}).get("text", "")
+                or chart_cfg.get("title", "")
+            )
+
+            if not labels or not datasets:
+                return None
+
+            fig, ax = plt.subplots(figsize=(7, 3.8))
+            fig.patch.set_facecolor("white")
+            ax.set_facecolor("#f9fafb")
+
+            _COLORS = ["#6366f1","#10b981","#f59e0b","#ef4444",
+                       "#3b82f6","#ec4899","#8b5cf6","#14b8a6",
+                       "#f97316","#a855f7"]
+
+            if chart_type == "pie":
+                raw_data = datasets[0].get("data", []) if datasets else []
+                vals = [float(v) if isinstance(v, (int, float)) else 0.0 for v in raw_data]
+                colors = _COLORS[:len(vals)]
+                wedges, texts, autotexts = ax.pie(
+                    vals, labels=labels, colors=colors,
+                    autopct="%1.1f%%", startangle=90,
+                    textprops={"fontsize": 8},
+                )
+                for at in autotexts:
+                    at.set_fontsize(7)
+                ax.set_facecolor("white")
+
+            elif chart_type == "line":
+                x = _np.arange(len(labels))
+                for i, ds in enumerate(datasets):
+                    vals = [float(v) if isinstance(v, (int, float)) else 0.0 for v in ds.get("data", [])]
+                    ax.plot(x, vals, marker="o", markersize=4,
+                            color=_COLORS[i % len(_COLORS)],
+                            label=ds.get("label", f"Series {i+1}"), linewidth=2)
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+                ax.yaxis.grid(True, linestyle="--", alpha=0.5)
+                ax.set_axisbelow(True)
+                if len(datasets) > 1:
+                    ax.legend(fontsize=8, framealpha=0.8)
+
+            else:  # bar (default)
+                x = _np.arange(len(labels))
+                n = len(datasets)
+                width = 0.7 / max(n, 1)
+                for i, ds in enumerate(datasets):
+                    vals = [float(v) if isinstance(v, (int, float)) else 0.0 for v in ds.get("data", [])]
+                    offset = (i - (n - 1) / 2) * width
+                    ax.bar(x + offset, vals, width=width * 0.9,
+                           color=_COLORS[i % len(_COLORS)],
+                           label=ds.get("label", f"Series {i+1}"), zorder=3)
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+                ax.yaxis.grid(True, linestyle="--", alpha=0.5, zorder=0)
+                ax.set_axisbelow(True)
+                if n > 1:
+                    ax.legend(fontsize=8, framealpha=0.8)
+
+            # Axis labels from options
+            scales = options.get("scales", {})
+            x_title = scales.get("x", {}).get("title", {}).get("text", "")
+            y_title = scales.get("y", {}).get("title", {}).get("text", "")
+            if x_title:
+                ax.set_xlabel(x_title, fontsize=9)
+            if y_title:
+                ax.set_ylabel(y_title, fontsize=9)
+
+            if title_text:
+                ax.set_title(title_text, fontsize=10, fontweight="bold", pad=8)
+
+            ax.tick_params(axis="both", labelsize=8)
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+
+            plt.tight_layout(pad=1.2)
+            buf_img = _io.BytesIO()
+            fig.savefig(buf_img, format="png", dpi=130, bbox_inches="tight",
+                        facecolor="white")
+            plt.close(fig)
+            return buf_img.getvalue()
+        except Exception as _e:
+            print(f"   ⚠️  _chart_to_png: {_e}")
+            return None
+
+    # Helper: add a chart to the report (charts_for_report list + markdown placeholder)
+    def _embed_chart(chart_result: Dict, section_id: str) -> Optional[str]:
+        """
+        Given a build_chart() result dict, register it and return the
+        markdown placeholder string to splice into section content, or None.
+        """
+        if chart_result.get("type") != "chart_config":
+            return None
+        chart_id = str(uuid.uuid4())
+        charts_for_report.append({
+            "section_id":     section_id,
+            "chart_id":       chart_id,
+            "chart_js":       chart_result.get("chart_js", {}),
+            "title":          chart_result.get("title", "Chart"),
+            "description":    chart_result.get("description", ""),
+            "interpretation": chart_result.get("interpretation", ""),
+        })
+        return f"\n\n<!-- CHART:{chart_id} -->\n"
+
+    # 3a. Embed any pre-built charts from the clarification flow
+    if requested_charts:
+        for rc in requested_charts:
+            _embed_chart(rc, "user_requested")
+
+    # 3b. Build charts for sections the planner flagged as needs_chart
+    # (only when no pre-built charts were passed in for those sections)
+    _graph_agent_mod = None
+    try:
+        import importlib as _il
+        import sys as _sys
+        if "services.graph_agent" in _sys.modules:
+            _graph_agent_mod = _sys.modules["services.graph_agent"]
+        else:
+            try:
+                _graph_agent_mod = _il.import_module("services.graph_agent")
+            except ModuleNotFoundError:
+                _graph_agent_mod = _il.import_module("graph_agent")
+    except Exception:
+        pass
+
+    chart_sections_md: List[str] = []
+    for i, (sec, sec_md) in enumerate(zip(plan.get("sections", []), sections_md)):
+        if sec.get("needs_chart") and _graph_agent_mod:
+            try:
+                _ga = _graph_agent_mod.GraphAgent()
+                chart_result = _ga.build_chart(
+                    query=f"{sec.get('instruction', sec.get('heading', ''))} from {docs_hint}",
+                    chunks=working_chunks,
+                    language=detected_language,
+                    skip_clarification=True,  # planner already decided; no looping
+                )
+                placeholder = _embed_chart(chart_result, sec.get("id", f"s{i}"))
+                if placeholder:
+                    sec_md = sec_md + placeholder
+                    print(f"   📊 Chart embedded in section '{sec.get('heading')}'")
+            except Exception as _ce:
+                print(f"   ⚠️  Chart for section '{sec.get('heading')}': {_ce}")
+        chart_sections_md.append(sec_md)
+
+    sections_md = chart_sections_md if chart_sections_md else sections_md
+
+    # 3c. Embed analytics chart from session if available (legacy path)
     if analytics and isinstance(analytics, dict):
         chart_cfg = analytics.get("chart_config") or analytics
-        if chart_cfg and isinstance(chart_cfg, dict) and chart_cfg.get("type"):
-            chart_id = str(uuid.uuid4())
-            charts_for_report.append({
-                "section_id":     "analytics",
-                "chart_id":       chart_id,
-                "chart_js":       chart_cfg,
-                "title":          analytics.get("title", "Data Visualisation"),
-                "description":    analytics.get("description", ""),
-                "interpretation": analytics.get("interpretation", ""),
-            })
-            sections_md.append(
-                f"## Data Visualisation\n\n"
-                f"The following chart was generated from the data in your documents."
-                f"\n\n<!-- CHART:{chart_id} -->"
-            )
+        if chart_cfg and isinstance(chart_cfg, dict) and chart_cfg.get("type") == "chart_config":
+            placeholder = _embed_chart(chart_cfg, "analytics")
+            if placeholder:
+                sections_md.append(
+                    f"## Data Visualisation\n\n"
+                    f"The following chart was generated from the data in your documents."
+                    + placeholder
+                )
 
     full_content = f"# {title}\n\n" + "\n\n".join(sections_md)
 
@@ -1427,14 +1734,16 @@ async def download_report(report_id: str, fmt: str = "pdf"):
     safe_name = re.sub(r'[^\w\s-]', '', title).strip().replace(" ", "_")[:50] or "report"
 
     if fmt == "md":
+        md_content = _generate_md(content)
         return Response(
-            content    = content.encode("utf-8"),
+            content    = md_content.encode("utf-8"),
             media_type = "text/markdown; charset=utf-8",
             headers    = {"Content-Disposition": f'attachment; filename="{safe_name}.md"'},
         )
 
-    # PDF — always valid, never empty
-    pdf_bytes = _generate_pdf(title, content, source_docs)
+    # PDF — charts embedded as images
+    charts = report.get("charts", [])
+    pdf_bytes = _generate_pdf(title, content, source_docs, charts)
     return Response(
         content    = pdf_bytes,
         media_type = "application/pdf",

@@ -2120,6 +2120,130 @@ Remember: ALL text fields must be in {target_lang}."""
                     if stem in ql or doc.lower() in ql:
                         explicit_docs.append(doc)
 
+            # ── Chart clarification flow ──────────────────────────────────────
+            # Use a session-level flag in SharedContext — reliable, no history sniffing.
+            SharedContext = _report_agent_module.SharedContext
+
+            _CHART_RE = re.compile(
+                r'\b(?:with|include|add|including|avec|con|mit|com)\s+'
+                r'(?:a\s+)?(?:chart|graph|plot|visual|diagram|figure|'
+                r'graphe|graphique|grafico|diagramm|grafik|gráfico)\b'
+                r'|(?:chart|graph|plot|grafik|graphique|gráfico)s?\s+(?:in|in the|dans|en|nel|im)\b'
+                r'|\bcharts?\b|\bgraphs?\b|\bplots?\b',
+                re.IGNORECASE,
+            )
+            wants_charts = bool(_CHART_RE.search(query))
+
+            # True if we previously returned a chart clarification for this session
+            _prev_was_clarif = SharedContext.get_pending_chart_clarif(session_id)
+
+            # Pre-built chart list to pass into _generate_report_content
+            requested_charts: list = []
+
+            if wants_charts and not _prev_was_clarif and _GRAPH_AGENT_AVAILABLE:
+                # Attempt to discover chart options from the document chunks
+                try:
+                    graph_mod = _report_agent_module  # already loaded same package
+                    # Import GraphAgent via same sys.modules resolution
+                    import importlib as _importlib2
+                    import sys as _sys2
+                    if "services.graph_agent" in _sys2.modules:
+                        _ga_mod = _sys2.modules["services.graph_agent"]
+                    else:
+                        try:
+                            _ga_mod = _importlib2.import_module("services.graph_agent")
+                        except ModuleNotFoundError:
+                            _ga_mod = _importlib2.import_module("graph_agent")
+
+                    _ga = _ga_mod.GraphAgent()
+                    groups = _ga._discover_metric_groups(query, chunks, "en")
+
+                    if groups and len(groups) > 1:
+                        # Vague — ask user which charts to include
+                        group_names = ", ".join(g["label"] for g in groups[:4])
+                        clarif = (
+                            f"I can build this report and include charts from the data. "
+                            f"I found several data sets I could visualize: "
+                            f"**{group_names}**"
+                            f"{'...' if len(groups) > 4 else ''}.\n\n"
+                            f"Which charts would you like included? "
+                            f"You can name one or more, or say **\"all of them\"** — "
+                            f"or say **\"no charts\"** to get the report without visuals."
+                        )
+                        print(f"   🤔 report_node: chart clarification — {len(groups)} groups found")
+                        # Mark this session as awaiting a clarification answer
+                        SharedContext.set_pending_chart_clarif(session_id, True)
+                        return {
+                            **state,
+                            "answer":     clarif,
+                            "raw_answer": clarif,
+                            "sources":    [],
+                            "confidence": 0.5,
+                            "analytics":  {"type": "report_chart_clarification", "groups": groups},
+                            "report_id":  None,
+                        }
+                    elif groups and len(groups) == 1:
+                        # Only one data set — build it automatically, no clarification needed
+                        chart_result = _ga.build_chart(
+                            query=groups[0].get("hint", groups[0]["label"]),
+                            chunks=chunks,
+                            language="en",
+                            skip_clarification=True,
+                        )
+                        if chart_result.get("type") == "chart_config":
+                            requested_charts = [chart_result]
+                except Exception as _ce:
+                    print(f"   ⚠️  report_node chart discovery: {_ce}")
+
+            elif _prev_was_clarif and _GRAPH_AGENT_AVAILABLE:
+                # User answered the clarification — clear the flag immediately so
+                # any subsequent report request starts fresh
+                SharedContext.set_pending_chart_clarif(session_id, False)
+                # Build the specific charts they asked for
+                _no_charts_re = re.compile(
+                    r'\bno\s+charts?\b|\bno\s+graphs?\b|\bwithout\s+charts?\b'
+                    r'|\bsans\s+graphique\b|\bsin\s+gr[áa]ficos?\b',
+                    re.IGNORECASE,
+                )
+                if not _no_charts_re.search(query):
+                    try:
+                        import importlib as _importlib3
+                        import sys as _sys3
+                        if "services.graph_agent" in _sys3.modules:
+                            _ga_mod2 = _sys3.modules["services.graph_agent"]
+                        else:
+                            try:
+                                _ga_mod2 = _importlib3.import_module("services.graph_agent")
+                            except ModuleNotFoundError:
+                                _ga_mod2 = _importlib3.import_module("graph_agent")
+
+                        _ga2 = _ga_mod2.GraphAgent()
+
+                        # "all of them" → build one chart per group
+                        all_re = re.compile(r'\ball\b|\btous\b|\btodas?\b|\balle\b', re.I)
+                        if all_re.search(query):
+                            groups2 = _ga2._discover_metric_groups(query, chunks, "en")
+                            targets = [g.get("hint", g["label"]) for g in (groups2 or [])[:4]]
+                        else:
+                            targets = [query]  # user named specific charts
+
+                        for target_q in targets:
+                            cr = _ga2.build_chart(
+                                query=target_q,
+                                chunks=chunks,
+                                language="en",
+                                skip_clarification=True,
+                            )
+                            if cr.get("type") == "chart_config":
+                                requested_charts.append(cr)
+
+                        print(f"   📊 report_node: {len(requested_charts)} chart(s) confirmed by user")
+                    except Exception as _ce2:
+                        print(f"   ⚠️  report_node chart build after clarif: {_ce2}")
+
+            # Clear any lingering clarification flag before building
+            SharedContext.set_pending_chart_clarif(session_id, False)
+
             # ── Run the heavy generation in a sub-thread ──────────────────────
             # report_node itself is already running in a thread (from main.py).
             # We spin a second thread so we can emit keepalive status pings every
@@ -2132,12 +2256,13 @@ Remember: ALL text fields must be in {target_lang}."""
             def _generate():
                 try:
                     result_box[0] = _generate_report_content(
-                        prompt        = query,
-                        chunks        = chunks,
-                        history       = history,
-                        language      = None,
-                        available_docs= available_docs,
-                        explicit_docs = explicit_docs,
+                        prompt          = query,
+                        chunks          = chunks,
+                        history         = history,
+                        language        = None,
+                        available_docs  = available_docs,
+                        explicit_docs   = explicit_docs,
+                        requested_charts= requested_charts,
                     )
                 except Exception as _e:
                     error_box[0] = _e
