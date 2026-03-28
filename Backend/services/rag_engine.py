@@ -2124,114 +2124,162 @@ Remember: ALL text fields must be in {target_lang}."""
             # Use a session-level flag in SharedContext — reliable, no history sniffing.
             SharedContext = _report_agent_module.SharedContext
 
-            _CHART_RE = re.compile(
-                r'\b(?:with|include|add|including|avec|con|mit|com)\s+'
-                r'(?:a\s+)?(?:chart|graph|plot|visual|diagram|figure|'
-                r'graphe|graphique|grafico|diagramm|grafik|gráfico)\b'
-                r'|(?:chart|graph|plot|grafik|graphique|gráfico)s?\s+(?:in|in the|dans|en|nel|im)\b'
-                r'|\bcharts?\b|\bgraphs?\b|\bplots?\b',
-                re.IGNORECASE,
-            )
-            wants_charts = bool(_CHART_RE.search(query))
+            # ── LLM-based chart intent classifier ────────────────────────────
+            # Replaces all hardcoded regexes. The LLM understands intent across
+            # languages, typos, paraphrases, and implicit chart requests.
+            # Returns JSON:
+            #   wants_charts: bool  — does the user want any chart at all?
+            #   already_specified: bool — did they name exactly what to chart
+            #                             (metric + optional chart type), leaving
+            #                             nothing ambiguous to clarify?
+            #   wants_all: bool     — (clarif-answer context) wants every chart
+            #   wants_none: bool    — (clarif-answer context) wants no charts
+            def _classify_chart_intent(text: str, is_clarif_answer: bool) -> dict:
+                """Ask the LLM what the user means re: charts. Fast, cheap call."""
+                try:
+                    _system = (
+                        "You are a precise intent classifier for a report-generation assistant. "
+                        "The user may write in any language, with typos or abbreviations. "
+                        "Reply with ONLY a raw JSON object — no markdown, no explanation.\n"
+                        'Format: {"wants_charts": bool, "already_specified": bool, "wants_all": bool, "wants_none": bool}\n\n'
+                        "Field definitions:\n"
+                        "  wants_charts: true if the user wants one or more charts/graphs/visuals in their report. "
+                        "    Catch any language or spelling: 'graphe', 'grafico', 'diagramme', 'визуализация', 'رسم بياني', etc.\n"
+                        "  already_specified: true ONLY if the user has named both (a) what metric/data to chart "
+                        "    AND left nothing ambiguous — e.g. 'bar chart of trenching meters', "
+                        "    'camembert des coûts', 'grafico a linee del throughput'. "
+                        "    False if the request is vague like 'include charts' or 'add some graphs'.\n"
+                        "  wants_all: true if this is a clarification answer meaning 'include all charts' "
+                        "    (e.g. 'all of them', 'tous', 'todas', 'كلها', 'все').\n"
+                        "  wants_none: true if this is a clarification answer meaning 'no charts at all' "
+                        "    (e.g. 'no charts', 'sans graphiques', 'sin gráficos', 'بدون مخططات').\n"
+                        f"  is_clarification_answer: {is_clarif_answer} — "
+                        "    set to true context: the system previously asked which charts to include, "
+                        "    and this text is the user's reply to that question."
+                    )
+                    _prompt = f'User message: """{text}"""'
+                    _raw = call_llm(
+                        _prompt,
+                        system_prompt=_system,
+                        max_tokens=80,
+                        temperature=0.0,
+                        task="classify",
+                    )
+                    import json as _j, re as _re2
+                    _clean = _re2.sub(r"```(?:json)?|```", "", _raw).strip()
+                    # extract first {...} in case the LLM adds preamble
+                    _m = _re2.search(r'\{[^}]+\}', _clean)
+                    _parsed = _j.loads(_m.group(0) if _m else _clean)
+                    return {
+                        "wants_charts":      bool(_parsed.get("wants_charts", False)),
+                        "already_specified": bool(_parsed.get("already_specified", False)),
+                        "wants_all":         bool(_parsed.get("wants_all", False)),
+                        "wants_none":        bool(_parsed.get("wants_none", False)),
+                    }
+                except Exception as _e:
+                    print(f"   ⚠️  _classify_chart_intent failed: {_e} — defaulting to wants_charts=False")
+                    # Safe fallback: don't ask for clarification, don't build charts
+                    return {"wants_charts": False, "already_specified": False,
+                            "wants_all": False, "wants_none": False}
 
             # True if we previously returned a chart clarification for this session
             _prev_was_clarif = SharedContext.get_pending_chart_clarif(session_id)
 
+            _chart_intent = _classify_chart_intent(query, is_clarif_answer=_prev_was_clarif)
+            wants_charts         = _chart_intent["wants_charts"]
+            chart_already_specified = _chart_intent["already_specified"]
+            print(
+                f"   🧠 chart_intent: wants={wants_charts} specified={chart_already_specified} "
+                f"all={_chart_intent['wants_all']} none={_chart_intent['wants_none']} "
+                f"prev_clarif={_prev_was_clarif}"
+            )
+
             # Pre-built chart list to pass into _generate_report_content
             requested_charts: list = []
 
-            if wants_charts and not _prev_was_clarif and _GRAPH_AGENT_AVAILABLE:
-                # Attempt to discover chart options from the document chunks
+            # Helper: resolve GraphAgent module once
+            def _load_graph_agent_mod():
+                import importlib as _il, sys as _s
+                if "services.graph_agent" in _s.modules:
+                    return _s.modules["services.graph_agent"]
                 try:
-                    graph_mod = _report_agent_module  # already loaded same package
-                    # Import GraphAgent via same sys.modules resolution
-                    import importlib as _importlib2
-                    import sys as _sys2
-                    if "services.graph_agent" in _sys2.modules:
-                        _ga_mod = _sys2.modules["services.graph_agent"]
-                    else:
-                        try:
-                            _ga_mod = _importlib2.import_module("services.graph_agent")
-                        except ModuleNotFoundError:
-                            _ga_mod = _importlib2.import_module("graph_agent")
+                    return _il.import_module("services.graph_agent")
+                except ModuleNotFoundError:
+                    return _il.import_module("graph_agent")
 
-                    _ga = _ga_mod.GraphAgent()
-                    groups = _ga._discover_metric_groups(query, chunks, "en")
-
-                    if groups and len(groups) > 1:
-                        # Vague — ask user which charts to include
-                        group_names = ", ".join(g["label"] for g in groups[:4])
-                        clarif = (
-                            f"I can build this report and include charts from the data. "
-                            f"I found several data sets I could visualize: "
-                            f"**{group_names}**"
-                            f"{'...' if len(groups) > 4 else ''}.\n\n"
-                            f"Which charts would you like included? "
-                            f"You can name one or more, or say **\"all of them\"** — "
-                            f"or say **\"no charts\"** to get the report without visuals."
-                        )
-                        print(f"   🤔 report_node: chart clarification — {len(groups)} groups found")
-                        # Mark this session as awaiting a clarification answer
-                        SharedContext.set_pending_chart_clarif(session_id, True)
-                        return {
-                            **state,
-                            "answer":     clarif,
-                            "raw_answer": clarif,
-                            "sources":    [],
-                            "confidence": 0.5,
-                            "analytics":  {"type": "report_chart_clarification", "groups": groups},
-                            "report_id":  None,
-                        }
-                    elif groups and len(groups) == 1:
-                        # Only one data set — build it automatically, no clarification needed
-                        chart_result = _ga.build_chart(
-                            query=groups[0].get("hint", groups[0]["label"]),
-                            chunks=chunks,
-                            language="en",
+            if wants_charts and not _prev_was_clarif and _GRAPH_AGENT_AVAILABLE:
+                if chart_already_specified:
+                    # User told us exactly what they want — build it directly, no dialog.
+                    try:
+                        _ga_s = _load_graph_agent_mod().GraphAgent()
+                        cr_s = _ga_s.build_chart(
+                            query=query, chunks=chunks, language="en",
                             skip_clarification=True,
                         )
-                        if chart_result.get("type") == "chart_config":
-                            requested_charts = [chart_result]
-                except Exception as _ce:
-                    print(f"   ⚠️  report_node chart discovery: {_ce}")
+                        if cr_s.get("type") == "chart_config":
+                            requested_charts = [cr_s]
+                            print("   📊 report_node: chart built directly (already specified)")
+                    except Exception as _ce_s:
+                        print(f"   ⚠️  report_node direct chart build: {_ce_s}")
+                else:
+                    # Vague — discover what metrics exist and ask the user to pick.
+                    try:
+                        _ga = _load_graph_agent_mod().GraphAgent()
+                        groups = _ga._discover_metric_groups(query, chunks, "en")
+
+                        if groups and len(groups) > 1:
+                            group_names = ", ".join(g["label"] for g in groups[:4])
+                            clarif = (
+                                f"I can build this report and include charts from the data. "
+                                f"I found several data sets I could visualize: "
+                                f"**{group_names}**"
+                                f"{'...' if len(groups) > 4 else ''}.\n\n"
+                                f"Which charts would you like included? "
+                                f"You can name one or more, or say **\"all of them\"** — "
+                                f"or say **\"no charts\"** to get the report without visuals."
+                            )
+                            print(f"   🤔 report_node: chart clarification — {len(groups)} groups found")
+                            SharedContext.set_pending_chart_clarif(session_id, True)
+                            return {
+                                **state,
+                                "answer":     clarif,
+                                "raw_answer": clarif,
+                                "sources":    [],
+                                "confidence": 0.5,
+                                "analytics":  {"type": "report_chart_clarification", "groups": groups},
+                                "report_id":  None,
+                            }
+                        elif groups and len(groups) == 1:
+                            # Only one option — build it without asking
+                            cr = _ga.build_chart(
+                                query=groups[0].get("hint", groups[0]["label"]),
+                                chunks=chunks, language="en", skip_clarification=True,
+                            )
+                            if cr.get("type") == "chart_config":
+                                requested_charts = [cr]
+                    except Exception as _ce:
+                        print(f"   ⚠️  report_node chart discovery: {_ce}")
 
             elif _prev_was_clarif and _GRAPH_AGENT_AVAILABLE:
                 # User answered the clarification — clear the flag immediately so
-                # any subsequent report request starts fresh
+                # any subsequent report request starts fresh.
                 SharedContext.set_pending_chart_clarif(session_id, False)
-                # Build the specific charts they asked for
-                _no_charts_re = re.compile(
-                    r'\bno\s+charts?\b|\bno\s+graphs?\b|\bwithout\s+charts?\b'
-                    r'|\bsans\s+graphique\b|\bsin\s+gr[áa]ficos?\b',
-                    re.IGNORECASE,
-                )
-                if not _no_charts_re.search(query):
+
+                if not _chart_intent["wants_none"]:
                     try:
-                        import importlib as _importlib3
-                        import sys as _sys3
-                        if "services.graph_agent" in _sys3.modules:
-                            _ga_mod2 = _sys3.modules["services.graph_agent"]
-                        else:
-                            try:
-                                _ga_mod2 = _importlib3.import_module("services.graph_agent")
-                            except ModuleNotFoundError:
-                                _ga_mod2 = _importlib3.import_module("graph_agent")
+                        _ga2 = _load_graph_agent_mod().GraphAgent()
 
-                        _ga2 = _ga_mod2.GraphAgent()
-
-                        # "all of them" → build one chart per group
-                        all_re = re.compile(r'\ball\b|\btous\b|\btodas?\b|\balle\b', re.I)
-                        if all_re.search(query):
+                        if _chart_intent["wants_all"]:
+                            # Build one chart per discovered group
                             groups2 = _ga2._discover_metric_groups(query, chunks, "en")
                             targets = [g.get("hint", g["label"]) for g in (groups2 or [])[:4]]
                         else:
-                            targets = [query]  # user named specific charts
+                            # User named specific chart(s) — pass their reply as the query
+                            targets = [query]
 
                         for target_q in targets:
                             cr = _ga2.build_chart(
-                                query=target_q,
-                                chunks=chunks,
-                                language="en",
+                                query=target_q, chunks=chunks, language="en",
                                 skip_clarification=True,
                             )
                             if cr.get("type") == "chart_config":
