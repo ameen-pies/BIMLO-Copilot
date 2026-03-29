@@ -19,6 +19,7 @@ from services.vector_store import VectorStoreManager
 from services.rag_engine import RAGEngine
 from services.suggest import router as suggest_router
 from services.voice_transcriber import router as voice_router
+from services.voice_call import router as voice_call_router
 from services.autocomplete import router as autocomplete_router
 from services.report_agent import (
     router as report_router,
@@ -56,6 +57,7 @@ SharedContext.set_vector_store(vector_store)
 
 app.include_router(suggest_router)
 app.include_router(voice_router)
+app.include_router(voice_call_router)
 app.include_router(autocomplete_router)
 app.include_router(report_router)
 

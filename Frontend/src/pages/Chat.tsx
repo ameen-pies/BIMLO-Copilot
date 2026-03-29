@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -63,7 +63,6 @@ interface VersionInfo {
   title:       string;
   instruction: string;
   created_at:  string;
-  content?:    string;   // full markdown snapshot — stored by backend on every version
 }
 
 interface ReportRecord {
@@ -4764,17 +4763,14 @@ const Chat = () => {
                                     if (isActive) return;
                                     // Clicking the live version while previewing something else → go back to live
                                     if (isLive) { setPreviewedVersion(null); return; }
-                                    // Version content is already embedded in activeReport.versions[] —
-                                    // no network call needed. The old GET /versions/{n} endpoint doesn't exist.
-                                    const snap_full = activeReport.versions.find(v => v.version === snap.version);
-                                    if (snap_full) {
-                                      setPreviewedVersion({
-                                        version: snap.version,
-                                        content: snap_full.content ?? "",
-                                        charts:  (activeReport.charts ?? []),
-                                        title:   snap_full.title ?? activeReport.title,
-                                      });
-                                    }
+                                    // Fetch + preview a past version
+                                    try {
+                                      const res = await fetch(`${getApiBase()}/reports/${activeReport.report_id}/versions/${snap.version}`);
+                                      if (res.ok) {
+                                        const full = await res.json();
+                                        setPreviewedVersion({ version: snap.version, content: full.content, charts: full.charts ?? [], title: full.title });
+                                      }
+                                    } catch { /* ignore */ }
                                   }}
                                   className={[
                                     "shrink-0 flex flex-col items-start gap-1 px-3 py-2.5 rounded-xl border text-left w-44",
@@ -5094,6 +5090,14 @@ const Chat = () => {
                     )}
                 </div>
             </div>
+            {/* ── Call pill ── */}
+            <Link
+              to="/call"
+              className="flex items-center gap-1.5 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all"
+            >
+              <Phone className="h-3.5 w-3.5 shrink-0" />
+              <span>Call</span>
+            </Link>
             <ThemeToggle />
           </div>
         </header>

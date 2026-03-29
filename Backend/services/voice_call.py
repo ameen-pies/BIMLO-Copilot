@@ -28,10 +28,10 @@ router = APIRouter(tags=["voice_call"])
 # ── Groq TTS constants ────────────────────────────────────────────────────────
 _GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
 _GROQ_TTS_URL   = "https://api.groq.com/openai/v1/audio/speech"
-_TTS_MODEL      = "playai-tts"
-# Aaliyah: warm, clear, natural female English voice from Play.ai
-_TTS_VOICE      = "Aaliyah-PlayAI"
-_TTS_FORMAT     = "mp3"
+_TTS_MODEL      = "canopylabs/orpheus-v1-english"
+# Confirmed female voices from Groq API: hannah, diana, autumn
+_TTS_VOICE      = "hannah"
+_TTS_FORMAT     = "wav"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,7 +76,6 @@ async def text_to_speech(req: TTSRequest):
         "input":           text,
         "voice":           voice,
         "response_format": _TTS_FORMAT,
-        "speed":           speed,
     }
 
     headers = {
@@ -99,7 +98,7 @@ async def text_to_speech(req: TTSRequest):
 
     return StreamingResponse(
         _audio_stream(),
-        media_type="audio/mpeg",
+        media_type="audio/wav",
         headers={
             "Cache-Control":               "no-cache",
             "Access-Control-Allow-Origin": "*",
@@ -113,15 +112,15 @@ async def text_to_speech(req: TTSRequest):
 
 @router.get("/tts/voices")
 async def list_voices():
-    """Return the curated list of female English voices the call page offers."""
+    """Return confirmed Orpheus voices (from Groq API error message)."""
     return {
         "voices": [
-            {"id": "Aaliyah-PlayAI",  "label": "Aaliyah",  "description": "Warm, natural — default"},
-            {"id": "Arista-PlayAI",   "label": "Arista",   "description": "Clear, professional"},
-            {"id": "Celeste-PlayAI",  "label": "Celeste",  "description": "Soft, friendly"},
-            {"id": "Deedee-PlayAI",   "label": "Deedee",   "description": "Energetic, upbeat"},
-            {"id": "Gail-PlayAI",     "label": "Gail",     "description": "Mature, authoritative"},
-            {"id": "Nia-PlayAI",      "label": "Nia",      "description": "Calm, reassuring"},
+            {"id": "hannah",  "label": "Hannah",  "description": "Warm, natural — default"},
+            {"id": "diana",   "label": "Diana",   "description": "Clear, professional"},
+            {"id": "autumn",  "label": "Autumn",  "description": "Soft, calm"},
+            {"id": "austin",  "label": "Austin",  "description": "Male, friendly"},
+            {"id": "daniel",  "label": "Daniel",  "description": "Male, clear"},
+            {"id": "troy",    "label": "Troy",    "description": "Male, deep"},
         ],
         "default": _TTS_VOICE,
     }

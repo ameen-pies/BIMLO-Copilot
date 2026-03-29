@@ -118,7 +118,7 @@ const CallPage: React.FC = () => {
   const [turns, setTurns]           = useState<Turn[]>([]);
   const [muted, setMuted]           = useState(false);
   const [speakerOff, setSpeakerOff] = useState(false);
-  const [selectedVoice, setSelectedVoice] = useState("Aaliyah-PlayAI");
+  const [selectedVoice, setSelectedVoice] = useState("hannah");
   const [showVoicePicker, setShowVoicePicker] = useState(false);
   const [liveTranscript, setLiveTranscript]   = useState("");
   const [waveform, setWaveform]     = useState<number[]>(Array(32).fill(0));
@@ -591,12 +591,12 @@ const CallPage: React.FC = () => {
                 className="absolute right-0 top-6 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-2xl z-50 overflow-hidden w-44"
               >
                 {[
-                  { id: "Aaliyah-PlayAI",  label: "Aaliyah",  hint: "Warm, natural" },
-                  { id: "Arista-PlayAI",   label: "Arista",   hint: "Professional" },
-                  { id: "Celeste-PlayAI",  label: "Celeste",  hint: "Soft, friendly" },
-                  { id: "Deedee-PlayAI",   label: "Deedee",   hint: "Energetic" },
-                  { id: "Nia-PlayAI",      label: "Nia",      hint: "Calm" },
-                  { id: "Gail-PlayAI",     label: "Gail",     hint: "Authoritative" },
+                  { id: "hannah", label: "Hannah", hint: "Warm, natural" },
+                  { id: "diana",  label: "Diana",  hint: "Clear, professional" },
+                  { id: "autumn", label: "Autumn", hint: "Soft, calm" },
+                  { id: "austin", label: "Austin", hint: "Male, friendly" },
+                  { id: "daniel", label: "Daniel", hint: "Male, clear" },
+                  { id: "troy",   label: "Troy",   hint: "Male, deep" },
                 ].map(v => (
                   <button
                     key={v.id}
