@@ -98,6 +98,10 @@ def _build_styles() -> Dict[str, ParagraphStyle]:
             "cover_meta", fontSize=10, fontName="Helvetica",
             textColor=_GRAY_TEXT, alignment=TA_CENTER, spaceAfter=4,
         ),
+        "cover_made_for": ParagraphStyle(
+            "cover_made_for", fontSize=11, fontName="Helvetica-Bold",
+            textColor=_BRAND_BLUE, alignment=TA_CENTER, spaceAfter=4,
+        ),
         "toc_heading": ParagraphStyle(
             "toc_heading", fontSize=14, fontName="Helvetica-Bold",
             textColor=_BRAND_DARK, spaceAfter=10, spaceBefore=4,
@@ -484,7 +488,8 @@ def _chart_to_png_pdf(chart_cfg: Dict) -> Optional[bytes]:
 
 
 def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = None,
-                            charts: Optional[List[Dict]] = None) -> bytes:
+                            charts: Optional[List[Dict]] = None,
+                            account_name: Optional[str] = None) -> bytes:
     """
     Convert a Markdown report into a polished PDF using ReportLab.
 
@@ -515,19 +520,19 @@ def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = N
     story: List = []
 
     # ── Cover page ────────────────────────────────────────────────────────────
-    story.append(Spacer(1, 3 * cm))
+    # Top spacer pushes logo to roughly the upper-third of the page
+    story.append(Spacer(1, 3.5 * cm))
 
-    # Company logo
-    # Layout: Backend/services/report_agent.py -> Frontend/public/favicon.png
-    # Go up: services/ -> Backend/ -> BIMLO/ -> then into Frontend/public/
-    _SERVICES_DIR    = os.path.dirname(os.path.abspath(__file__))   # .../BIMLO/Backend/services
-    _BACKEND_DIR     = os.path.dirname(_SERVICES_DIR)                # .../BIMLO/Backend
-    _BIMLO_DIR       = os.path.dirname(_BACKEND_DIR)                 # .../BIMLO
+    # ── Logo (bigger: 4 cm × 4 cm) ───────────────────────────────────────────
+    _LOGO_SIZE = 4.0 * cm   # was 2.2 cm
+    _SERVICES_DIR    = os.path.dirname(os.path.abspath(__file__))
+    _BACKEND_DIR     = os.path.dirname(_SERVICES_DIR)
+    _BIMLO_DIR       = os.path.dirname(_BACKEND_DIR)
     _FRONTEND_PUBLIC = os.path.join(_BIMLO_DIR, "Frontend", "public")
     _LOGO_SVG        = os.path.join(_FRONTEND_PUBLIC, "favicon.svg")
     _LOGO_PNG        = os.path.join(_FRONTEND_PUBLIC, "favicon.png")
-    _LOGO_PNG_CACHE = os.path.join(tempfile.gettempdir(), "bimlo_logo_cover.png")
-    _logo_rendered = False
+    _LOGO_PNG_CACHE  = os.path.join(tempfile.gettempdir(), "bimlo_logo_cover.png")
+    _logo_rendered   = False
 
     def _try_render_logo(source_path: str) -> bool:
         """Convert source_path → safe RGBA PNG cache, then add to story. Returns True on success."""
@@ -536,10 +541,9 @@ def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = N
             with PILImage.open(source_path) as im:
                 im = im.convert("RGBA")
                 im.save(_LOGO_PNG_CACHE, format="PNG")
-            logo_img = Image(_LOGO_PNG_CACHE, width=2.2 * cm, height=2.2 * cm)
+            logo_img = Image(_LOGO_PNG_CACHE, width=_LOGO_SIZE, height=_LOGO_SIZE)
             logo_img.hAlign = "CENTER"
             story.append(logo_img)
-            story.append(Spacer(1, 0.4 * cm))
             return True
         except Exception as _e:
             print(f"   ℹ️  Logo Pillow render failed ({source_path}): {_e}")
@@ -549,46 +553,57 @@ def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = N
     if not _logo_rendered and os.path.exists(_LOGO_SVG):
         try:
             import cairosvg
-            cairosvg.svg2png(url=_LOGO_SVG, write_to=_LOGO_PNG_CACHE, output_width=120, output_height=120)
-            logo_img = Image(_LOGO_PNG_CACHE, width=2.2 * cm, height=2.2 * cm)
+            cairosvg.svg2png(url=_LOGO_SVG, write_to=_LOGO_PNG_CACHE,
+                             output_width=200, output_height=200)
+            logo_img = Image(_LOGO_PNG_CACHE, width=_LOGO_SIZE, height=_LOGO_SIZE)
             logo_img.hAlign = "CENTER"
             story.append(logo_img)
-            story.append(Spacer(1, 0.4 * cm))
             _logo_rendered = True
             print("   ✅ Logo: rendered via cairosvg")
         except Exception as _svg_err:
             print(f"   ℹ️  Logo SVG/cairosvg skipped: {_svg_err}")
 
-    # 2. Fallback: PNG via Pillow (handles palette/ICO quirks ReportLab can't)
+    # 2. Fallback: PNG via Pillow
     if not _logo_rendered and os.path.exists(_LOGO_PNG):
         _logo_rendered = _try_render_logo(_LOGO_PNG)
         if _logo_rendered:
             print("   ✅ Logo: rendered via Pillow (PNG)")
 
-    # 3. Last resort: feed PNG directly to ReportLab (works for clean RGBA/RGB PNGs)
+    # 3. Last resort: feed PNG directly to ReportLab
     if not _logo_rendered and os.path.exists(_LOGO_PNG):
         try:
-            logo_img = Image(_LOGO_PNG, width=2.2 * cm, height=2.2 * cm)
+            logo_img = Image(_LOGO_PNG, width=_LOGO_SIZE, height=_LOGO_SIZE)
             logo_img.hAlign = "CENTER"
             story.append(logo_img)
-            story.append(Spacer(1, 0.4 * cm))
             _logo_rendered = True
             print("   ✅ Logo: rendered directly via ReportLab")
         except Exception as _direct_err:
             print(f"   ⚠️  Logo: all attempts failed — {_direct_err}")
 
     if not _logo_rendered:
-        story.append(Spacer(1, 1 * cm))
+        story.append(Spacer(1, _LOGO_SIZE))   # reserve same vertical space
 
+    # ── Generous gap between logo and title ──────────────────────────────────
+    story.append(Spacer(1, 1.8 * cm))
+
+    # ── Title ─────────────────────────────────────────────────────────────────
     story.append(Paragraph(title, styles["cover_title"]))
-    story.append(Spacer(1, 0.5 * cm))
-    story.append(HRFlowable(width="50%", thickness=2, color=_BRAND_BLUE,
-                             hAlign="CENTER", spaceAfter=12))
-    story.append(Spacer(1, 0.3 * cm))
+    story.append(Spacer(1, 0.6 * cm))
+    story.append(HRFlowable(width="45%", thickness=2, color=_BRAND_BLUE,
+                             hAlign="CENTER", spaceAfter=14))
+    story.append(Spacer(1, 0.4 * cm))
+
+    # ── "Prepared for" line (account name) ────────────────────────────────────
+    if account_name and account_name.strip():
+        story.append(Paragraph(f"Prepared for  {account_name.strip()}",
+                               styles["cover_made_for"]))
+        story.append(Spacer(1, 0.3 * cm))
+
+    # ── Date & generator credit ───────────────────────────────────────────────
     story.append(Paragraph(f"Generated by Bimlo Copilot  ·  {date_str}",
                             styles["cover_meta"]))
     if source_docs:
-        story.append(Spacer(1, 0.4 * cm))
+        story.append(Spacer(1, 0.3 * cm))
         docs_text = "Sources: " + " · ".join(source_docs[:6])
         story.append(Paragraph(docs_text, styles["cover_meta"]))
     story.append(PageBreak())
@@ -692,13 +707,15 @@ def _generate_md(content: str) -> str:
 
 
 def _generate_pdf(title: str, content: str, source_docs: List[str] = None,
-                  charts: Optional[List[Dict]] = None) -> bytes:
+                  charts: Optional[List[Dict]] = None,
+                  account_name: Optional[str] = None) -> bytes:
     """
     Public entry: always returns valid PDF bytes.
     Charts are rendered as embedded PNG images in the PDF only.
     """
     print("   PDF: rendering with ReportLab...")
-    return _generate_pdf_reportlab(title, content, source_docs or [], charts or [])
+    return _generate_pdf_reportlab(title, content, source_docs or [], charts or [],
+                                   account_name=account_name)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -865,6 +882,7 @@ class GenerateReportRequest(BaseModel):
     explicit_docs:  List[str] = []
     include_charts: bool = True
     language:       Optional[str] = None
+    account_name:   Optional[str] = None   # e.g. "John Doe" — shown on cover page
 
 
 class PatchReportRequest(BaseModel):
@@ -1482,6 +1500,7 @@ async def report_stream(req: GenerateReportRequest):
                 "source_docs": result["source_docs"],
                 "language":    result["language"],
                 "summary":     result.get("summary", ""),
+                "account_name": req.account_name or "",
                 "created_at":  now,
                 "updated_at":  now,
                 "version":     1,
@@ -1605,6 +1624,7 @@ async def create_report(req: GenerateReportRequest):
         "source_docs": result["source_docs"],
         "language":    result["language"],
         "summary":     result.get("summary", ""),
+        "account_name": req.account_name or "",
         "created_at":  now,
         "updated_at":  now,
         "version":     1,
@@ -1743,7 +1763,8 @@ async def download_report(report_id: str, fmt: str = "pdf"):
 
     # PDF — charts embedded as images
     charts = report.get("charts", [])
-    pdf_bytes = _generate_pdf(title, content, source_docs, charts)
+    pdf_bytes = _generate_pdf(title, content, source_docs, charts,
+                               account_name=report.get("account_name"))
     return Response(
         content    = pdf_bytes,
         media_type = "application/pdf",

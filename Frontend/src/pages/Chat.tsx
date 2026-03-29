@@ -63,6 +63,7 @@ interface VersionInfo {
   title:       string;
   instruction: string;
   created_at:  string;
+  content?:    string;   // full markdown snapshot — stored by backend on every version
 }
 
 interface ReportRecord {
@@ -1838,7 +1839,7 @@ interface ChartGroup {
 }
 
 interface ChartAnalytics {
-  type: "chart_config" | "chart_clarification" | "chart_error";
+  type: "chart_config" | "chart_clarification" | "report_chart_clarification" | "chart_error";
   // chart_config
   chart_js?:       Record<string, any>;
   chart_type?:     string;
@@ -3367,27 +3368,98 @@ const Chat = () => {
 
   // Inline chart renderer — draws a Chart.js chart into a canvas
   const ReportInlineChart = ({ chart }: { chart: ChartRecord }) => {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const chartRef  = useRef<any>(null);
+    const canvasRef  = useRef<HTMLCanvasElement>(null);
+    const chartRef   = useRef<any>(null);
+    const [interpExpanded, setInterpExpanded] = React.useState(false);
+
     useEffect(() => {
       if (!canvasRef.current) return;
       const win = window as any;
       if (!win.Chart) return;
       if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; }
       try {
-        const config = JSON.parse(JSON.stringify(chart.chart_js));
+        const isDark  = document.documentElement.classList.contains("dark");
+        const rawCfg  = chart.chart_js as Record<string, any>;
+        const config  = buildInitialCfg(rawCfg, isDark);
+        config.plugins = [makeGradientPlugin(rawCfg, isDark)];
         chartRef.current = new win.Chart(canvasRef.current, config);
       } catch (e) { console.error("Report chart render error:", e); }
       return () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null; } };
     }, [chart.chart_id]);
+
+    // Re-theme when dark/light mode changes
+    useEffect(() => {
+      let rafId = 0;
+      const observer = new MutationObserver(mutations => {
+        if (!mutations.some(m => m.attributeName === "class")) return;
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(() => {
+          const c = chartRef.current;
+          if (!c || !chart.chart_js) return;
+          const isDark = document.documentElement.classList.contains("dark");
+          c.config.plugins = [makeGradientPlugin(chart.chart_js as any, isDark)];
+          applyThemeToChart(c, chart.chart_js as any, isDark);
+        });
+      });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+      return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
+    }, [chart]);
+
+    const hasInterp = Boolean(chart.interpretation);
+
     return (
-      <div className="my-4 rounded-xl border border-border bg-muted/30 p-4">
-        <p className="text-xs font-semibold text-foreground mb-3">{chart.title}</p>
-        <div style={{ position: "relative", height: 200 }}>
-          <canvas ref={canvasRef} />
+      <div className="my-4 rounded-xl border border-border bg-card overflow-hidden shadow-sm">
+        {/* Header row */}
+        <div className="flex items-center justify-between px-4 pt-3 pb-1 gap-2">
+          <p className="text-[13px] font-semibold text-foreground leading-snug flex-1 truncate">
+            {chart.title}
+          </p>
+          <button
+            onClick={() => {
+              const win = window as any;
+              const c = chartRef.current;
+              if (!c || !win) return;
+              const pngName = `${(chart.title ?? "chart").replace(/\s+/g, "_")}.png`;
+              downloadChartPng(c, pngName, document.documentElement.classList.contains("dark"));
+            }}
+            title="Download chart as PNG"
+            className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted border border-transparent hover:border-border transition-all shrink-0"
+          >
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            PNG
+          </button>
         </div>
-        {chart.interpretation && (
-          <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed italic">{chart.interpretation}</p>
+
+        {/* Canvas */}
+        <div className="px-4 pb-3">
+          <div className="rounded-lg border border-border bg-card p-3 shadow-inner overflow-hidden">
+            <div style={{ position: "relative", height: 220 }}>
+              <canvas ref={canvasRef} />
+            </div>
+          </div>
+        </div>
+
+        {/* Key insights — same collapsible panel as ChartMessage */}
+        {hasInterp && (
+          <div className="mx-4 mb-3 rounded-lg border border-primary/20 bg-primary/5 overflow-hidden">
+            <button
+              onClick={() => setInterpExpanded(v => !v)}
+              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-primary/80 hover:text-primary transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.347a3.252 3.252 0 01-4.78 0l-.347-.347z" />
+                </svg>
+                Key insights
+              </span>
+              <svg className={`h-3.5 w-3.5 transition-transform ${interpExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {interpExpanded && <ChartInsights text={chart.interpretation ?? ""} />}
+          </div>
         )}
       </div>
     );
@@ -3930,6 +4002,16 @@ const Chat = () => {
     const val = e.target.value;
     setInput(val);
 
+    // Always clear ghost immediately; never show on empty input
+    setWordSuffix("");
+    if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
+
+    if (!val) {
+      setAutocomplete(null);
+      setAutocompletePos(null);
+      return;
+    }
+
     const caret = e.target.selectionStart ?? val.length;
     const before = val.slice(0, caret);
     const atIdx = before.lastIndexOf("@");
@@ -3955,11 +4037,6 @@ const Chat = () => {
     setAutocompletePos(null);
 
     // ── AI ghost-text completion ─────────────────────────────────────────
-    // Debounce: wait 400ms after the user stops typing before calling the API.
-    // Clear any previous ghost immediately so stale text doesn't linger.
-    setWordSuffix("");
-    if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
-
     const trimmed = before.trim();
     if (trimmed.length >= 4 && !isLoading) {
       ghostDebounceRef.current = setTimeout(async () => {
@@ -4687,14 +4764,17 @@ const Chat = () => {
                                     if (isActive) return;
                                     // Clicking the live version while previewing something else → go back to live
                                     if (isLive) { setPreviewedVersion(null); return; }
-                                    // Fetch + preview a past version
-                                    try {
-                                      const res = await fetch(`${getApiBase()}/reports/${activeReport.report_id}/versions/${snap.version}`);
-                                      if (res.ok) {
-                                        const full = await res.json();
-                                        setPreviewedVersion({ version: snap.version, content: full.content, charts: full.charts ?? [], title: full.title });
-                                      }
-                                    } catch { /* ignore */ }
+                                    // Version content is already embedded in activeReport.versions[] —
+                                    // no network call needed. The old GET /versions/{n} endpoint doesn't exist.
+                                    const snap_full = activeReport.versions.find(v => v.version === snap.version);
+                                    if (snap_full) {
+                                      setPreviewedVersion({
+                                        version: snap.version,
+                                        content: snap_full.content ?? "",
+                                        charts:  (activeReport.charts ?? []),
+                                        title:   snap_full.title ?? activeReport.title,
+                                      });
+                                    }
                                   }}
                                   className={[
                                     "shrink-0 flex flex-col items-start gap-1 px-3 py-2.5 rounded-xl border text-left w-44",
@@ -5137,13 +5217,13 @@ const Chat = () => {
                         ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit break-words min-w-0 max-w-full"
                         : msg.interrupted
                           ? "px-3 py-2 bg-transparent border border-dashed border-muted-foreground/20 rounded-bl-md w-fit"
-                          : msg.analytics?.type === "chart_clarification"
+                          : msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification"
                             ? "pt-3 pb-3 bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                             : "py-3 bg-secondary text-secondary-foreground rounded-bl-md w-fit"
                     }`}
                   >
                   {/* Copy button — floats right and sticks as you scroll long answers */}
-                  {msg.role === "assistant" && !msg.interrupted && msg.analytics?.type !== "chart_clarification" && msg.analytics?.type !== "chart_config" && msg.analytics?.type !== "chart_error" && (
+                  {msg.role === "assistant" && !msg.interrupted && msg.analytics?.type !== "chart_clarification" && msg.analytics?.type !== "report_chart_clarification" && msg.analytics?.type !== "chart_config" && msg.analytics?.type !== "chart_error" && (
                     <button
                       onClick={() => {
                         const text = msg.rawAnswer ?? msg.content;
@@ -5198,6 +5278,48 @@ const Chat = () => {
                           if (!notifyDismissed) setShowNotifyBanner(true);
                           try {
                             const assistantMsg = await runStreamingQuery(hint, "graph");
+                            if (!assistantMsg) return;
+                            setMessages(prev => [...prev, assistantMsg]);
+                            setTypingMessageId(assistantMsg.id);
+                            fetchSuggestions(hint, assistantMsg.content);
+                            fireNotification();
+                          } catch (error) {
+                            const errMsg: Message = {
+                              id: (Date.now() + 1).toString(),
+                              role: "assistant",
+                              content: `Sorry, I encountered an error: ${serializeError(error)}`,
+                              timestamp: new Date(),
+                            };
+                            setMessages(prev => [...prev, errMsg]);
+                          }
+                        }}
+                      />
+                    ) : msg.role === "assistant" && msg.analytics?.type === "report_chart_clarification" ? (
+                      <ChartClarification
+                        analytics={{
+                          ...msg.analytics as any,
+                          question: (msg.analytics as any).question
+                            ?? "Which charts would you like included in the report?",
+                          groups: [
+                            ...((msg.analytics as any).groups ?? []),
+                            { label: "All of them", description: "Include every chart found", hint: "all of them" },
+                            { label: "No charts", description: "Build the report without visuals", hint: "no charts" },
+                          ],
+                        }}
+                        onSelect={async (hint) => {
+                          if (isLoading) return;
+                          const userMsg: Message = {
+                            id: Date.now().toString(),
+                            role: "user",
+                            content: hint,
+                            timestamp: new Date(),
+                          };
+                          setMessages(prev => [...prev, userMsg]);
+                          setOpenSourceKey(null);
+                          setSuggestions([]);
+                          if (!notifyDismissed) setShowNotifyBanner(true);
+                          try {
+                            const assistantMsg = await runStreamingQuery(hint, "report");
                             if (!assistantMsg) return;
                             setMessages(prev => [...prev, assistantMsg]);
                             setTypingMessageId(assistantMsg.id);
@@ -5859,8 +5981,8 @@ const Chat = () => {
                       style={{ maxHeight: "160px" }}
                       className="w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-0 pt-[7px] overflow-y-auto scrollbar-thin"
                     />
-                    {/* Ghost-text suffix — rendered as faded overlay after the real input */}
-                    {wordSuffix && !autocomplete && (
+                    {/* Ghost-text suffix — never shown on empty input */}
+                    {wordSuffix && input.length > 0 && !autocomplete && (
                       <span
                         aria-hidden="true"
                         className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 pt-[7px] whitespace-pre-wrap break-words select-none"
