@@ -113,9 +113,10 @@ def clear_history(session_id: str):
 
 class QueryRequest(BaseModel):
     query:       str
-    top_k:       Optional[int] = 5
-    session_id:  Optional[str] = None   # omit → new session created automatically
-    force_route: Optional[str] = None   # e.g. "graph" — bypasses the LLM router
+    top_k:       Optional[int]  = 5
+    session_id:  Optional[str]  = None   # omit → new session created automatically
+    force_route: Optional[str]  = None   # e.g. "graph" — bypasses the LLM router
+    voice_mode:  Optional[bool] = False  # True → skip citation check, source formatting, iterative loops
 
 
 class QueryResponse(BaseModel):
@@ -207,6 +208,7 @@ async def query_documents(request: QueryRequest):
             prev_route=prev_route,
             route_log=route_log,
             force_route=request.force_route,
+            voice_mode=request.voice_mode,
         )
 
         # Store this turn in server-side history (clean, no [N] citation markers)
@@ -289,6 +291,7 @@ async def query_stream(request: QueryRequest):
                 status_callback=status_callback,
                 force_route=request.force_route,
                 session_id=session_id,
+                voice_mode=request.voice_mode,
             )
             # Persist session
             import re as _re

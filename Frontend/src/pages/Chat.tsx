@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
 import ThemeToggle from "@/components/ThemeToggle";
 import TypingIndicator from "@/components/TypingIndicator";
@@ -30,6 +30,7 @@ interface Message {
   voiceTranscript?: string; // the transcription text
   voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
   interrupted?: true;       // response was stopped mid-generation
+  callCard?: { duration: number; startedAt: Date }; // voice call summary card
   analytics?: Record<string, any> | null;  // chart_config or chart_error from graph_node
   reportId?: string | null;                // report card rendered below the response
   reportTitle?: string | null;             // title from SSE event — no fetch needed
@@ -2396,6 +2397,29 @@ const Chat = () => {
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
 
   const { toast } = useToast();
+  const navigate = useNavigate();
+
+  // ── Call-ended event — injects a call card into the chat ──────────────────
+  useEffect(() => {
+    const handler = (e: CustomEvent) => {
+      const { duration, startedAt, convId } = e.detail as {
+        duration: number;
+        startedAt: string;
+        convId: string;
+      };
+      if (convId !== activeConvId) return;
+      const card: Message = {
+        id: `call-${Date.now()}`,
+        role: "user",
+        content: "",
+        timestamp: new Date(),
+        callCard: { duration, startedAt: new Date(startedAt) },
+      };
+      setMessages(prev => [...prev, card]);
+    };
+    window.addEventListener("call-ended", handler as EventListener);
+    return () => window.removeEventListener("call-ended", handler as EventListener);
+  }, [activeConvId]);
 
   // ── Voice recording ───────────────────────────────────────────────────────
   type VoiceState = "idle" | "recording" | "transcribing";
@@ -5091,13 +5115,22 @@ const Chat = () => {
                 </div>
             </div>
             {/* ── Call pill ── */}
-            <Link
-              to="/call"
+            <button
+              type="button"
+              onClick={() => {
+                // Pass the current session so CallPage shares history with this chat
+                navigate("/call", {
+                  state: {
+                    sessionId: sessionIdRef.current,
+                    convId: activeConvId,
+                  },
+                });
+              }}
               className="flex items-center gap-1.5 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all"
             >
               <Phone className="h-3.5 w-3.5 shrink-0" />
               <span>Call</span>
-            </Link>
+            </button>
             <ThemeToggle />
           </div>
         </header>
@@ -5197,7 +5230,24 @@ const Chat = () => {
                     );
                   })()}
                   {/* ── Voice message — rendered directly, bypasses group/bubble wrapper ── */}
-                  {msg.voiceBlobUrl ? (
+                  {msg.callCard ? (
+                    /* ── Call card — Messenger-style "You called" summary ── */
+                    <div className="flex flex-col items-end gap-1">
+                      <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-2xl rounded-br-md bg-emerald-500/12 border border-emerald-500/25 w-fit">
+                        <div className="flex items-center justify-center h-7 w-7 rounded-full bg-emerald-500/20 shrink-0">
+                          <Phone className="h-3.5 w-3.5 text-emerald-400" />
+                        </div>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-[13px] font-medium text-emerald-300 leading-none">Voice call</span>
+                          <span className="text-[11px] text-emerald-400/60 tabular-nums">
+                            {Math.floor(msg.callCard.duration / 60)}:{String(msg.callCard.duration % 60).padStart(2, "0")}
+                            {" · "}
+                            {msg.callCard.startedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : msg.voiceBlobUrl ? (
                     <VoiceMessageBubble
                       blobUrl={msg.voiceBlobUrl}
                       duration={msg.voiceDuration ?? 0}

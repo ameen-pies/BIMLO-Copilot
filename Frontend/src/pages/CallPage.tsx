@@ -18,9 +18,10 @@
 import React, {
   useState, useEffect, useRef, useCallback,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown } from "lucide-react";
+import Orb from "../components/Orb";
 
 // ── API base (same helper as Chat.tsx) ───────────────────────────────────────
 const API =
@@ -28,11 +29,11 @@ const API =
   "http://localhost:8000";
 
 // ── VAD tuning ────────────────────────────────────────────────────────────────
-const VAD_ENERGY_THRESHOLD    = 0.012;  // RMS energy gate (0-1); raise if noisy room
-const VAD_ZCR_MAX             = 0.45;   // zero-crossing rate ceiling; pure noise is high-ZCR
-const VAD_HOLD_MS             = 900;    // silence after speech before we cut (ms)
-const VAD_MIN_SPEECH_MS       = 350;    // minimum voiced duration to count as real speech
-const VAD_BARGE_IN_ENERGY     = 0.018;  // slightly higher bar for barge-in detection
+const VAD_ENERGY_THRESHOLD    = 0.030;  // RMS energy gate — raised to reject bg noise/TV/AC
+const VAD_ZCR_MAX             = 0.35;   // tighter ZCR ceiling; speech is low-ZCR, noise is high
+const VAD_HOLD_MS             = 700;    // silence after speech before we cut — short leeway for second thoughts
+const VAD_MIN_SPEECH_MS       = 500;    // minimum voiced duration — rejects short noise bursts
+const VAD_BARGE_IN_ENERGY     = 0.040;  // higher bar for barge-in to avoid TTS feedback
 const VAD_FRAME_MS            = 30;     // analysis frame duration
 
 // ── Call state machine ────────────────────────────────────────────────────────
@@ -108,10 +109,15 @@ const STATE_COLOR: Record<CallState, string> = {
 // ── Component ─────────────────────────────────────────────────────────────────
 const CallPage: React.FC = () => {
   const navigate   = useNavigate();
-  const sessionRef = useRef<string>(
-    // Try to inherit the chat session; otherwise create a fresh call session
-    localStorage.getItem("bimlo_call_session") || `call-${uuid4()}`
-  );
+  const location   = useLocation();
+  const locState   = (location.state ?? {}) as { sessionId?: string; convId?: string };
+
+  // Inherit the chat session if launched from Chat, otherwise start fresh
+  const sessionRef  = useRef<string>(locState.sessionId ?? `call-${uuid4()}`);
+  // Remember which conv to post the call-card back to
+  const convIdRef   = useRef<string>(locState.convId ?? "default");
+  // Track when the call actually started (for the card timestamp)
+  const callStartRef = useRef<Date>(new Date());
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [callState, setCallState]   = useState<CallState>("idle");
@@ -121,6 +127,11 @@ const CallPage: React.FC = () => {
   const [selectedVoice, setSelectedVoice] = useState("hannah");
   const [showVoicePicker, setShowVoicePicker] = useState(false);
   const [liveTranscript, setLiveTranscript]   = useState("");
+  const [thinkingMessage, setThinkingMessage] = useState("");
+  // Subtitle state: current sentence key (for AnimatePresence) + words revealed so far
+  const [subtitleKey,   setSubtitleKey]   = useState(0);
+  const [subtitleWords, setSubtitleWords] = useState<string[]>([]);
+  const spokenTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [waveform, setWaveform]     = useState<number[]>(Array(32).fill(0));
   const [callDuration, setCallDuration] = useState(0);
   const [error, setError]           = useState<string | null>(null);
@@ -144,19 +155,16 @@ const CallPage: React.FC = () => {
 
   const ttsAudioRef       = useRef<HTMLAudioElement | null>(null);
   const ttsAbortRef       = useRef<AbortController | null>(null);
+  const ragAbortRef       = useRef<AbortController | null>(null);
+  const speakWavRef       = useRef<((b64: string, text: string, isFiller: boolean) => Promise<void>) | null>(null);
+  const startListeningRef = useRef<(() => void) | null>(null);
 
   const durationTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-  const turnsEndRef       = useRef<HTMLDivElement>(null);
 
   // Keep refs in sync with state
   useEffect(() => { stateRef.current   = callState; }, [callState]);
   useEffect(() => { mutedRef.current   = muted;     }, [muted]);
   useEffect(() => { speakerOffRef.current = speakerOff; }, [speakerOff]);
-
-  // Auto-scroll transcript
-  useEffect(() => {
-    turnsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns, liveTranscript]);
 
   // Duration timer
   useEffect(() => {
@@ -282,25 +290,56 @@ const CallPage: React.FC = () => {
     animFrameRef.current = requestAnimationFrame(tick);
   }, []);
 
-  // ── Stop TTS immediately ───────────────────────────────────────────────────
-  const stopTTS = useCallback(() => {
+  // ── Stop TTS immediately with a natural stutter/cutoff ───────────────────
+  const stopTTS = useCallback((withStutter = false) => {
     ttsAbortRef.current?.abort();
     ttsAbortRef.current = null;
-    if (ttsAudioRef.current) {
-      ttsAudioRef.current.pause();
-      ttsAudioRef.current.src = "";
+    if (spokenTimerRef.current) {
+      const ref = spokenTimerRef.current as any;
+      if (ref._cancel)   ref._cancel();
+      if (ref._timeouts) ref._timeouts.forEach(clearTimeout);
+      else if (typeof ref === "number") clearInterval(ref);
+      spokenTimerRef.current = null;
+    }
+    setSubtitleWords([]);
+
+    const audio = ttsAudioRef.current;
+    if (!audio) return;
+
+    if (withStutter && !audio.paused && audio.duration > 0.3) {
+      // Natural stutter: replay the last ~220ms of audio at reduced volume,
+      // then hard-cut — mimics a human being interrupted mid-word.
+      const stutterStart = Math.max(0, audio.currentTime - 0.22);
+      audio.currentTime  = stutterStart;
+      audio.volume       = 0.45;
+      // Hard cut after ~180ms
+      const cutTimer = setTimeout(() => {
+        audio.pause();
+        audio.src = "";
+        ttsAudioRef.current = null;
+      }, 180);
+      // Safety: also cut if audio ends naturally before the timer
+      audio.addEventListener("ended", () => {
+        clearTimeout(cutTimer);
+        ttsAudioRef.current = null;
+      }, { once: true });
+    } else {
+      audio.pause();
+      audio.src = "";
       ttsAudioRef.current = null;
     }
   }, []);
 
   // ── Barge-in handler ───────────────────────────────────────────────────────
   const handleBargeIn = useCallback(() => {
-    stopTTS();
+    stopTTS(true);
+    // startListening is defined later — call via a small timeout so React's
+    // hook order is respected and the circular dep is avoided.
     setState("detecting");
-    // Re-arm recorder for new utterance
-    chunksRef.current = [];
-    startVAD();
-  }, [stopTTS, startVAD]);
+    setTimeout(() => {
+      if (stateRef.current !== "ended") startListeningRef.current?.();
+    }, 0);
+  }, [stopTTS]);
 
   // ── Commit speech: stop recorder → transcribe → query → TTS ───────────────
   const commitSpeech = useCallback(() => {
@@ -317,8 +356,11 @@ const CallPage: React.FC = () => {
 
   // ── Process committed audio blob ───────────────────────────────────────────
   const processBlob = useCallback(async (blob: Blob) => {
-    if (blob.size < 500) {
-      // Too small — restart listening
+    if (stateRef.current === "ended") return;
+
+    // WebM init segments (header-only, no audio frames) are typically ~965 bytes.
+    // Real speech is always well above 5 KB — reject anything smaller outright.
+    if (blob.size < 5000) {
       startListening();
       return;
     }
@@ -332,157 +374,345 @@ const CallPage: React.FC = () => {
       form.append("audio", blob, "recording.webm");
       form.append("mime_type", mimeRef.current);
 
-      const txRes = await fetch(`${API}/transcribe`, {
-        method: "POST",
-        body:   form,
-      });
+      const txRes = await fetch(`${API}/transcribe`, { method: "POST", body: form });
       if (!txRes.ok) throw new Error("Transcription failed");
 
       const { transcript } = (await txRes.json()) as { transcript: string };
-      const text = transcript?.trim();
+      const rawText = transcript?.trim();
 
-      if (!text || text.length < 2) {
-        // Nothing heard — go back to listening
-        startListening();
-        return;
-      }
+      if (!rawText || rawText.length < 3) { startListening(); return; }
+      // Reject transcripts that are just punctuation/noise
+      if (/^[.،,;:!?…\s]+$/.test(rawText)) { startListening(); return; }
+      if (stateRef.current === "ended") return;
 
+      const text = rawText;
       setLiveTranscript(text);
-      addTurn("user", text);
+      setTurns(prev => [...prev, { role: "user", content: text, id: uuid4() }]);
 
-      // ── 2. Query RAG ───────────────────────────────────────────────────
+      if (stateRef.current === "ended") return;
+
+      // ── 2. RAG query + spoken thought-process narration ───────────────
       setState("thinking");
+      setThinkingMessage("");
+      ragAbortRef.current = new AbortController();
+
+      // ── Serial spoken queue ────────────────────────────────────────────
+      // Status phrases are enqueued as the RAG graph emits nodes.
+      // A single async drain loop plays them one-by-one so they never overlap.
+      // After RAG finishes we wait for the queue to empty, then play the answer.
+      const spokenStatuses  = new Set<string>();
+      const speechQueue: string[] = [];
+      let   queueDraining   = false;
+
+      const enqueueSpeech = (phrase: string) => {
+        if (speakerOffRef.current || spokenStatuses.has(phrase)) return;
+        spokenStatuses.add(phrase);
+        speechQueue.push(phrase);
+        if (!queueDraining) drainQueue();
+      };
+
+      const drainQueue = async () => {
+        queueDraining = true;
+        while (speechQueue.length > 0) {
+          const phrase = speechQueue.shift()!;
+          if (stateRef.current === "ended") break;
+          try {
+            const r = await fetch(`${API}/tts`, {
+              method:  "POST",
+              headers: { "Content-Type": "application/json" },
+              body:    JSON.stringify({ text: phrase, voice: selectedVoice }),
+            });
+            if (!r.ok) continue;
+            const bytes = await r.arrayBuffer();
+            if (!bytes.byteLength || stateRef.current === "ended") continue;
+            const rec = recorderRef.current;
+            if (rec && rec.state !== "inactive") { rec.onstop = () => {}; rec.stop(); }
+            recorderRef.current = null; chunksRef.current = [];
+            setState("speaking");
+            const b64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+            await speakWavRef.current!(b64, phrase, true);
+            if (stateRef.current !== "ended") setState("thinking");
+          } catch { /* non-fatal */ }
+        }
+        queueDraining = false;
+      };
+
+      // Friendly spoken phrases per RAG node
+      const NODE_PHRASES: Record<string, string> = {
+        retrieve:         "Let me look that up…",
+        rewrite_query:    "Rephrasing your question…",
+        check_retrieval:  "Checking what I found…",
+        judge_plan:       "Planning my answer…",
+        synthesise:       "Putting it together…",
+        judge_evaluate:   "Double-checking…",
+        graph_node:       "Querying the knowledge graph…",
+        report_node:      "Building a report…",
+        analytics_node:   "Running the analysis…",
+      };
+
+      const SLOW_NODES = new Set(Object.keys(NODE_PHRASES));
 
       const qRes = await fetch(`${API}/query-stream`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          query:      `[Voice call — user spoke this aloud]\n\n${text}`,
+          query:      `[Voice call — answer conversationally and concisely. Never say you cannot hear.]\n\nUser said: ${text}`,
           session_id: sessionRef.current,
-          top_k:      5,
+          top_k:      3,
+          voice_mode: true,
         }),
+        signal: ragAbortRef.current.signal,
       });
       if (!qRes.ok) throw new Error("Query failed");
 
-      let answer = "";
+      let ragAnswer = "";
       const reader  = qRes.body!.getReader();
       const decoder = new TextDecoder();
-      let   buf     = "";
+      let   ssBuf   = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
+        ssBuf += decoder.decode(value, { stream: true });
+        const lines = ssBuf.split("\n");
+        ssBuf = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           try {
             const ev = JSON.parse(line.slice(6));
-            if (ev.type === "result") answer = ev.answer ?? "";
-          } catch { /* skip malformed */ }
+            if (ev.type === "status") {
+              if (ev.message) setThinkingMessage(ev.message);
+              if (ev.node && SLOW_NODES.has(ev.node)) {
+                enqueueSpeech(NODE_PHRASES[ev.node]);
+              }
+            }
+            if (ev.type === "result") ragAnswer = ev.answer ?? "";
+          } catch { /* skip */ }
         }
       }
 
-      answer = answer.trim();
-      if (!answer) {
-        startListening();
-        return;
+      ragAnswer = ragAnswer.trim();
+      if (!ragAnswer) { startListening(); return; }
+      if (stateRef.current === "ended") return;
+      if (speakerOffRef.current) { startListening(); return; }
+
+      // ── 3. Drain remaining queue, then play the answer immediately ────
+      while (queueDraining || speechQueue.length > 0) {
+        await new Promise(r => setTimeout(r, 30));
+        if (stateRef.current === "ended") return;
       }
 
-      addTurn("assistant", answer);
+      setState("speaking");
+      ttsAbortRef.current = new AbortController();
 
-      // ── 3. TTS ─────────────────────────────────────────────────────────
-      if (speakerOffRef.current) {
-        // Speaker muted — skip TTS, go straight back to listening
-        startListening();
-        return;
+      // Stop mic while AI speaks
+      const activeRec = recorderRef.current;
+      if (activeRec && activeRec.state !== "inactive") {
+        activeRec.onstop = () => {};
+        activeRec.stop();
       }
+      recorderRef.current = null;
+      chunksRef.current   = [];
 
-      await speakText(answer);
+      // Hit /tts directly — saves one full round-trip vs /call/respond
+      const ttsRes = await fetch(`${API}/tts`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ text: ragAnswer, voice: selectedVoice }),
+        signal:  ttsAbortRef.current.signal,
+      });
+      if (!ttsRes.ok) throw new Error("TTS failed");
+      const ttsBytes = await ttsRes.arrayBuffer();
+      if (!ttsBytes.byteLength || stateRef.current === "ended") return;
 
-    } catch (err) {
+      addTurn("assistant", ragAnswer);
+      const answerB64 = btoa(String.fromCharCode(...new Uint8Array(ttsBytes)));
+      await speakWavRef.current!(answerB64, ragAnswer, false);
+
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
       console.error("[CallPage] processBlob error:", err);
       setError(String(err));
-      startListening();
+    } finally {
+      const st = stateRef.current;
+      // Don't restart if already listening/detecting (continuation window did it)
+      // or if the call ended
+      if (st !== "ended" && st !== "listening" && st !== "detecting") startListening();
     }
   }, [selectedVoice]);
 
-  // ── TTS playback ───────────────────────────────────────────────────────────
-  const speakText = useCallback(async (text: string) => {
-    setState("speaking");
+  // ── Play a base64 MP3 chunk with tightly-synced word subtitles ──────────────
+  const speakWav = useCallback(async (
+    b64: string,
+    spokenText: string,
+    isFiller: boolean,
+  ): Promise<void> => {
+    if (stateRef.current === "ended") return;
 
-    const clean = stripMarkdown(text);
-    ttsAbortRef.current = new AbortController();
+    const raw   = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const blob  = new Blob([bytes], { type: "audio/mpeg" });
+    const url   = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    ttsAudioRef.current = audio;
 
-    try {
-      const res = await fetch(`${API}/tts`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ text: clean, voice: selectedVoice }),
-        signal:  ttsAbortRef.current.signal,
-      });
+    const words = spokenText.trim().split(/\s+/).filter(Boolean);
+    setSubtitleWords([]);
 
-      if (!res.ok) throw new Error("TTS failed");
+    await new Promise<void>((resolve) => {
+      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
 
-      const arrayBuf = await res.arrayBuffer();
-      if (ttsAbortRef.current?.signal.aborted) return;
+      // ── Subtitle sync ──────────────────────────────────────────────────────
+      // Cues are stored as 0-1 PROGRESS FRACTIONS (not seconds), so they stay
+      // in sync even when the browser's currentTime resolution drifts on long audio.
+      // Each rAF tick we recompute progress = currentTime / duration and fire any
+      // cues whose fraction has been passed — self-correcting by design.
 
-      const blob    = new Blob([arrayBuf], { type: "audio/mpeg" });
-      const url     = URL.createObjectURL(blob);
-      const audio   = new Audio(url);
-      ttsAudioRef.current = audio;
+      let rafId  = 0;
+      let cueIdx = 0;
 
-      await new Promise<void>((resolve) => {
-        audio.onended  = () => { URL.revokeObjectURL(url); resolve(); };
-        audio.onerror  = () => { URL.revokeObjectURL(url); resolve(); };
+      type Cue =
+        | { kind: "word";  frac: number; word: string }
+        | { kind: "flush"; frac: number };
+
+      let cues: Cue[] = [];
+
+      const buildCues = (durSec: number) => {
+        if (!words.length || isFiller || durSec <= 0) return;
+
+        const sylCount = (w: string) => {
+          const chars = w.replace(/[^a-zA-Z0-9\u00C0-\u024F\u0600-\u06FF]/g, "").length || 1;
+          return Math.max(1, Math.ceil(chars / 3));
+        };
+        const pauseWeight = (w: string): number => {
+          if (/[.!?؟。！？]$/.test(w)) return 1.8;
+          if (/[…]$/.test(w))          return 1.2;
+          if (/[,،;:]$/.test(w))       return 0.7;
+          if (/[-–—]/.test(w))         return 0.4;
+          return 0;
+        };
+
+        const totalWeight = words.reduce((s, w) => s + sylCount(w) + pauseWeight(w), 0);
+        // fraction-per-unit; push start slightly into audio to account for ElevenLabs lead-in
+        const LEAD_IN_FRAC = Math.min(0.04, 0.08 / durSec); // ~80ms lead-in, capped at 4%
+        const usable       = (1 - LEAD_IN_FRAC) * 0.97;    // leave last 3% for trailing audio
+        const fracPerUnit  = usable / totalWeight;
+
+        let cursor = LEAD_IN_FRAC;
+        cues = [];
+
+        for (const w of words) {
+          const wFrac = sylCount(w) * fracPerUnit;
+          cues.push({ kind: "word", frac: cursor, word: w });
+          cursor += wFrac;
+
+          const pWeight = pauseWeight(w);
+          if (pWeight > 0) {
+            const pFrac = pWeight * fracPerUnit;
+            if (/[.!?؟。！？]$/.test(w)) {
+              cues.push({ kind: "flush", frac: cursor + pFrac * 0.55 });
+            }
+            cursor += pFrac;
+          }
+        }
+      };
+
+      const startRaf = (durSec: number) => {
+        if (!cues.length) return;
+        const tick = () => {
+          if (stateRef.current === "ended") return;
+          // Use fraction so long-audio drift cancels out automatically
+          const progress = durSec > 0 ? audio.currentTime / durSec : 0;
+          while (cueIdx < cues.length && progress >= cues[cueIdx].frac) {
+            const cue = cues[cueIdx++];
+            if (cue.kind === "word") {
+              setSubtitleWords(prev => [...prev, cue.word]);
+            } else {
+              setSubtitleKey(k => k + 1);
+              setSubtitleWords([]);
+            }
+          }
+          if (cueIdx < cues.length) rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+        spokenTimerRef.current = {
+          _timeouts: [],
+          _cancel: () => cancelAnimationFrame(rafId),
+        } as any;
+      };
+
+      // canplaythrough = duration is confirmed; play + start rAF immediately
+      const onReady = () => {
+        const dur = audio.duration;
+        buildCues(dur);
         audio.play().catch(() => resolve());
+        startRaf(dur);
+        if (!isFiller) startBargeInDetector();
+      };
+      audio.addEventListener("canplaythrough", onReady, { once: true });
 
-        // While playing, run barge-in detector
-        startBargeInDetector();
-      });
+      // Fallback: canplaythrough may not fire on some browsers for blob URLs
+      const fallbackTimer = setTimeout(() => {
+        if (cues.length === 0) {
+          // Estimate duration at 155 WPM if still unknown
+          const dur = isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : words.length * (60 / 155);
+          buildCues(dur);
+          audio.play().catch(() => resolve());
+          startRaf(dur);
+          if (!isFiller) startBargeInDetector();
+        }
+      }, 280);
 
-    } catch (err: any) {
-      if (err?.name === "AbortError") return; // barge-in — handled upstream
-      console.warn("[CallPage] TTS error:", err);
-    } finally {
-      ttsAudioRef.current = null;
-    }
+      const cleanup = () => { cancelAnimationFrame(rafId); clearTimeout(fallbackTimer); };
+      audio.addEventListener("ended", cleanup, { once: true });
+      audio.addEventListener("error", cleanup, { once: true });
 
-    // TTS finished naturally — back to listening
-    if (stateRef.current === "speaking") {
-      startListening();
-    }
-  }, [selectedVoice, startBargeInDetector]);
+      audio.preload = "auto";
+      audio.load();
+    });
+
+    ttsAudioRef.current = null;
+  }, [startBargeInDetector]);
 
   // ── Start (or restart) the listening state ─────────────────────────────────
   const startListening = useCallback(() => {
     if (stateRef.current === "ended") return;
 
-    // Re-create the recorder so we get a fresh segment
     const stream = streamRef.current;
     if (!stream) return;
 
-    chunksRef.current = [];
-
-    const mime = mimeRef.current;
+    const mime     = mimeRef.current;
     const recorder = new MediaRecorder(stream, { mimeType: mime });
     recorderRef.current = recorder;
+    // Cleared AFTER assigning recorderRef so any stale ondataavailable firing
+    // between here and recorder.start() is either ref-guarded or immediately flushed.
+    chunksRef.current = [];
 
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
 
     recorder.onstop = () => {
+      // Guard: only process if this recorder is still the active one.
+      // Prevents stale onstop callbacks from sending header-only blobs.
+      if (recorderRef.current !== recorder) return;
       const blob = new Blob(chunksRef.current, { type: mime });
       chunksRef.current = [];
       processBlob(blob);
     };
 
-    recorder.start(100); // collect in 100ms chunks for responsive barge-in
+    recorder.start(100);
     setState("listening");
     startVAD();
   }, [processBlob, startVAD]);
+
+  // Keep refs in sync so callbacks defined earlier can call functions defined later
+  useEffect(() => { speakWavRef.current = speakWav; }, [speakWav]);
+  useEffect(() => { startListeningRef.current = startListening; }, [startListening]);
 
   // ── Start the call ─────────────────────────────────────────────────────────
   const startCall = useCallback(async () => {
@@ -520,8 +750,8 @@ const CallPage: React.FC = () => {
         ? "audio/webm"
         : "audio/ogg";
 
-      // Persist session
-      localStorage.setItem("bimlo_call_session", sessionRef.current);
+      // Record when the call started (used for the call card)
+      callStartRef.current = new Date();
 
       startListening();
 
@@ -534,7 +764,15 @@ const CallPage: React.FC = () => {
   // ── End the call ───────────────────────────────────────────────────────────
   const endCall = useCallback(() => {
     cancelAnimationFrame(animFrameRef.current);
+
+    // Set ended FIRST — so the recorder's onstop → processBlob guard bails immediately
+    setState("ended");
+
     stopTTS();
+
+    // Cancel any in-flight RAG stream
+    ragAbortRef.current?.abort();
+    ragAbortRef.current = null;
 
     recorderRef.current?.stop();
     streamRef.current?.getTracks().forEach(t => t.stop());
@@ -545,9 +783,22 @@ const CallPage: React.FC = () => {
     analyserRef.current = null;
     recorderRef.current = null;
 
-    setState("ended");
     setWaveform(Array(32).fill(0));
     setLiveTranscript("");
+
+    // Fire call-ended so Chat can render the call card.
+    // Use callDuration via a ref snapshot — the state variable may be stale inside
+    // this callback, so we read from the timer's perspective via Date diff.
+    const elapsed = Math.round((Date.now() - callStartRef.current.getTime()) / 1000);
+    if (elapsed > 2) {
+      window.dispatchEvent(new CustomEvent("call-ended", {
+        detail: {
+          duration:  elapsed,
+          startedAt: callStartRef.current.toISOString(),
+          convId:    convIdRef.current,
+        },
+      }));
+    }
   }, [stopTTS]);
 
   // Cleanup on unmount
@@ -560,35 +811,67 @@ const CallPage: React.FC = () => {
   // ── Render ─────────────────────────────────────────────────────────────────
   const isActive = !["idle", "ended", "connecting"].includes(callState);
 
+  // hue shifts per state to drive the Orb color
+  const orbHue =
+    callState === "speaking"    ? 220 :   // blue
+    callState === "thinking"    ? 40  :   // amber
+    callState === "transcribing"? 40  :   // amber
+    callState === "detecting"   ? 150 :   // teal
+    callState === "listening"   ? 150 :   // teal
+    callState === "connecting"  ? 200 :
+    0;
+
+  const orbForceHover = callState === "speaking";
+  const orbHoverIntensity =
+    callState === "speaking"    ? 0.55 :
+    callState === "thinking" || callState === "transcribing" ? 0.3 :
+    isActive                    ? 0.35 : 0.18;
+
   return (
-    <div className="min-h-screen bg-[#0a0a0f] flex flex-col items-center justify-between px-4 py-8 select-none">
+    <div className="min-h-screen bg-[#07080f] flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden">
+
+      {/* ── Ambient background glow ── */}
+      <div className="pointer-events-none fixed inset-0 z-0">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] rounded-full bg-blue-600/5 blur-[120px]" />
+        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[400px] h-[300px] rounded-full bg-violet-600/5 blur-[100px]" />
+      </div>
 
       {/* ── Top bar ── */}
-      <div className="w-full max-w-sm flex items-center justify-between">
+      <div className="relative z-10 w-full max-w-md flex items-center justify-between px-1">
         <button
-          onClick={() => navigate("/")}
-          className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors"
+          onClick={() => navigate(locState.convId ? "/chat" : "/")}
+          className="flex items-center gap-1.5 text-white/30 hover:text-white/70 text-xs transition-colors"
         >
-          ← Back
+          <span className="text-base leading-none">←</span>
+          <span>Back</span>
         </button>
-        <span className="text-zinc-600 text-xs font-mono">{fmt(callDuration)}</span>
+
+        <div className="flex items-center gap-2">
+          {isActive && (
+            <span className="flex items-center gap-1.5 text-xs font-mono text-white/25">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/70 animate-pulse" />
+              {fmt(callDuration)}
+            </span>
+          )}
+        </div>
+
         {/* Voice picker */}
         <div className="relative">
           <button
             onClick={() => setShowVoicePicker(v => !v)}
-            className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            className="flex items-center gap-1 text-xs text-white/30 hover:text-white/60 transition-colors capitalize"
           >
-            {selectedVoice.split("-")[0]}
+            {selectedVoice}
             <ChevronDown className="h-3 w-3" />
           </button>
           <AnimatePresence>
             {showVoicePicker && (
               <motion.div
-                initial={{ opacity: 0, y: -6, scale: 0.95 }}
+                initial={{ opacity: 0, y: -6, scale: 0.96 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -6, scale: 0.95 }}
+                exit={{ opacity: 0, y: -6, scale: 0.96 }}
                 transition={{ duration: 0.15 }}
-                className="absolute right-0 top-6 bg-zinc-900 border border-zinc-700/60 rounded-xl shadow-2xl z-50 overflow-hidden w-44"
+                className="absolute right-0 top-7 bg-[#0f1016]/95 backdrop-blur-xl border border-white/8 rounded-2xl shadow-2xl z-50 overflow-hidden w-44"
               >
                 {[
                   { id: "hannah", label: "Hannah", hint: "Warm, natural" },
@@ -601,14 +884,14 @@ const CallPage: React.FC = () => {
                   <button
                     key={v.id}
                     onClick={() => { setSelectedVoice(v.id); setShowVoicePicker(false); }}
-                    className={`w-full text-left px-3 py-2 text-xs transition-colors ${
+                    className={`w-full text-left px-3.5 py-2.5 text-xs transition-colors ${
                       selectedVoice === v.id
-                        ? "bg-primary/20 text-primary"
-                        : "text-zinc-300 hover:bg-zinc-800"
+                        ? "bg-blue-500/15 text-blue-300"
+                        : "text-white/50 hover:bg-white/5 hover:text-white/80"
                     }`}
                   >
                     <span className="font-medium">{v.label}</span>
-                    <span className="ml-1.5 text-zinc-500">{v.hint}</span>
+                    <span className="ml-2 text-white/25">{v.hint}</span>
                   </button>
                 ))}
               </motion.div>
@@ -617,208 +900,247 @@ const CallPage: React.FC = () => {
         </div>
       </div>
 
-      {/* ── Avatar + status ── */}
-      <div className="flex flex-col items-center gap-6 flex-1 justify-center w-full max-w-sm">
+      {/* ── Orb + status ── */}
+      <div className="relative z-10 flex flex-col items-center gap-8 flex-1 justify-center w-full max-w-xs">
 
-        {/* Outer pulse ring */}
+        {/* Orb container */}
         <div className="relative flex items-center justify-center">
-          {/* Ambient ring — pulses while speaking */}
+
+          {/* Outer glow ring — state-aware */}
           <AnimatePresence>
             {callState === "speaking" && (
               <>
-                <motion.div
-                  key="ring1"
+                <motion.div key="r1"
                   className="absolute rounded-full border border-blue-500/20"
-                  initial={{ width: 100, height: 100, opacity: 0.6 }}
-                  animate={{ width: 180, height: 180, opacity: 0 }}
-                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeOut" }}
+                  initial={{ width: 220, height: 220, opacity: 0.7 }}
+                  animate={{ width: 320, height: 320, opacity: 0 }}
+                  transition={{ duration: 2.2, repeat: Infinity, ease: "easeOut" }}
                 />
-                <motion.div
-                  key="ring2"
-                  className="absolute rounded-full border border-blue-500/15"
-                  initial={{ width: 100, height: 100, opacity: 0.4 }}
-                  animate={{ width: 210, height: 210, opacity: 0 }}
-                  transition={{ duration: 1.8, repeat: Infinity, ease: "easeOut", delay: 0.6 }}
+                <motion.div key="r2"
+                  className="absolute rounded-full border border-blue-400/10"
+                  initial={{ width: 220, height: 220, opacity: 0.5 }}
+                  animate={{ width: 380, height: 380, opacity: 0 }}
+                  transition={{ duration: 2.2, repeat: Infinity, ease: "easeOut", delay: 0.7 }}
                 />
               </>
             )}
             {(callState === "listening" || callState === "detecting") && (
-              <motion.div
-                key="listen-ring"
-                className="absolute rounded-full border border-emerald-500/25"
-                initial={{ width: 100, height: 100, opacity: 0.5 }}
-                animate={{ width: 150, height: 150, opacity: 0 }}
-                transition={{ duration: 1.4, repeat: Infinity, ease: "easeOut" }}
+              <motion.div key="lr"
+                className="absolute rounded-full border border-teal-500/20"
+                initial={{ width: 220, height: 220, opacity: 0.5 }}
+                animate={{ width: 280, height: 280, opacity: 0 }}
+                transition={{ duration: 1.6, repeat: Infinity, ease: "easeOut" }}
+              />
+            )}
+            {(callState === "thinking" || callState === "transcribing") && (
+              <motion.div key="tr"
+                className="absolute rounded-full border border-amber-500/15"
+                initial={{ width: 220, height: 220, opacity: 0.4 }}
+                animate={{ width: 260, height: 260, opacity: 0 }}
+                transition={{ duration: 1.2, repeat: Infinity, ease: "easeOut" }}
               />
             )}
           </AnimatePresence>
 
-          {/* Avatar circle */}
+          {/* The Orb */}
           <motion.div
-            className={`relative w-24 h-24 rounded-full flex items-center justify-center text-3xl
-              ${callState === "speaking"
-                ? "bg-gradient-to-br from-blue-600/40 to-violet-600/40 border-2 border-blue-500/50"
-                : callState === "thinking" || callState === "transcribing"
-                ? "bg-gradient-to-br from-amber-600/30 to-orange-600/30 border-2 border-amber-500/40"
-                : isActive
-                ? "bg-gradient-to-br from-emerald-600/30 to-teal-600/30 border-2 border-emerald-500/40"
-                : "bg-zinc-800/60 border-2 border-zinc-700/60"
-              }`}
-            animate={callState === "thinking" ? { scale: [1, 1.04, 1] } : {}}
-            transition={{ duration: 1.2, repeat: Infinity }}
+            style={{ width: 200, height: 200 }}
+            animate={callState === "thinking" ? { scale: [1, 1.03, 1] } : { scale: 1 }}
+            transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
           >
-            🤖
+            <Orb
+              hue={orbHue}
+              hoverIntensity={orbHoverIntensity}
+              rotateOnHover={false}
+              forceHoverState={orbForceHover}
+              backgroundColor="#07080f"
+            />
           </motion.div>
         </div>
 
-        {/* Agent name + status */}
-        <div className="flex flex-col items-center gap-1.5">
-          <h1 className="text-white font-semibold text-lg tracking-tight">Bimlo Copilot</h1>
-          <motion.p
+        {/* Agent name + state badge */}
+        <div className="flex flex-col items-center gap-2">
+          <h1 className="text-white/90 font-semibold text-xl tracking-tight">Bimlo Copilot</h1>
+          <motion.div
             key={callState}
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
-            className={`text-sm font-medium ${STATE_COLOR[callState]}`}
+            transition={{ duration: 0.25 }}
+            className="flex items-center gap-2"
           >
-            {STATE_LABEL[callState]}
-          </motion.p>
+            <span className={`text-xs font-medium px-3 py-1 rounded-full border ${
+              callState === "speaking"
+                ? "text-blue-300 border-blue-500/25 bg-blue-500/10"
+                : callState === "thinking" || callState === "transcribing"
+                ? "text-amber-300 border-amber-500/25 bg-amber-500/10"
+                : isActive
+                ? "text-teal-300 border-teal-500/25 bg-teal-500/10"
+                : "text-white/30 border-white/8 bg-white/5"
+            }`}>
+              {STATE_LABEL[callState]}
+            </span>
+          </motion.div>
         </div>
 
-        {/* ── Live waveform bars (while listening/detecting) ── */}
-        <AnimatePresence>
-          {(callState === "listening" || callState === "detecting" || callState === "speaking") && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="flex items-center gap-[3px] h-10"
-            >
-              {waveform.map((v, i) => (
-                <motion.div
-                  key={i}
-                  className={`w-[3px] rounded-full ${
-                    callState === "speaking" ? "bg-blue-400/70" : "bg-emerald-400/70"
-                  }`}
-                  animate={{ height: Math.max(4, v * 36) }}
-                  transition={{ duration: 0.05 }}
-                />
-              ))}
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* ── Subtitle / transcript display ── */}
+        <div className="w-full min-h-[3rem] flex items-center justify-center px-2">
+          <AnimatePresence mode="wait">
 
-        {/* ── Transcript feed ── */}
-        <div className="w-full max-w-sm h-48 overflow-y-auto flex flex-col gap-2 px-1 scrollbar-thin scrollbar-thumb-zinc-700/40">
-          {turns.map(turn => (
-            <motion.div
-              key={turn.id}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={`flex ${turn.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div className={`max-w-[85%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed ${
-                turn.role === "user"
-                  ? "bg-primary/20 text-primary-foreground/90 rounded-br-sm"
-                  : "bg-zinc-800/80 text-zinc-200 rounded-bl-sm"
-              }`}>
-                {turn.content}
-              </div>
-            </motion.div>
-          ))}
-
-          {/* Live transcript (user currently speaking) */}
-          {liveTranscript && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex justify-end"
-            >
-              <div className="max-w-[85%] rounded-2xl rounded-br-sm px-3.5 py-2 text-[13px] bg-primary/10 text-primary/60 border border-primary/20 italic">
-                {liveTranscript}
-              </div>
-            </motion.div>
-          )}
-
-          {/* Thinking indicator */}
-          {callState === "thinking" && (
-            <div className="flex justify-start">
-              <div className="bg-zinc-800/80 rounded-2xl rounded-bl-sm px-4 py-2.5 flex gap-1.5 items-center">
+            {callState === "listening" && (
+              <motion.div key="dots"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="flex items-center gap-1.5"
+              >
                 {[0, 0.2, 0.4].map(d => (
-                  <motion.div
-                    key={d}
-                    className="w-1.5 h-1.5 rounded-full bg-zinc-400"
-                    animate={{ opacity: [0.3, 1, 0.3], y: [0, -3, 0] }}
-                    transition={{ duration: 0.9, repeat: Infinity, delay: d }}
+                  <motion.span key={d}
+                    className="block w-1 h-1 rounded-full bg-teal-400/40"
+                    animate={{ opacity: [0.3, 1, 0.3], scale: [1, 1.3, 1] }}
+                    transition={{ duration: 1.5, repeat: Infinity, delay: d }}
                   />
                 ))}
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
 
-          <div ref={turnsEndRef} />
+            {callState === "detecting" && (
+              <motion.p key="detecting"
+                initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
+                className="text-sm text-teal-400/50 tracking-widest text-center"
+              >
+                · · ·
+              </motion.p>
+            )}
+
+            {(callState === "transcribing" || callState === "thinking") && liveTranscript && (
+              <motion.p key="transcript"
+                initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.3 }}
+                className="text-sm font-medium text-white/80 text-center leading-relaxed"
+              >
+                {liveTranscript}
+              </motion.p>
+            )}
+
+            {callState === "thinking" && !liveTranscript && thinkingMessage && (
+              <motion.p key={thinkingMessage}
+                initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.25 }}
+                className="text-xs text-amber-300/50 text-center italic"
+              >
+                {thinkingMessage}
+              </motion.p>
+            )}
+
+            {callState === "speaking" && (
+              <div key="subtitles" className="w-full flex items-center justify-center">
+                <AnimatePresence mode="wait">
+                  <motion.p
+                    key={subtitleKey}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8, transition: { duration: 0.2 } }}
+                    transition={{ duration: 0.2 }}
+                    className="text-sm font-light text-blue-100/80 text-center leading-relaxed px-2"
+                  >
+                    <AnimatePresence mode="popLayout">
+                      {subtitleWords.map((word, i) => (
+                        <motion.span
+                          key={`${subtitleKey}-${i}`}
+                          initial={{ opacity: 0, y: 4, filter: "blur(4px)" }}
+                          animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                          transition={{ duration: 0.16 }}
+                          className="inline-block mr-[0.28em]"
+                        >{word}</motion.span>
+                      ))}
+                    </AnimatePresence>
+                  </motion.p>
+                </AnimatePresence>
+              </div>
+            )}
+
+          </AnimatePresence>
         </div>
 
-        {/* Error */}
         {error && (
-          <p className="text-xs text-red-400/80 text-center px-4">{error}</p>
+          <motion.p
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+            className="text-xs text-red-400/70 text-center px-6 py-2 rounded-xl bg-red-500/5 border border-red-500/10"
+          >
+            {error}
+          </motion.p>
         )}
       </div>
 
       {/* ── Controls ── */}
-      <div className="w-full max-w-sm flex flex-col items-center gap-6">
+      <div className="relative z-10 w-full max-w-xs flex flex-col items-center gap-6 pb-2">
 
-        {/* Aux buttons (mute + speaker) — only while active */}
-        {isActive && (
-          <div className="flex items-center gap-6">
-            <button
-              onClick={() => setMuted(m => !m)}
-              className={`flex flex-col items-center gap-1.5 p-3 rounded-2xl transition-all ${
-                muted
-                  ? "bg-red-500/20 text-red-400 border border-red-500/30"
-                  : "bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60 border border-zinc-700/40"
-              }`}
+        {/* Aux controls — mute + speaker */}
+        <AnimatePresence>
+          {isActive && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
+              className="flex items-center gap-4"
             >
-              {muted ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-              <span className="text-[10px]">{muted ? "Unmute" : "Mute"}</span>
-            </button>
+              <button
+                onClick={() => setMuted(m => !m)}
+                className={`flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border transition-all text-xs font-medium ${
+                  muted
+                    ? "bg-red-500/15 text-red-400 border-red-500/25"
+                    : "bg-white/4 text-white/40 border-white/8 hover:bg-white/8 hover:text-white/60"
+                }`}
+              >
+                {muted ? <MicOff className="h-4 w-4 mb-0.5" /> : <Mic className="h-4 w-4 mb-0.5" />}
+                {muted ? "Unmute" : "Mute"}
+              </button>
 
-            <button
-              onClick={() => setSpeakerOff(s => !s)}
-              className={`flex flex-col items-center gap-1.5 p-3 rounded-2xl transition-all ${
-                speakerOff
-                  ? "bg-zinc-700/60 text-zinc-500 border border-zinc-600/30"
-                  : "bg-zinc-800/60 text-zinc-400 hover:bg-zinc-700/60 border border-zinc-700/40"
-              }`}
-            >
-              {speakerOff ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
-              <span className="text-[10px]">{speakerOff ? "Speaker off" : "Speaker"}</span>
-            </button>
-          </div>
-        )}
+              <button
+                onClick={() => setSpeakerOff(s => !s)}
+                className={`flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border transition-all text-xs font-medium ${
+                  speakerOff
+                    ? "bg-white/5 text-white/25 border-white/5"
+                    : "bg-white/4 text-white/40 border-white/8 hover:bg-white/8 hover:text-white/60"
+                }`}
+              >
+                {speakerOff ? <VolumeX className="h-4 w-4 mb-0.5" /> : <Volume2 className="h-4 w-4 mb-0.5" />}
+                {speakerOff ? "Speaker off" : "Speaker"}
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Primary CTA */}
         {callState === "idle" || callState === "ended" ? (
           <motion.button
-            whileTap={{ scale: 0.95 }}
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.96 }}
             onClick={startCall}
-            className="w-20 h-20 rounded-full bg-emerald-500 hover:bg-emerald-400 text-white flex items-center justify-center shadow-lg shadow-emerald-500/30 transition-colors"
+            className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all"
+            style={{
+              background: "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)",
+              boxShadow: "0 0 40px rgba(99,102,241,0.35), 0 4px 20px rgba(0,0,0,0.5)"
+            }}
           >
-            <Mic className="h-8 w-8" />
+            <Mic className="h-7 w-7 text-white" />
           </motion.button>
         ) : (
           <motion.button
-            whileTap={{ scale: 0.95 }}
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.96 }}
             onClick={endCall}
-            className="w-20 h-20 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center shadow-lg shadow-red-500/30 transition-colors"
+            className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all"
+            style={{
+              background: "linear-gradient(135deg, #dc2626 0%, #9f1239 100%)",
+              boxShadow: "0 0 32px rgba(220,38,38,0.3), 0 4px 20px rgba(0,0,0,0.5)"
+            }}
           >
-            <PhoneOff className="h-8 w-8" />
+            <PhoneOff className="h-7 w-7 text-white" />
           </motion.button>
         )}
 
-        <p className="text-zinc-600 text-[11px] text-center pb-2">
+        <p className="text-white/18 text-[11px] text-center">
           {callState === "idle" || callState === "ended"
-            ? "Tap to start a call"
-            : "Tap to end call  ·  Speak naturally — I'll listen when you're done"}
+            ? "Tap to start · speak naturally"
+            : "Tap to end call"}
         </p>
       </div>
     </div>

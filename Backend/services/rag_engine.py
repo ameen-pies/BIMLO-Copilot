@@ -146,6 +146,9 @@ class AgentState(TypedDict):
     # error
     error: Optional[str]
 
+    # voice call optimisation — skips expensive judge/source/retry nodes
+    voice_mode: bool
+
 
 MAX_ITER = 3
 MAX_RETRIES = 1  # Max retries for quality issues (was 2 — caused up to 7 LLM calls per query)
@@ -588,15 +591,22 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "") -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", voice_mode: bool = False) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
         # Store callback on instance so node wrappers can access it without going through state
         # (state keys starting with _ are stripped by pydantic/langgraph)
         self._status_callback = status_callback or (lambda *_: None)
+        self._voice_mode = voice_mode
 
-        # Generate contextual status messages in background — ready before nodes need them
-        self._status_msgs = self._generate_status_msgs(user_query)
+        # In voice mode skip the status-message LLM call — it's a full round-trip
+        # just to produce pretty UI strings, which aren't shown during a call anyway.
+        if voice_mode:
+            self._status_msgs = self._DEFAULT_STATUS_MSGS.copy()
+            print("⚡ voice_mode: skipping status-msg LLM pre-call")
+        else:
+            # Generate contextual status messages in background — ready before nodes need them
+            self._status_msgs = self._generate_status_msgs(user_query)
 
         # If force_route is set, pre-fill the route so the router skips LLM classification
         initial_route = force_route if force_route else None
@@ -624,6 +634,7 @@ class RAGEngine:
             "report_title": None,
             "session_id": session_id,
             "error": None,
+            "voice_mode": voice_mode,
         }
         
         print(f"\n{'='*80}")
@@ -634,6 +645,7 @@ class RAGEngine:
         finally:
             self._status_callback = None  # always clean up
             self._status_msgs = None
+            self._voice_mode = False
 
         # Build response
         response = {
@@ -830,7 +842,9 @@ Now generate for: "{q}" """
                 return "graph"
             if s["route"] == "report":
                 return "report"
-            if (s["route"] == "iterative_rag"
+            # voice_mode: always single-pass — skip iterative retrieval loop
+            if (not s.get("voice_mode", False)
+                    and s["route"] == "iterative_rag"
                     and s["retrieval_iterations"] < MAX_ITER
                     and not _is_good_retrieval(s["retrieved_chunks"])):
                 return "rewrite"
@@ -1252,18 +1266,33 @@ Respond with ONLY the rewritten query, nothing else."""
         """
         Ask the judge to plan how to respond.
         History is passed so the judge can detect language shifts across turns.
+        In voice_mode: skip the LLM call and use a fast conversational preset plan.
         """
         query = state["query"]
         chunks = state["retrieved_chunks"]
         history = state.get("conversation_history", [])
-        
+
+        if state.get("voice_mode"):
+            # Fast preset: conversational, concise, no citations needed for speech
+            plan = self.judge._fallback_plan(query)
+            # Override defaults to match voice expectations
+            plan = ResponsePlan(**{
+                **plan.to_dict(),
+                "target_tone":         "conversational",
+                "response_style":      "concise",
+                "max_response_length": "brief",
+                "should_cite_sources": False,  # citations are meaningless spoken aloud
+            })
+            print("⚡ judge_plan: voice_mode preset (conversational/concise/no-cite)")
+            return {**state, "response_plan": plan}
+
         print(f"🧠 Judge planning response → ", end="")
-        
+
         # Build conversation context for judge (last 3 turns)
         history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
-        
+
         plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
-        
+
         print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style}")
 
         # Emit what the judge plans to cover
@@ -1382,8 +1411,9 @@ Respond with ONLY the rewritten query, nothing else."""
             print("⚠️  Judge said no-cite but route is RAG — overriding to True")
             plan = ResponsePlan(**{**plan.to_dict(), "should_cite_sources": True})
 
-        # Build sources only when the judge's plan calls for citations
-        if plan.should_cite_sources:
+        # Build sources only when the judge's plan calls for citations AND not voice_mode.
+        # Citations are meaningless spoken aloud, and source extraction is expensive.
+        if plan.should_cite_sources and not state.get("voice_mode"):
             if self._source_node and _SOURCE_AGENT_AVAILABLE:
                 # Emit which files we're extracting sources from
                 source_files = list(dict.fromkeys(
@@ -1527,27 +1557,41 @@ Answer in {plan.target_language}:"""
     def judge_evaluate(self, state: AgentState) -> AgentState:
         """
         Ask the judge to evaluate the generated response.
-        
-        The judge checks:
-        - Did we follow the plan?
-        - Correct language?
-        - Correct tone?
-        - No hallucinations?
-        - Good quality?
-        
-        If not acceptable, we'll retry.
+        In voice_mode: skip evaluation entirely — always accept the first synthesis.
         """
+        if state.get("voice_mode"):
+            print("⚡ judge_evaluate: voice_mode — accepting first synthesis, skipping eval")
+            # Create a synthetic passing evaluation so _should_retry returns "done"
+            evaluation = self.judge.evaluate_response.__func__  # just need the class
+            # Build a minimal passing object without calling the LLM
+            from dataclasses import dataclass
+            # Re-use the ResponseEvaluation class but with all-pass values
+            try:
+                passing_eval = ResponseEvaluation(
+                    is_acceptable=True,
+                    overall_score=0.9,
+                    language_correct=True,
+                    tone_correct=True,
+                    has_hallucination=False,
+                    specific_problems=[],
+                    how_to_fix="",
+                )
+            except Exception:
+                # Fallback: just don't set response_evaluation and _should_retry will pass
+                return state
+            return {**state, "response_evaluation": passing_eval}
+
         query = state["query"]
         answer = state["answer"]
         plan = state["response_plan"]
         chunks = state["retrieved_chunks"]
-        
+
         if not plan:
             print("❌ No plan to evaluate against")
             return state
-        
+
         print(f"⚖️  Judge evaluating → ", end="")
-        
+
         # Get judge's evaluation
         evaluation = self.judge.evaluate_response(query, plan, answer, chunks)
 
@@ -1568,7 +1612,7 @@ Answer in {plan.target_language}:"""
             print(f"   Issues: {', '.join(evaluation.specific_problems)}")
             print(f"   How to fix: {evaluation.how_to_fix}")
             self._emit("judge_evaluate", "🔁", f"Improving answer: {evaluation.how_to_fix[:60]}…")
-        
+
         return {
             **state,
             "response_evaluation": evaluation,
@@ -1601,9 +1645,9 @@ Answer in {plan.target_language}:"""
             return _next(route)
 
         # ── Detect wrong-route situations via LLM ─────────────────────────
-        # Ask the LLM whether the judge's feedback suggests the route itself
-        # was wrong — no keyword matching, pure LLM judgment.
-        if retry_count == 0 and self.llm.enabled:
+        # Skip this extra LLM call in voice_mode — not worth the latency for a
+        # spoken answer, and the reroute check is a full round-trip.
+        if retry_count == 0 and self.llm.enabled and not state.get("voice_mode"):
             reroute_check = self.llm.chat(
                 [{"role": "user", "content": (
                     f"A RAG system routed this query to document search: \"{state['query']}\"\n"
