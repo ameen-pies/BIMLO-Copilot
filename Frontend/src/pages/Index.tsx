@@ -19,6 +19,17 @@ const fadeUp = {
 
 const Index = () => {
   const [showScrollArrow, setShowScrollArrow] = useState(true);
+  const [isDark, setIsDark] = useState(() =>
+    document.documentElement.classList.contains("dark")
+  );
+
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setIsDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const handleScroll = () => setShowScrollArrow(window.scrollY < 100);
@@ -96,7 +107,7 @@ const Index = () => {
         }
       `}</style>
 
-      <div className="min-h-screen bg-background overflow-x-hidden" style={{ animation: "bgFadeIn 0.6s ease-out both" }}>
+      <div className="min-h-screen bg-background overflow-x-hidden" style={{ animation: "bgFadeIn 0.6s ease-out both", ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}>
         <BackgroundManager />
         <Navbar />
 

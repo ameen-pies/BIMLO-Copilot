@@ -2395,6 +2395,17 @@ const Chat = () => {
   const inputAreaRef = useRef<HTMLDivElement>(null);
   const [notifyBottomOffset, setNotifyBottomOffset] = useState(125);
   const [isHoveringVoice, setIsHoveringVoice] = useState(false);
+  const [isDark, setIsDark] = useState(() =>
+    document.documentElement.classList.contains("dark")
+  );
+
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setIsDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
 
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -4353,6 +4364,7 @@ const Chat = () => {
   return (
     <div 
       className="h-screen flex bg-background relative overflow-hidden"
+      style={{ ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -5145,7 +5157,7 @@ const Chat = () => {
               transition={{ duration: 0.2 }}
               className="fixed top-14 left-0 right-0 flex justify-center pt-2 z-50 pointer-events-none"
             >
-              <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium shadow-sm">
+              <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-950 border border-red-500/50 text-red-400 text-xs font-medium shadow-sm">
                 <span>😢</span>
                 <span>We're having trouble hearing you — check your mic is connected and unmuted.</span>
                 <button onClick={() => setShowSilenceWarning(false)} className="ml-1 hover:text-red-300 transition-colors">

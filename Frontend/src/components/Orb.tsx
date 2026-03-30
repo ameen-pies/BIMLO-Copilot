@@ -7,7 +7,9 @@ export default function Orb({
   hoverIntensity = 0.2,
   rotateOnHover = true,
   forceHoverState = false,
-  backgroundColor = '#000000'
+  backgroundColor = '#000000',
+  bgLuminanceOverride = -1.0,  // -1 means "derive from backgroundColor" (default)
+  satBoost = 0.0               // 0 = no boost, 1 = full vivid (for light mode)
 }) {
   const ctnDom = useRef(null);
 
@@ -19,12 +21,16 @@ export default function Orb({
   const forceHoverStateRef = useRef(forceHoverState);
   const backgroundColorRef = useRef(backgroundColor);
 
-  // Sync refs every render — no effect needed.
+  const bgLuminanceOverrideRef = useRef(bgLuminanceOverride);
+  const satBoostRef            = useRef(satBoost);
+
   hueRef.current             = hue;
   hoverIntensityRef.current  = hoverIntensity;
   rotateOnHoverRef.current   = rotateOnHover;
   forceHoverStateRef.current = forceHoverState;
   backgroundColorRef.current = backgroundColor;
+  bgLuminanceOverrideRef.current = bgLuminanceOverride;
+  satBoostRef.current            = satBoost;
 
   const vert = /* glsl */ `
     precision highp float;
@@ -47,6 +53,8 @@ export default function Orb({
     uniform float rot;
     uniform float hoverIntensity;
     uniform vec3 backgroundColor;
+    uniform float uBgLuminance;
+    uniform float uSatBoost;
     varying vec2 vUv;
 
     vec3 rgb2yiq(vec3 c) {
@@ -138,7 +146,7 @@ export default function Orb({
       float len = length(uv);
       float invLen = len > 0.0 ? 1.0 / len : 0.0;
 
-      float bgLuminance = dot(backgroundColor, vec3(0.299, 0.587, 0.114));
+      float bgLuminance = uBgLuminance;
       
       float n0 = snoise3(vec3(uv * noiseScale, iTime * 0.5)) * 0.5 + 0.5;
       float r0 = mix(mix(innerRadius, 1.0, 0.4), mix(innerRadius, 1.0, 0.6), n0);
@@ -160,14 +168,28 @@ export default function Orb({
       float v3 = smoothstep(innerRadius, mix(innerRadius, 1.0, 0.5), len);
       
       vec3 colBase = mix(color1, color2, cl);
+
+      // Boost saturation on the base colors only — done before any compositing
+      // so the ring shape (v0/v2/v3 masks) is completely unaffected.
+      float luma1 = dot(color1, vec3(0.299, 0.587, 0.114));
+      float luma2 = dot(color2, vec3(0.299, 0.587, 0.114));
+      float luma3 = dot(color3, vec3(0.299, 0.587, 0.114));
+      color1 = clamp(mix(vec3(luma1), color1, 1.0 + uSatBoost), 0.0, 1.0);
+      color2 = clamp(mix(vec3(luma2), color2, 1.0 + uSatBoost), 0.0, 1.0);
+      color3 = clamp(mix(vec3(luma3), color3, 1.0 + uSatBoost), 0.0, 1.0);
+      colBase = mix(color1, color2, cl);
+
       float fadeAmount = mix(1.0, 0.1, bgLuminance);
       
-      vec3 darkCol = mix(color3, colBase, v0);
-      darkCol = (darkCol + v1) * v2 * v3;
+      // Create a unified base that uses the noise texture (v0) to mask the fast rotation
+      vec3 organicBase = mix(color3, colBase, v0);
+      
+      vec3 darkCol = (organicBase + v1) * v2 * v3;
       darkCol = clamp(darkCol, 0.0, 1.0);
       
-      vec3 lightCol = (colBase + v1) * mix(1.0, v2 * v3, fadeAmount);
-      lightCol = mix(backgroundColor, lightCol, v0);
+      vec3 lightCol = (organicBase + v1) * mix(1.0, v2 * v3, fadeAmount);
+      // Removed solid background injection to allow true transparency
+      lightCol *= max(v0, v2 * v3);
       lightCol = clamp(lightCol, 0.0, 1.0);
       
       vec3 finalCol = mix(darkCol, lightCol, bgLuminance);
@@ -206,7 +228,8 @@ export default function Orb({
     const container = ctnDom.current;
     if (!container) return;
 
-    const renderer = new Renderer({ alpha: true, premultipliedAlpha: false });
+    // Set premultipliedAlpha to true so the browser composites the additive glow correctly
+    const renderer = new Renderer({ alpha: true, premultipliedAlpha: true });
     const gl = renderer.gl;
     gl.clearColor(0, 0, 0, 0);
     container.appendChild(gl.canvas);
@@ -223,6 +246,8 @@ export default function Orb({
         rot:             { value: 0 },
         hoverIntensity:  { value: hoverIntensityRef.current },
         backgroundColor: { value: hexToVec3(backgroundColorRef.current) },
+        uBgLuminance:    { value: 0 },
+        uSatBoost:       { value: satBoostRef.current },
       }
     });
 
@@ -293,6 +318,13 @@ export default function Orb({
       program.uniforms.hue.value            = currentHue;
       program.uniforms.hoverIntensity.value = hoverIntensityRef.current;
       program.uniforms.backgroundColor.value.set(currentBg.x, currentBg.y, currentBg.z);
+
+      // Compute bgLuminance — use override if set, else derive from backgroundColor
+      const lum = bgLuminanceOverrideRef.current >= 0
+        ? bgLuminanceOverrideRef.current
+        : currentBg.x * 0.299 + currentBg.y * 0.587 + currentBg.z * 0.114;
+      program.uniforms.uBgLuminance.value = lum;
+      program.uniforms.uSatBoost.value    = satBoostRef.current;
 
       const effectiveHover = forceHoverStateRef.current ? 1 : targetHover;
       program.uniforms.hover.value += (effectiveHover - program.uniforms.hover.value) * 0.1;

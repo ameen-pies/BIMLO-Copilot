@@ -2,14 +2,14 @@
  * CallPage.tsx
  *
  * A phone-call–style conversation page that chains:
- *   mic → Whisper (/transcribe) → RAG agents (/query-stream) → Groq TTS (/tts) → speaker
+ * mic → Whisper (/transcribe) → RAG agents (/query-stream) → Groq TTS (/tts) → speaker
  *
  * Key behaviours
  * ──────────────
  * • Voice Activity Detection (VAD) — energy + zero-crossing + sustained-duration gate.
- *   Rejects coughs, clicks, background noise; only fires on real speech.
+ * Rejects coughs, clicks, background noise; only fires on real speech.
  * • Barge-in — if you speak while the AI is talking, audio stops within ~150 ms and
- *   the system re-enters LISTENING immediately.
+ * the system re-enters LISTENING immediately.
  * • Hands-free loop — after TTS finishes (or is interrupted) it auto-returns to LISTENING.
  * • Session memory — shares the same session_id as the main chat so history is continuous.
  * • All agents available — the /query-stream router picks RAG / report / graph etc.
@@ -20,7 +20,7 @@ import React, {
 } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown } from "lucide-react";
+import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown, X } from "lucide-react";
 import Orb from "../components/Orb";
 import ThemeToggle from "../components/ThemeToggle";
 
@@ -136,6 +136,7 @@ const CallPage: React.FC = () => {
   const waveBarRefsRef = useRef<(HTMLSpanElement | null)[]>([]);
   const [callDuration, setCallDuration] = useState(0);
   const [error, setError]           = useState<string | null>(null);
+  const [showSilenceWarning, setShowSilenceWarning] = useState(false);
   const [isDark, setIsDark]         = useState(() =>
     document.documentElement.classList.contains("dark")
   );
@@ -173,6 +174,7 @@ const CallPage: React.FC = () => {
   const startListeningRef = useRef<(() => void) | null>(null);
 
   const durationTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const silenceWarnShownRef = useRef(false);
 
   // Keep refs in sync with state
   useEffect(() => { stateRef.current   = callState; }, [callState]);
@@ -218,6 +220,8 @@ const CallPage: React.FC = () => {
     let inSpeech     = false;
     let speechStart  = 0;
     let lastVoiced   = 0;
+    let lastHeardTime    = Date.now();
+    silenceWarnShownRef.current = false;
 
     const tick = () => {
       animFrameRef.current = requestAnimationFrame(tick);
@@ -249,6 +253,18 @@ const CallPage: React.FC = () => {
       if (mutedRef.current) return;
 
       const isSpeech = energy > VAD_ENERGY_THRESHOLD && rate < VAD_ZCR_MAX;
+
+      // ── Silence warning ───────────────────────────────────────────────────
+      if (energy > 0.04) {
+        lastHeardTime = Date.now();
+        if (silenceWarnShownRef.current) {
+          silenceWarnShownRef.current = false;
+          setShowSilenceWarning(false);
+        }
+      } else if (!silenceWarnShownRef.current && Date.now() - lastHeardTime > 3000) {
+        silenceWarnShownRef.current = true;
+        setShowSilenceWarning(true);
+      }
 
       if (isSpeech) {
         lastVoiced = Date.now();
@@ -806,6 +822,8 @@ const CallPage: React.FC = () => {
 
     waveBarRefsRef.current.forEach(el => { if (el) el.style.height = "3px"; });
     setLiveTranscript("");
+    setShowSilenceWarning(false);
+    silenceWarnShownRef.current = false;
 
     // Fire call-ended so Chat can render the call card.
     // Use callDuration via a ref snapshot — the state variable may be stale inside
@@ -849,8 +867,34 @@ const CallPage: React.FC = () => {
     isActive                    ? 0.35 : 0.18;
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden" style={{ background: isDark ? "#07080f" : "#f5f4fb" }}>
+    <motion.div
+      className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden"
+      style={{ background: isDark ? "#07080f" : "#f5f4fb", transition: "background 0.15s ease" }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.4, ease: "easeOut" }}
+    >
 
+      {/* ── Silence warning banner ── */}
+      <AnimatePresence>
+        {showSilenceWarning && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+            className="fixed top-4 left-0 right-0 flex justify-center z-50 pointer-events-none"
+          >
+            <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-950 border border-red-500/50 text-red-400 text-xs font-medium shadow-sm">
+              <span>😢</span>
+              <span>We're having trouble hearing you — check your mic is connected and unmuted.</span>
+              <button onClick={() => { silenceWarnShownRef.current = false; setShowSilenceWarning(false); }} className="ml-1 hover:text-red-300 transition-colors">
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
 
       <div className="relative z-10 w-full max-w-md flex items-center justify-between px-1">
@@ -960,13 +1004,16 @@ const CallPage: React.FC = () => {
           </AnimatePresence>
 
           {/* The Orb */}
-          <div style={{ width: 200, height: 200 }}>
+          <div style={{ width: 200, height: 200, borderRadius: "50%", overflow: "hidden" }}>
             <Orb
+              key={isDark ? "dark" : "light"}
               hue={orbHue}
               hoverIntensity={orbHoverIntensity}
               rotateOnHover={false}
               forceHoverState={orbForceHover}
-              backgroundColor={isDark ? "#07080f" : "transparent"}
+              backgroundColor={isDark ? "#07080f" : "#f5f4fb"}
+              bgLuminanceOverride={isDark ? -1 : 1}
+              satBoost={isDark ? 0.0 : 0.75}
             />
           </div>
         </div>
@@ -983,12 +1030,20 @@ const CallPage: React.FC = () => {
           >
             <span className={`text-xs font-medium px-3 py-1 rounded-full border ${
               callState === "speaking"
-                ? "text-blue-300 border-blue-500/25 bg-blue-500/10"
+                ? isDark
+                  ? "text-blue-300 border-blue-500/25 bg-blue-500/10"
+                  : "text-blue-600 border-blue-400/40 bg-blue-100/70"
                 : callState === "thinking" || callState === "transcribing"
-                ? "text-amber-300 border-amber-500/25 bg-amber-500/10"
+                ? isDark
+                  ? "text-amber-300 border-amber-500/25 bg-amber-500/10"
+                  : "text-amber-700 border-amber-400/40 bg-amber-100/70"
                 : isActive
-                ? "text-teal-300 border-teal-500/25 bg-teal-500/10"
-                : "text-foreground/30 border-foreground/8 bg-foreground/5"
+                ? isDark
+                  ? "text-teal-300 border-teal-500/25 bg-teal-500/10"
+                  : "text-teal-700 border-teal-500/35 bg-teal-100/70"
+                : isDark
+                  ? "text-foreground/30 border-foreground/8 bg-foreground/5"
+                  : "text-foreground/50 border-foreground/15 bg-foreground/5"
             }`}>
               {STATE_LABEL[callState]}
             </span>
@@ -1160,7 +1215,7 @@ const CallPage: React.FC = () => {
             : "Tap to end call"}
         </p>
       </div>
-    </div>
+    </motion.div>
   );
 };
 
