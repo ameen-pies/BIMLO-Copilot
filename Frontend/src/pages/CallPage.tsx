@@ -866,6 +866,8 @@ const CallPage: React.FC = () => {
     callState === "thinking" || callState === "transcribing" ? 0.3 :
     isActive                    ? 0.35 : 0.18;
 
+  // Static blue — no state switching, no flash
+
   return (
     <motion.div
       className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden"
@@ -874,6 +876,8 @@ const CallPage: React.FC = () => {
       animate={{ opacity: 1 }}
       transition={{ duration: 0.4, ease: "easeOut" }}
     >
+
+      {/* ── Floating lines background — memoized, never re-renders with CallPage state */}
 
       {/* ── Silence warning banner ── */}
       <AnimatePresence>
