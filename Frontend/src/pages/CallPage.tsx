@@ -22,6 +22,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown } from "lucide-react";
 import Orb from "../components/Orb";
+import ThemeToggle from "../components/ThemeToggle";
 
 // ── API base (same helper as Chat.tsx) ───────────────────────────────────────
 const API =
@@ -132,9 +133,21 @@ const CallPage: React.FC = () => {
   const [subtitleKey,   setSubtitleKey]   = useState(0);
   const [subtitleWords, setSubtitleWords] = useState<string[]>([]);
   const spokenTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [waveform, setWaveform]     = useState<number[]>(Array(32).fill(0));
+  const waveBarRefsRef = useRef<(HTMLSpanElement | null)[]>([]);
   const [callDuration, setCallDuration] = useState(0);
   const [error, setError]           = useState<string | null>(null);
+  const [isDark, setIsDark]         = useState(() =>
+    document.documentElement.classList.contains("dark")
+  );
+
+  // Keep isDark in sync whenever ThemeToggle mutates the html class
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains("dark"));
+    });
+    observer.observe(document.documentElement, { attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
 
   // ── Refs ───────────────────────────────────────────────────────────────────
   const stateRef          = useRef<CallState>("idle");
@@ -216,14 +229,22 @@ const CallPage: React.FC = () => {
       const energy = rms(buf);
       const rate   = zcr(buf);
 
-      // ── Waveform visualisation ────────────────────────────────────────────
-      const bars = Array.from({ length: 32 }, (_, i) => {
-        const start = Math.floor((i / 32) * bufSize);
-        const end   = Math.floor(((i + 1) / 32) * bufSize);
-        const slice = buf.slice(start, end);
-        return Math.min(1, rms(slice) * 8);
-      });
-      setWaveform(bars);
+      // ── Waveform visualisation (direct DOM — avoids setState re-render loop) ─
+      const bars = waveBarRefsRef.current;
+      if (bars.length) {
+        const BAR_COUNT = bars.length;
+        for (let b = 0; b < BAR_COUNT; b++) {
+          const el = bars[b];
+          if (!el) continue;
+          const start = Math.floor((b / BAR_COUNT) * bufSize);
+          const end   = Math.floor(((b + 1) / BAR_COUNT) * bufSize);
+          let sq = 0;
+          for (let j = start; j < end; j++) sq += buf[j] * buf[j];
+          const amp = Math.min(1, Math.sqrt(sq / (end - start)) * 8);
+          const minH = 3, maxH = 26;
+          el.style.height = `${Math.max(minH, Math.round(minH + amp * (maxH - minH)))}px`;
+        }
+      }
 
       if (mutedRef.current) return;
 
@@ -783,7 +804,7 @@ const CallPage: React.FC = () => {
     analyserRef.current = null;
     recorderRef.current = null;
 
-    setWaveform(Array(32).fill(0));
+    waveBarRefsRef.current.forEach(el => { if (el) el.style.height = "3px"; });
     setLiveTranscript("");
 
     // Fire call-ended so Chat can render the call card.
@@ -828,38 +849,34 @@ const CallPage: React.FC = () => {
     isActive                    ? 0.35 : 0.18;
 
   return (
-    <div className="min-h-screen bg-[#07080f] flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden">
+    <div className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden" style={{ background: isDark ? "#07080f" : "#f5f4fb" }}>
 
-      {/* ── Ambient background glow ── */}
-      <div className="pointer-events-none fixed inset-0 z-0">
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] rounded-full bg-blue-600/5 blur-[120px]" />
-        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[400px] h-[300px] rounded-full bg-violet-600/5 blur-[100px]" />
-      </div>
 
-      {/* ── Top bar ── */}
+
       <div className="relative z-10 w-full max-w-md flex items-center justify-between px-1">
         <button
           onClick={() => navigate(locState.convId ? "/chat" : "/")}
-          className="flex items-center gap-1.5 text-white/30 hover:text-white/70 text-xs transition-colors"
+          className="flex items-center gap-1.5 text-foreground/30 hover:text-foreground/70 text-xs transition-colors"
         >
           <span className="text-base leading-none">←</span>
           <span>Back</span>
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           {isActive && (
-            <span className="flex items-center gap-1.5 text-xs font-mono text-white/25">
+            <span className="flex items-center gap-1.5 text-xs font-mono text-foreground/25">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/70 animate-pulse" />
               {fmt(callDuration)}
             </span>
           )}
+          <ThemeToggle />
         </div>
 
         {/* Voice picker */}
         <div className="relative">
           <button
             onClick={() => setShowVoicePicker(v => !v)}
-            className="flex items-center gap-1 text-xs text-white/30 hover:text-white/60 transition-colors capitalize"
+            className="flex items-center gap-1 text-xs text-foreground/30 hover:text-foreground/60 transition-colors capitalize"
           >
             {selectedVoice}
             <ChevronDown className="h-3 w-3" />
@@ -871,7 +888,7 @@ const CallPage: React.FC = () => {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -6, scale: 0.96 }}
                 transition={{ duration: 0.15 }}
-                className="absolute right-0 top-7 bg-[#0f1016]/95 backdrop-blur-xl border border-white/8 rounded-2xl shadow-2xl z-50 overflow-hidden w-44"
+                className="absolute right-0 top-7 bg-background/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl z-50 overflow-hidden w-44"
               >
                 {[
                   { id: "hannah", label: "Hannah", hint: "Warm, natural" },
@@ -886,12 +903,12 @@ const CallPage: React.FC = () => {
                     onClick={() => { setSelectedVoice(v.id); setShowVoicePicker(false); }}
                     className={`w-full text-left px-3.5 py-2.5 text-xs transition-colors ${
                       selectedVoice === v.id
-                        ? "bg-blue-500/15 text-blue-300"
-                        : "text-white/50 hover:bg-white/5 hover:text-white/80"
+                        ? "bg-blue-500/15 text-blue-400"
+                        : "text-foreground/50 hover:bg-foreground/5 hover:text-foreground/80"
                     }`}
                   >
                     <span className="font-medium">{v.label}</span>
-                    <span className="ml-2 text-white/25">{v.hint}</span>
+                    <span className="ml-2 text-foreground/25">{v.hint}</span>
                   </button>
                 ))}
               </motion.div>
@@ -943,24 +960,20 @@ const CallPage: React.FC = () => {
           </AnimatePresence>
 
           {/* The Orb */}
-          <motion.div
-            style={{ width: 200, height: 200 }}
-            animate={callState === "thinking" ? { scale: [1, 1.03, 1] } : { scale: 1 }}
-            transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-          >
+          <div style={{ width: 200, height: 200 }}>
             <Orb
               hue={orbHue}
               hoverIntensity={orbHoverIntensity}
               rotateOnHover={false}
               forceHoverState={orbForceHover}
-              backgroundColor="#07080f"
+              backgroundColor={isDark ? "#07080f" : "transparent"}
             />
-          </motion.div>
+          </div>
         </div>
 
         {/* Agent name + state badge */}
         <div className="flex flex-col items-center gap-2">
-          <h1 className="text-white/90 font-semibold text-xl tracking-tight">Bimlo Copilot</h1>
+          <h1 className="text-foreground/90 font-semibold text-xl tracking-tight">Bimlo Copilot</h1>
           <motion.div
             key={callState}
             initial={{ opacity: 0, y: 4 }}
@@ -975,7 +988,7 @@ const CallPage: React.FC = () => {
                 ? "text-amber-300 border-amber-500/25 bg-amber-500/10"
                 : isActive
                 ? "text-teal-300 border-teal-500/25 bg-teal-500/10"
-                : "text-white/30 border-white/8 bg-white/5"
+                : "text-foreground/30 border-foreground/8 bg-foreground/5"
             }`}>
               {STATE_LABEL[callState]}
             </span>
@@ -986,36 +999,28 @@ const CallPage: React.FC = () => {
         <div className="w-full min-h-[3rem] flex items-center justify-center px-2">
           <AnimatePresence mode="wait">
 
-            {callState === "listening" && (
-              <motion.div key="dots"
+            {(callState === "listening" || callState === "detecting") && (
+              <motion.div key="soundwave"
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="flex items-center gap-1.5"
+                className="flex items-end gap-[3px]"
+                style={{ height: 28 }}
               >
-                {[0, 0.2, 0.4].map(d => (
-                  <motion.span key={d}
-                    className="block w-1 h-1 rounded-full bg-teal-400/40"
-                    animate={{ opacity: [0.3, 1, 0.3], scale: [1, 1.3, 1] }}
-                    transition={{ duration: 1.5, repeat: Infinity, delay: d }}
+                {Array.from({ length: 20 }, (_, i) => (
+                  <span
+                    key={i}
+                    ref={el => { waveBarRefsRef.current[i] = el; }}
+                    className={`rounded-full ${callState === "detecting" ? "bg-teal-400/70" : "bg-teal-400/40"}`}
+                    style={{ width: 3, height: 3, display: "block", transition: "height 0.08s linear" }}
                   />
                 ))}
               </motion.div>
-            )}
-
-            {callState === "detecting" && (
-              <motion.p key="detecting"
-                initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0 }} transition={{ duration: 0.2 }}
-                className="text-sm text-teal-400/50 tracking-widest text-center"
-              >
-                · · ·
-              </motion.p>
             )}
 
             {(callState === "transcribing" || callState === "thinking") && liveTranscript && (
               <motion.p key="transcript"
                 initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.3 }}
-                className="text-sm font-medium text-white/80 text-center leading-relaxed"
+                className="text-sm font-medium text-foreground/80 text-center leading-relaxed"
               >
                 {liveTranscript}
               </motion.p>
@@ -1040,7 +1045,7 @@ const CallPage: React.FC = () => {
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8, transition: { duration: 0.2 } }}
                     transition={{ duration: 0.2 }}
-                    className="text-sm font-light text-blue-100/80 text-center leading-relaxed px-2"
+                    className="text-sm font-light text-blue-400/80 text-center leading-relaxed px-2"
                   >
                     <AnimatePresence mode="popLayout">
                       {subtitleWords.map((word, i) => (
@@ -1072,72 +1077,84 @@ const CallPage: React.FC = () => {
       </div>
 
       {/* ── Controls ── */}
-      <div className="relative z-10 w-full max-w-xs flex flex-col items-center gap-6 pb-2">
+      <div className="relative z-10 w-full max-w-xs flex flex-col items-center pb-2">
 
-        {/* Aux controls — mute + speaker */}
-        <AnimatePresence>
-          {isActive && (
-            <motion.div
-              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
-              className="flex items-center gap-4"
-            >
-              <button
+        {/* CTA + aux buttons share the same fixed-height row — no layout shift */}
+        <div className="relative flex items-center justify-center w-full h-20">
+
+          {/* Mute — springs out to the LEFT of the CTA dot */}
+          <AnimatePresence>
+            {isActive && (
+              <motion.button
                 onClick={() => setMuted(m => !m)}
-                className={`flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border transition-all text-xs font-medium ${
+                initial={{ opacity: 0, x: 0, scale: 0.6 }}
+                animate={{ opacity: 1, x: -112, scale: 1 }}
+                exit={{ opacity: 0, x: 0, scale: 0.6 }}
+                transition={{ type: "spring", stiffness: 320, damping: 28 }}
+                className={`absolute flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border text-xs font-medium transition-colors ${
                   muted
                     ? "bg-red-500/15 text-red-400 border-red-500/25"
-                    : "bg-white/4 text-white/40 border-white/8 hover:bg-white/8 hover:text-white/60"
+                    : "bg-foreground/4 text-foreground/40 border-foreground/8 hover:bg-foreground/8 hover:text-foreground/60"
                 }`}
               >
                 {muted ? <MicOff className="h-4 w-4 mb-0.5" /> : <Mic className="h-4 w-4 mb-0.5" />}
                 {muted ? "Unmute" : "Mute"}
-              </button>
+              </motion.button>
+            )}
+          </AnimatePresence>
 
-              <button
+          {/* Primary CTA — always centred, never moves */}
+          {callState === "idle" || callState === "ended" ? (
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={startCall}
+              className="relative w-20 h-20 rounded-full flex items-center justify-center"
+              style={{
+                background: "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)",
+                boxShadow: "0 0 40px rgba(99,102,241,0.35), 0 4px 20px rgba(0,0,0,0.5)"
+              }}
+            >
+              <Mic className="h-7 w-7 text-white" />
+            </motion.button>
+          ) : (
+            <motion.button
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={endCall}
+              className="relative w-20 h-20 rounded-full flex items-center justify-center"
+              style={{
+                background: "linear-gradient(135deg, #dc2626 0%, #9f1239 100%)",
+                boxShadow: "0 0 32px rgba(220,38,38,0.3), 0 4px 20px rgba(0,0,0,0.5)"
+              }}
+            >
+              <PhoneOff className="h-7 w-7 text-white" />
+            </motion.button>
+          )}
+
+          {/* Speaker — springs out to the RIGHT of the CTA dot */}
+          <AnimatePresence>
+            {isActive && (
+              <motion.button
                 onClick={() => setSpeakerOff(s => !s)}
-                className={`flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border transition-all text-xs font-medium ${
+                initial={{ opacity: 0, x: 0, scale: 0.6 }}
+                animate={{ opacity: 1, x: 112, scale: 1 }}
+                exit={{ opacity: 0, x: 0, scale: 0.6 }}
+                transition={{ type: "spring", stiffness: 320, damping: 28, delay: 0.04 }}
+                className={`absolute flex flex-col items-center gap-1 px-4 py-2.5 rounded-2xl border text-xs font-medium transition-colors ${
                   speakerOff
-                    ? "bg-white/5 text-white/25 border-white/5"
-                    : "bg-white/4 text-white/40 border-white/8 hover:bg-white/8 hover:text-white/60"
+                    ? "bg-foreground/5 text-foreground/25 border-foreground/5"
+                    : "bg-foreground/4 text-foreground/40 border-foreground/8 hover:bg-foreground/8 hover:text-foreground/60"
                 }`}
               >
                 {speakerOff ? <VolumeX className="h-4 w-4 mb-0.5" /> : <Volume2 className="h-4 w-4 mb-0.5" />}
-                {speakerOff ? "Speaker off" : "Speaker"}
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                {speakerOff ? "Off" : "Speaker"}
+              </motion.button>
+            )}
+          </AnimatePresence>
+        </div>
 
-        {/* Primary CTA */}
-        {callState === "idle" || callState === "ended" ? (
-          <motion.button
-            whileHover={{ scale: 1.04 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={startCall}
-            className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all"
-            style={{
-              background: "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)",
-              boxShadow: "0 0 40px rgba(99,102,241,0.35), 0 4px 20px rgba(0,0,0,0.5)"
-            }}
-          >
-            <Mic className="h-7 w-7 text-white" />
-          </motion.button>
-        ) : (
-          <motion.button
-            whileHover={{ scale: 1.04 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={endCall}
-            className="relative w-20 h-20 rounded-full flex items-center justify-center transition-all"
-            style={{
-              background: "linear-gradient(135deg, #dc2626 0%, #9f1239 100%)",
-              boxShadow: "0 0 32px rgba(220,38,38,0.3), 0 4px 20px rgba(0,0,0,0.5)"
-            }}
-          >
-            <PhoneOff className="h-7 w-7 text-white" />
-          </motion.button>
-        )}
-
-        <p className="text-white/18 text-[11px] text-center">
+        <p className="text-foreground/55 text-[13px] text-center mt-4 tracking-wide">
           {callState === "idle" || callState === "ended"
             ? "Tap to start · speak naturally"
             : "Tap to end call"}

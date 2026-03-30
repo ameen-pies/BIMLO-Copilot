@@ -11,6 +11,21 @@ export default function Orb({
 }) {
   const ctnDom = useRef(null);
 
+  // Keep all mutable props in refs so the animation loop always reads the
+  // latest value without needing to restart the WebGL context.
+  const hueRef             = useRef(hue);
+  const hoverIntensityRef  = useRef(hoverIntensity);
+  const rotateOnHoverRef   = useRef(rotateOnHover);
+  const forceHoverStateRef = useRef(forceHoverState);
+  const backgroundColorRef = useRef(backgroundColor);
+
+  // Sync refs every render — no effect needed.
+  hueRef.current             = hue;
+  hoverIntensityRef.current  = hoverIntensity;
+  rotateOnHoverRef.current   = rotateOnHover;
+  forceHoverStateRef.current = forceHoverState;
+  backgroundColorRef.current = backgroundColor;
+
   const vert = /* glsl */ `
     precision highp float;
     attribute vec2 position;
@@ -183,6 +198,10 @@ export default function Orb({
     }
   `;
 
+  // The effect runs ONCE — no prop dependencies.
+  // Props are read every frame via their refs, so the WebGL context is never
+  // torn down when hue / backgroundColor / etc. changes, which eliminates the
+  // white flash entirely.
   useEffect(() => {
     const container = ctnDom.current;
     if (!container) return;
@@ -197,15 +216,13 @@ export default function Orb({
       vertex: vert,
       fragment: frag,
       uniforms: {
-        iTime: { value: 0 },
-        iResolution: {
-          value: new Vec3(gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height)
-        },
-        hue: { value: hue },
-        hover: { value: 0 },
-        rot: { value: 0 },
-        hoverIntensity: { value: hoverIntensity },
-        backgroundColor: { value: hexToVec3(backgroundColor) }
+        iTime:           { value: 0 },
+        iResolution:     { value: new Vec3(gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height) },
+        hue:             { value: hueRef.current },
+        hover:           { value: 0 },
+        rot:             { value: 0 },
+        hoverIntensity:  { value: hoverIntensityRef.current },
+        backgroundColor: { value: hexToVec3(backgroundColorRef.current) },
       }
     });
 
@@ -213,46 +230,42 @@ export default function Orb({
 
     function resize() {
       if (!container) return;
-      const dpr = window.devicePixelRatio || 1;
-      const width = container.clientWidth;
+      const dpr    = window.devicePixelRatio || 1;
+      const width  = container.clientWidth;
       const height = container.clientHeight;
       renderer.setSize(width * dpr, height * dpr);
-      gl.canvas.style.width = width + 'px';
+      gl.canvas.style.width  = width  + 'px';
       gl.canvas.style.height = height + 'px';
       program.uniforms.iResolution.value.set(gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height);
     }
     window.addEventListener('resize', resize);
     resize();
 
-    let targetHover = 0;
-    let lastTime = 0;
-    let currentRot = 0;
+    let targetHover    = 0;
+    let lastTime       = 0;
+    let currentRot     = 0;
+    // Smoothly interpolated hue and backgroundColor so transitions are gradual
+    // rather than instant jumps read straight from the ref each frame.
+    let currentHue     = hueRef.current;
+    let currentBg      = hexToVec3(backgroundColorRef.current);
     const rotationSpeed = 0.3;
+    // Speed of smooth interpolation (fraction per frame at 60 fps).
+    // 0.05 ≈ ~300 ms transition; raise toward 0.1 for a snappier feel.
+    const lerpSpeed    = 0.05;
 
     const handleMouseMove = e => {
-      const rect = container.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      const width = rect.width;
-      const height = rect.height;
-      const size = Math.min(width, height);
-      const centerX = width / 2;
-      const centerY = height / 2;
-      const uvX = ((x - centerX) / size) * 2.0;
-      const uvY = ((y - centerY) / size) * 2.0;
-
-      if (Math.sqrt(uvX * uvX + uvY * uvY) < 0.8) {
-        targetHover = 1;
-      } else {
-        targetHover = 0;
-      }
+      const rect   = container.getBoundingClientRect();
+      const x      = e.clientX - rect.left;
+      const y      = e.clientY - rect.top;
+      const size   = Math.min(rect.width, rect.height);
+      const uvX    = ((x - rect.width  / 2) / size) * 2.0;
+      const uvY    = ((y - rect.height / 2) / size) * 2.0;
+      targetHover  = Math.sqrt(uvX * uvX + uvY * uvY) < 0.8 ? 1 : 0;
     };
 
-    const handleMouseLeave = () => {
-      targetHover = 0;
-    };
+    const handleMouseLeave = () => { targetHover = 0; };
 
-    container.addEventListener('mousemove', handleMouseMove);
+    container.addEventListener('mousemove',  handleMouseMove);
     container.addEventListener('mouseleave', handleMouseLeave);
 
     let rafId;
@@ -260,15 +273,31 @@ export default function Orb({
       rafId = requestAnimationFrame(update);
       const dt = (t - lastTime) * 0.001;
       lastTime = t;
-      program.uniforms.iTime.value = t * 0.001;
-      program.uniforms.hue.value = hue;
-      program.uniforms.hoverIntensity.value = hoverIntensity;
-      program.uniforms.backgroundColor.value = hexToVec3(backgroundColor);
 
-      const effectiveHover = forceHoverState ? 1 : targetHover;
+      // ── Smooth hue interpolation ──────────────────────────────────────────
+      // Handle wraparound so e.g. 350° → 10° goes the short way.
+      const targetHue = hueRef.current;
+      let hueDiff     = targetHue - currentHue;
+      if (hueDiff >  180) hueDiff -= 360;
+      if (hueDiff < -180) hueDiff += 360;
+      currentHue += hueDiff * lerpSpeed;
+
+      // ── Smooth backgroundColor interpolation ─────────────────────────────
+      const targetBg  = hexToVec3(backgroundColorRef.current);
+      currentBg.x    += (targetBg.x - currentBg.x) * lerpSpeed;
+      currentBg.y    += (targetBg.y - currentBg.y) * lerpSpeed;
+      currentBg.z    += (targetBg.z - currentBg.z) * lerpSpeed;
+
+      // ── Write uniforms ────────────────────────────────────────────────────
+      program.uniforms.iTime.value          = t * 0.001;
+      program.uniforms.hue.value            = currentHue;
+      program.uniforms.hoverIntensity.value = hoverIntensityRef.current;
+      program.uniforms.backgroundColor.value.set(currentBg.x, currentBg.y, currentBg.z);
+
+      const effectiveHover = forceHoverStateRef.current ? 1 : targetHover;
       program.uniforms.hover.value += (effectiveHover - program.uniforms.hover.value) * 0.1;
 
-      if (rotateOnHover && effectiveHover > 0.5) {
+      if (rotateOnHoverRef.current && effectiveHover > 0.5) {
         currentRot += dt * rotationSpeed;
       }
       program.uniforms.rot.value = currentRot;
@@ -280,62 +309,46 @@ export default function Orb({
     return () => {
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
-      container.removeEventListener('mousemove', handleMouseMove);
+      container.removeEventListener('mousemove',  handleMouseMove);
       container.removeEventListener('mouseleave', handleMouseLeave);
-      container.removeChild(gl.canvas);
+      if (container.contains(gl.canvas)) container.removeChild(gl.canvas);
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hue, hoverIntensity, rotateOnHover, forceHoverState, backgroundColor]);
+  }, []); // ← empty array: WebGL context is created once and never restarted
 
   return <div ref={ctnDom} className="orb-container" />;
 }
 
 function hslToRgb(h, s, l) {
-  let r, g, b;
-
-  if (s === 0) {
-    r = g = b = l;
-  } else {
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1 / 6) return p + (q - p) * 6 * t;
-      if (t < 1 / 2) return q;
-      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-      return p;
-    };
-
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h + 1 / 3);
-    g = hue2rgb(p, q, h);
-    b = hue2rgb(p, q, h - 1 / 3);
-  }
-
-  return new Vec3(r, g, b);
+  if (s === 0) return new Vec3(l, l, l);
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return new Vec3(hue2rgb(p, q, h + 1 / 3), hue2rgb(p, q, h), hue2rgb(p, q, h - 1 / 3));
 }
 
 function hexToVec3(color) {
-  if (color.startsWith('#')) {
+  if (color && color.startsWith('#')) {
     const r = parseInt(color.slice(1, 3), 16) / 255;
     const g = parseInt(color.slice(3, 5), 16) / 255;
     const b = parseInt(color.slice(5, 7), 16) / 255;
     return new Vec3(r, g, b);
   }
-
-  const rgbMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  const rgbMatch = color && color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
   if (rgbMatch) {
     return new Vec3(parseInt(rgbMatch[1]) / 255, parseInt(rgbMatch[2]) / 255, parseInt(rgbMatch[3]) / 255);
   }
-
-  const hslMatch = color.match(/hsla?\((\d+),\s*(\d+)%,\s*(\d+)%/);
+  const hslMatch = color && color.match(/hsla?\((\d+),\s*(\d+)%,\s*(\d+)%/);
   if (hslMatch) {
-    const h = parseInt(hslMatch[1]) / 360;
-    const s = parseInt(hslMatch[2]) / 100;
-    const l = parseInt(hslMatch[3]) / 100;
-    return hslToRgb(h, s, l);
+    return hslToRgb(parseInt(hslMatch[1]) / 360, parseInt(hslMatch[2]) / 100, parseInt(hslMatch[3]) / 100);
   }
-
   return new Vec3(0, 0, 0);
 }
