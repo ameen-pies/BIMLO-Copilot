@@ -1,18 +1,16 @@
 import { useState, useEffect } from "react";
-import { Radio, Cable, Scale, HardHat, Newspaper, ExternalLink, Zap, Clock, ArrowLeft } from "lucide-react";
+import { ArrowLeft, RefreshCw, ExternalLink, Zap, Radio, Cable, Scale, HardHat, Newspaper } from "lucide-react";
 import { Link } from "react-router-dom";
-import Navbar from "@/components/Navbar";
-import BackgroundManager from "@/components/BackgroundManager";
 import { getCachedBriefing, prefetchNews, type NewsItem } from "@/lib/newsCache";
 
 // ── Category config ────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
-  "5G":           { label: "5G & Wireless", Icon: Radio,     color: "hsl(200 90% 55%)" },
-  "Fiber":        { label: "Fiber",          Icon: Cable,     color: "hsl(160 70% 45%)" },
-  "Regulation":   { label: "Regulation",     Icon: Scale,     color: "hsl(38 90% 55%)"  },
-  "Construction": { label: "Construction",   Icon: HardHat,   color: "hsl(280 60% 60%)" },
-  "General":      { label: "General",        Icon: Newspaper, color: "hsl(var(--primary))" },
+  "5G":           { label: "5G",          Icon: Radio,     color: "#3b9eff" },
+  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399" },
+  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24" },
+  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa" },
+  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8" },
 };
 
 const ALL_FILTERS = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
@@ -20,19 +18,28 @@ const ALL_FILTERS = ["All", "5G", "Fiber", "Regulation", "Construction", "Genera
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
-  if (m < 60)  return `${m}m ago`;
+  if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
-  if (h < 24)  return `${h}h ago`;
+  if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
 }
 
-// ── Bento card sizes cycle: big, small, small, big, small, small … ─────────
-// "big" spans 2 cols on desktop, "small" spans 1.
-const SIZE_PATTERN = ["big", "small", "small", "big", "small", "small"];
+const FALLBACK_GRADIENTS: Record<string, string> = {
+  "5G":           "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
+  "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
+  "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
+  "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
+  "General":      "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+};
 
-function NewsCard({ item, big }: { item: NewsItem; big: boolean }) {
+// Repeating 3-col bento: wide(2), narrow(1), narrow(1)
+const SIZE_PATTERN = ["wide", "narrow", "narrow"];
+
+function NewsCard({ item, size }: { item: NewsItem; size: "wide" | "narrow" }) {
   const meta = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href = item.article_url && item.article_url !== "#" ? item.article_url : item.source_url;
+  const [imgError, setImgError] = useState(false);
+  const hasImage = item.image_url && !imgError;
 
   return (
     <a
@@ -40,229 +47,251 @@ function NewsCard({ item, big }: { item: NewsItem; big: boolean }) {
       target="_blank"
       rel="noopener noreferrer"
       style={{
-        gridColumn: big ? "span 2" : "span 1",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.75rem",
-        padding: big ? "1.75rem" : "1.25rem",
-        borderRadius: 18,
-        border: "1px solid hsl(var(--border))",
-        background: "linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--secondary)) 100%)",
-        textDecoration: "none",
+        gridColumn: size === "wide" ? "span 2" : "span 1",
         position: "relative",
+        display: "block",
+        height: size === "wide" ? 260 : 200,
+        borderRadius: 12,
         overflow: "hidden",
+        textDecoration: "none",
         cursor: "pointer",
-        transition: "border-color 0.2s, transform 0.15s",
+        transition: "transform 0.2s ease",
+        zIndex: 1,
       }}
       onMouseEnter={e => {
-        (e.currentTarget as HTMLElement).style.borderColor = meta.color + "66";
-        (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)";
+        (e.currentTarget as HTMLElement).style.transform = "scale(1.015)";
+        (e.currentTarget as HTMLElement).style.zIndex = "2";
+        const ov = (e.currentTarget as HTMLElement).querySelector(".ov") as HTMLElement;
+        if (ov) ov.style.background = "linear-gradient(to top, rgba(0,0,0,0.93) 0%, rgba(0,0,0,0.52) 55%, rgba(0,0,0,0.12) 100%)";
       }}
       onMouseLeave={e => {
-        (e.currentTarget as HTMLElement).style.borderColor = "hsl(var(--border))";
-        (e.currentTarget as HTMLElement).style.transform = "translateY(0)";
+        (e.currentTarget as HTMLElement).style.transform = "scale(1)";
+        (e.currentTarget as HTMLElement).style.zIndex = "1";
+        const ov = (e.currentTarget as HTMLElement).querySelector(".ov") as HTMLElement;
+        if (ov) ov.style.background = "linear-gradient(to top, rgba(0,0,0,0.84) 0%, rgba(0,0,0,0.36) 55%, transparent 100%)";
       }}
     >
-      {/* top accent bar */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, height: 2,
-        background: `linear-gradient(90deg, ${meta.color}, transparent)`,
+      {/* Background */}
+      {hasImage ? (
+        <img
+          src={item.image_url!}
+          alt=""
+          onError={() => setImgError(true)}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      ) : (
+        <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"] }} />
+      )}
+
+      {/* Overlay */}
+      <div className="ov" style={{
+        position: "absolute", inset: 0,
+        background: "linear-gradient(to top, rgba(0,0,0,0.84) 0%, rgba(0,0,0,0.36) 55%, transparent 100%)",
+        transition: "background 0.22s ease",
       }} />
 
-      {/* category + time */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: "0.3rem",
-          fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em",
-          color: meta.color,
-          background: meta.color + "1a",
-          border: `1px solid ${meta.color}33`,
-          borderRadius: 999, padding: "0.18rem 0.6rem",
-        }}>
-          <meta.Icon size={10} />
-          {meta.label}
-        </span>
-        <span style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.68rem", color: "hsl(var(--muted-foreground))" }}>
-          <Clock size={9} />
-          {timeAgo(item.scraped_at)}
-        </span>
+      {/* Category badge — top left */}
+      <div style={{
+        position: "absolute", top: 10, left: 10,
+        display: "inline-flex", alignItems: "center", gap: "0.28rem",
+        fontSize: "0.63rem", fontWeight: 700,
+        color: "#fff",
+        background: meta.color + "cc",
+        borderRadius: 999, padding: "0.18rem 0.5rem",
+        backdropFilter: "blur(6px)",
+      }}>
+        <meta.Icon size={9} />
+        {meta.label}
       </div>
 
-      {/* title */}
-      <h3 style={{
-        margin: 0,
-        fontSize: big ? "1.05rem" : "0.9rem",
-        fontWeight: 700,
-        lineHeight: 1.4,
-        color: "hsl(var(--foreground))",
-      }}>
-        {item.title}
-      </h3>
+      {/* External link — top right */}
+      <ExternalLink size={12} style={{
+        position: "absolute", top: 12, right: 12,
+        color: "rgba(255,255,255,0.5)",
+      }} />
 
-      {/* AI impact — only on big cards or as truncated on small */}
-      {big ? (
-        <div style={{
-          background: "hsl(var(--primary) / 0.06)",
-          border: "1px solid hsl(var(--primary) / 0.12)",
-          borderRadius: 10, padding: "0.65rem 0.9rem",
-          display: "flex", gap: "0.5rem", alignItems: "flex-start",
-        }}>
-          <Zap size={12} style={{ color: "hsl(var(--primary))", flexShrink: 0, marginTop: 2 }} />
-          <p style={{ margin: 0, fontSize: "0.8rem", color: "hsl(var(--foreground)/0.75)", lineHeight: 1.55 }}>
-            {item.ai_impact}
-          </p>
+      {/* Bottom text */}
+      <div style={{
+        position: "absolute", bottom: 0, left: 0, right: 0,
+        padding: size === "wide" ? "1rem 1.15rem" : "0.8rem 0.95rem",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.35rem" }}>
+          <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.5)", fontWeight: 500 }}>{item.source}</span>
+          <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.3)" }}>·</span>
+          <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.4)" }}>{timeAgo(item.scraped_at)}</span>
         </div>
-      ) : (
-        <p style={{
-          margin: 0, fontSize: "0.78rem", color: "hsl(var(--muted-foreground))",
-          lineHeight: 1.5,
+
+        <h3 style={{
+          margin: 0,
+          fontSize: size === "wide" ? "0.98rem" : "0.8rem",
+          fontWeight: 700, color: "#fff", lineHeight: 1.35,
           display: "-webkit-box",
-          WebkitLineClamp: 2,
+          WebkitLineClamp: size === "wide" ? 2 : 3,
           WebkitBoxOrient: "vertical" as const,
           overflow: "hidden",
         }}>
-          {item.raw_summary}
-        </p>
-      )}
+          {item.title}
+        </h3>
 
-      {/* source + read link */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "auto" }}>
-        <span style={{ fontSize: "0.68rem", color: "hsl(var(--muted-foreground))" }}>{item.source}</span>
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: "0.25rem",
-          fontSize: "0.68rem", fontWeight: 600, color: meta.color,
-        }}>
-          Read <ExternalLink size={9} />
-        </span>
+        {size === "wide" && item.ai_impact && (
+          <p style={{
+            margin: "0.45rem 0 0",
+            fontSize: "0.7rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.5,
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical" as const,
+            overflow: "hidden",
+          }}>
+            <Zap size={9} style={{ display: "inline", marginRight: 3, color: "#fbbf24", verticalAlign: "middle" }} />
+            {item.ai_impact}
+          </p>
+        )}
       </div>
     </a>
   );
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
+function SkeletonCard({ size }: { size: "wide" | "narrow" }) {
+  return (
+    <div style={{
+      gridColumn: size === "wide" ? "span 2" : "span 1",
+      height: size === "wide" ? 260 : 200,
+      borderRadius: 12,
+      background: "hsl(var(--secondary))",
+      position: "relative", overflow: "hidden",
+    }}>
+      <div style={{
+        position: "absolute", inset: 0,
+        backgroundImage: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.05) 50%, transparent 100%)",
+        backgroundSize: "200% 100%",
+        animation: "shimmer 1.6s ease-in-out infinite",
+      }} />
+    </div>
+  );
+}
+
+// ── Page ───────────────────────────────────────────────────────────────────
 
 const NewsPage = () => {
-  const [items, setItems]   = useState<NewsItem[]>(getCachedBriefing()?.items ?? []);
-  const [loading, setLoading] = useState(items.length === 0);
-  const [filter, setFilter] = useState<string>("All");
+  const [items, setItems]           = useState<NewsItem[]>(getCachedBriefing()?.items ?? []);
+  const [loading, setLoading]       = useState(items.length === 0);
+  const [filter, setFilter]         = useState<string>("All");
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    if (items.length > 0) return; // already have data from cache
-    prefetchNews().then(b => {
-      setItems(b.items);
-      setLoading(false);
-    });
+    if (items.length > 0) return;
+    prefetchNews().then(b => { setItems(b.items); setLoading(false); });
   }, []);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    const b = await prefetchNews();
+    setItems(b.items);
+    setRefreshing(false);
+  };
 
   const filtered = filter === "All" ? items : items.filter(i => i.category === filter);
 
   return (
-    <div className="min-h-screen bg-background overflow-x-hidden" style={{ animation: "bgFadeIn 0.4s ease-out both" }}>
+    <div style={{ minHeight: "100vh", background: "transparent", padding: "2rem 2.5rem 3rem" }}>
       <style>{`
-        @keyframes bgFadeIn { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes shimmer { 0%,100% { opacity: 0.4 } 50% { opacity: 0.8 } }
+        @keyframes shimmer {
+          0%   { background-position: -200% 0 }
+          100% { background-position:  200% 0 }
+        }
+        @media (max-width: 768px) {
+          .news-grid { grid-template-columns: 1fr !important; }
+          .news-grid > * { grid-column: span 1 !important; height: 180px !important; }
+        }
       `}</style>
-      <BackgroundManager />
-      <Navbar />
 
-      <div className="container mx-auto px-6 pt-28 pb-24 max-w-6xl">
-
-        {/* Header */}
-        <div style={{ marginBottom: "2rem" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.6rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
           <Link to="/" style={{
-            display: "inline-flex", alignItems: "center", gap: "0.4rem",
-            fontSize: "0.78rem", color: "hsl(var(--muted-foreground))",
-            textDecoration: "none", marginBottom: "1.25rem",
+            display: "inline-flex", alignItems: "center",
+            color: "hsl(var(--muted-foreground))", textDecoration: "none", opacity: 0.6,
           }}>
-            <ArrowLeft size={13} /> Back
+            <ArrowLeft size={15} />
           </Link>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "0.75rem" }}>
-            <div>
-              <h1 style={{ margin: 0, fontSize: "2rem", fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.2 }}>
-                Industry Briefing
-              </h1>
-              <p style={{ margin: "0.4rem 0 0", fontSize: "0.875rem", color: "hsl(var(--muted-foreground))" }}>
-                AI-curated telecom news with impact analysis
-              </p>
-            </div>
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: "0.35rem",
-              fontSize: "0.72rem", fontWeight: 600,
-              color: "hsl(var(--primary))",
-              background: "hsl(var(--primary) / 0.08)",
-              border: "1px solid hsl(var(--primary) / 0.18)",
-              borderRadius: 999, padding: "0.3rem 0.8rem",
+          <div>
+            <h1 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.2 }}>
+              Industry Briefing
+            </h1>
+            <p style={{ margin: "0.1rem 0 0", fontSize: "0.72rem", color: "hsl(var(--muted-foreground))", opacity: 0.65 }}>
+              Live telecom &amp; construction news
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={handleRefresh}
+          disabled={refreshing || loading}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: "0.35rem",
+            fontSize: "0.7rem", fontWeight: 600,
+            color: "hsl(var(--muted-foreground))",
+            background: "hsl(var(--secondary))",
+            border: "1px solid hsl(var(--border))",
+            borderRadius: 8, padding: "0.38rem 0.8rem",
+            cursor: refreshing || loading ? "not-allowed" : "pointer",
+            opacity: refreshing || loading ? 0.5 : 1,
+          }}
+        >
+          <RefreshCw size={11} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {/* Filter pills */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.38rem", marginBottom: "1.35rem", alignItems: "center" }}>
+        {ALL_FILTERS.map(cat => {
+          const meta = CATEGORY_META[cat];
+          const active = filter === cat;
+          const color = meta?.color ?? "#3b9eff";
+          return (
+            <button key={cat} onClick={() => setFilter(cat)} style={{
+              display: "inline-flex", alignItems: "center", gap: "0.25rem",
+              fontSize: "0.68rem", fontWeight: 600,
+              padding: "0.22rem 0.7rem", borderRadius: 999, cursor: "pointer",
+              border: `1px solid ${active ? color + "88" : "hsl(var(--border))"}`,
+              color: active ? color : "hsl(var(--muted-foreground))",
+              background: active ? color + "18" : "transparent",
+              transition: "all 0.12s",
             }}>
-              <Zap size={11} /> {items.length} articles
-            </span>
-          </div>
-        </div>
-
-        {/* Filter pills */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.45rem", marginBottom: "1.75rem" }}>
-          {ALL_FILTERS.map(cat => {
-            const meta = CATEGORY_META[cat];
-            const active = filter === cat;
-            const color = meta?.color ?? "hsl(var(--primary))";
-            return (
-              <button
-                key={cat}
-                onClick={() => setFilter(cat)}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                  fontSize: "0.72rem", fontWeight: 600,
-                  padding: "0.28rem 0.8rem", borderRadius: 999, cursor: "pointer",
-                  border: `1px solid ${active ? color : "hsl(var(--border))"}`,
-                  color: active ? color : "hsl(var(--muted-foreground))",
-                  background: active ? color + "1a" : "hsl(var(--secondary))",
-                  transition: "all 0.15s",
-                }}
-              >
-                {meta?.Icon && <meta.Icon size={10} />}
-                {cat}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Bento grid */}
-        {loading ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem" }}>
-            {[...Array(6)].map((_, i) => (
-              <div key={i} style={{
-                gridColumn: i % 3 === 0 ? "span 2" : "span 1",
-                height: i % 3 === 0 ? 200 : 160,
-                borderRadius: 18,
-                background: "hsl(var(--card))",
-                border: "1px solid hsl(var(--border))",
-                animation: "shimmer 1.5s ease-in-out infinite",
-              }} />
-            ))}
-          </div>
-        ) : filtered.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "5rem 0", color: "hsl(var(--muted-foreground))" }}>
-            <Newspaper size={36} style={{ margin: "0 auto 1rem", opacity: 0.3 }} />
-            <p style={{ margin: 0 }}>No articles in this category.</p>
-            <button onClick={() => setFilter("All")} style={{ marginTop: "0.75rem", fontSize: "0.82rem", color: "hsl(var(--primary))", background: "none", border: "none", cursor: "pointer" }}>
-              View all →
+              {meta?.Icon && <meta.Icon size={9} />}
+              {cat}
             </button>
-          </div>
-        ) : (
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: "1rem",
-          }}>
-            {filtered.map((item, i) => (
-              <NewsCard
-                key={item.id}
-                item={item}
-                big={SIZE_PATTERN[i % SIZE_PATTERN.length] === "big"}
-              />
-            ))}
-          </div>
+          );
+        })}
+        {!loading && (
+          <span style={{ marginLeft: "auto", fontSize: "0.65rem", color: "hsl(var(--muted-foreground))", opacity: 0.45 }}>
+            {filtered.length} articles
+          </span>
         )}
       </div>
+
+      {/* Bento grid */}
+      {loading ? (
+        <div className="news-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem" }}>
+          {[...Array(6)].map((_, i) => (
+            <SkeletonCard key={i} size={SIZE_PATTERN[i % 3] as "wide" | "narrow"} />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "5rem 0", color: "hsl(var(--muted-foreground))", opacity: 0.45 }}>
+          <Newspaper size={30} style={{ margin: "0 auto 0.6rem", display: "block" }} />
+          <p style={{ margin: 0, fontSize: "0.82rem" }}>No articles in this category.</p>
+          <button onClick={() => setFilter("All")} style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#3b9eff", background: "none", border: "none", cursor: "pointer" }}>
+            View all →
+          </button>
+        </div>
+      ) : (
+        <div className="news-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem" }}>
+          {filtered.map((item, i) => (
+            <NewsCard key={item.id} item={item} size={SIZE_PATTERN[i % 3] as "wide" | "narrow"} />
+          ))}
+        </div>
+      )}
     </div>
   );
 };

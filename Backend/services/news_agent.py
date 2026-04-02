@@ -1,344 +1,381 @@
 """
-news_agent.py — Bimlo Industry Analyst Agent
-=============================================
+Industry Analyst Agent  —  news_agent.py
+─────────────────────────────────────────
+A LangGraph agent that:
+  1. Scrapes major telecom / construction news sites (via requests + BeautifulSoup)
+  2. Uses the shared llm_client (Groq / Cloudflare Workers AI) to generate
+     concise summaries + actionable AI-impact analysis — no paid API needed
+  3. Returns a structured briefing dict that main.py's /api/news endpoint can serve
 
-An agentic news scraper that:
-  1. Visits major telecom / construction news sources
-  2. Extracts article titles, summaries, and links
-  3. Uses call_llm() to generate a professional impact summary for each article
-  4. Returns a structured briefing ready for the frontend
+Public API (used by main.py):
+    from news_agent import get_news_briefing
+    briefing = get_news_briefing(force=False)   # synchronous, cache-aware
 
-Usage
------
-  from news_agent import run_news_agent
-  briefing = run_news_agent()   # list[NewsItem]
+Requirements:
+    pip install langgraph beautifulsoup4 lxml requests
 
-  Or run standalone:
-  python news_agent.py
-
-Schedule
---------
-  Run via cron / APScheduler every morning and cache results in a DB or
-  flat JSON file. The FastAPI endpoint in main.py can serve the cached data.
-
-Firecrawl upgrade path
-----------------------
-  Replace _scrape_with_requests() with:
-    from firecrawl import FirecrawlApp
-    app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
-    result = app.scrape_url(url, params={"formats": ["markdown"]})
-    content = result.get("markdown", "")
+Environment variables:
+    GROQ_API_KEY   (or CF_API_KEY) — whichever llm_client is already configured
 """
 
-from __future__ import annotations
-
 import os
+import re
 import json
 import time
 import hashlib
 import logging
-from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
-from typing import List, Optional
-
 import requests
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
+from typing import TypedDict, Annotated, List, Optional
+import operator
 
-from llm_client import call_llm
+from bs4 import BeautifulSoup
+from langgraph.graph import StateGraph, END
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-@dataclass
-class NewsItem:
-    id: str
-    title: str
-    source: str
-    source_url: str
-    article_url: str
-    raw_summary: str          # scraped excerpt
-    ai_impact: str            # LLM-generated impact analysis
-    category: str             # "5G" | "Fiber" | "Regulation" | "Construction" | "General"
-    published_at: str         # ISO-8601
-    scraped_at: str           # ISO-8601
-
-
-# ---------------------------------------------------------------------------
-# News sources
-# Extend this list freely — just add a dict with the keys below.
-# ---------------------------------------------------------------------------
-
 NEWS_SOURCES = [
-    {
-        "name": "RCR Wireless",
-        "url": "https://www.rcrwireless.com/",
-        "article_selector": "h3.entry-title a, h2.entry-title a",
-        "summary_selector": ".entry-summary p, .excerpt p",
-        "category": "5G",
-    },
-    {
-        "name": "Fierce Telecom",
-        "url": "https://www.fiercetelecom.com/",
-        "article_selector": "h3.title a, h2.title a, .node__title a",
-        "summary_selector": ".field--name-body p, .teaser p",
-        "category": "General",
-    },
-    {
-        "name": "Light Reading",
-        "url": "https://www.lightreading.com/",
-        "article_selector": "h2 a, h3 a",
-        "summary_selector": "p.summary, .article-teaser p",
-        "category": "Fiber",
-    },
-    {
-        "name": "SDxCentral",
-        "url": "https://www.sdxcentral.com/",
-        "article_selector": "h2.entry-title a, h3.entry-title a",
-        "summary_selector": ".entry-excerpt p",
-        "category": "General",
-    },
-    {
-        "name": "Telecom Ramblings",
-        "url": "https://www.telecomramblings.com/",
-        "article_selector": "h2.post-title a, h1.entry-title a",
-        "summary_selector": ".entry-content p:first-of-type",
-        "category": "Fiber",
-    },
+    {"url": "https://www.rcrwireless.com/category/5g",         "category": "5G",           "source": "RCR Wireless",      "source_url": "https://www.rcrwireless.com"},
+    {"url": "https://www.lightreading.com/",                   "category": "General",      "source": "Light Reading",     "source_url": "https://www.lightreading.com"},
+    {"url": "https://www.telecomramblings.com/",               "category": "General",      "source": "Telecom Ramblings", "source_url": "https://www.telecomramblings.com"},
+    {"url": "https://www.ntia.gov/press-room",                 "category": "Regulation",   "source": "NTIA",              "source_url": "https://www.ntia.gov"},
+    {"url": "https://www.fcc.gov/news-events/blog",            "category": "Regulation",   "source": "FCC",               "source_url": "https://www.fcc.gov"},
+    {"url": "https://www.constructiondive.com/topic/telecom/", "category": "Construction", "source": "Construction Dive", "source_url": "https://www.constructiondive.com"},
 ]
 
-# How many articles to process per source (keep costs/latency manageable)
 MAX_ARTICLES_PER_SOURCE = 3
+CACHE_TTL_HOURS         = 6
 
-# Cache file path (swap for Redis/DB in production)
-CACHE_PATH = os.getenv("NEWS_CACHE_PATH", "news_cache.json")
-CACHE_TTL_SECONDS = 6 * 60 * 60   # 6 hours
-
-
-# ---------------------------------------------------------------------------
-# Scraping helpers
-# ---------------------------------------------------------------------------
-
-_HEADERS = {
+HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; BimloNewsBot/1.0; +https://bimlo.ai/bot)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
 }
 
+# ── State ──────────────────────────────────────────────────────────────────
 
-def _scrape_with_requests(url: str, timeout: int = 15) -> Optional[BeautifulSoup]:
-    """Fetch a page and return a BeautifulSoup object, or None on failure."""
+class RawArticle(TypedDict):
+    title:        str
+    url:          str
+    image_url:    Optional[str]
+    raw_text:     str
+    category:     str
+    source:       str
+    source_url:   str
+    published_at: str
+
+class EnrichedArticle(TypedDict):
+    id:           str
+    title:        str
+    source:       str
+    source_url:   str
+    article_url:  str
+    image_url:    Optional[str]
+    raw_summary:  str
+    ai_impact:    str
+    category:     str
+    published_at: str
+    scraped_at:   str
+
+class AgentState(TypedDict):
+    raw_articles:      Annotated[List[RawArticle],      operator.add]
+    enriched_articles: Annotated[List[EnrichedArticle], operator.add]
+    errors:            Annotated[List[str],             operator.add]
+    status:            str
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _fetch_html(url: str, timeout: int = 10) -> Optional[str]:
+    """GET a URL and return the HTML text, or None on failure."""
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=timeout)
-        resp.raise_for_status()
-        return BeautifulSoup(resp.text, "html.parser")
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        logger.warning(f"Failed to scrape {url}: {e}")
+        logger.warning(f"Fetch failed ({url}): {e}")
         return None
 
 
-def _make_absolute(url: str, base: str) -> str:
-    if url.startswith("http"):
-        return url
-    from urllib.parse import urljoin
-    return urljoin(base, url)
+def _extract_article_links(html: str, base_domain: str, listing_url: str) -> List[str]:
+    """
+    Pull article-looking hrefs from a listing page.
+    Keeps same-domain links that are longer than the listing URL (i.e. actual articles).
+    """
+    soup  = BeautifulSoup(html, "lxml")
+    links = []
+    seen  = set()
 
+    for tag in soup.find_all("a", href=True):
+        href = tag["href"].strip()
 
-def _article_id(title: str, source: str) -> str:
-    return hashlib.md5(f"{source}:{title}".encode()).hexdigest()[:12]
-
-
-def _categorize(title: str, source_category: str) -> str:
-    title_l = title.lower()
-    if any(k in title_l for k in ["5g", "spectrum", "wireless", "mmwave", "ran"]):
-        return "5G"
-    if any(k in title_l for k in ["fiber", "fibre", "ftth", "fttx", "optical", "cable"]):
-        return "Fiber"
-    if any(k in title_l for k in ["regulat", "fcc", "policy", "law", "compliance"]):
-        return "Regulation"
-    if any(k in title_l for k in ["construct", "deploy", "build", "infrastructure", "tower"]):
-        return "Construction"
-    return source_category
-
-
-# ---------------------------------------------------------------------------
-# LLM impact analysis
-# ---------------------------------------------------------------------------
-
-_IMPACT_SYSTEM = (
-    "You are Bimlo's Industry Analyst — a telecom expert who writes concise, "
-    "actionable impact briefs for network engineers and project managers. "
-    "Focus on practical implications for fiber/5G deployments and construction."
-)
-
-
-def _generate_impact(title: str, excerpt: str) -> str:
-    """Ask the LLM to produce a 2-sentence impact summary."""
-    prompt = (
-        f"Article: {title}\n"
-        f"Excerpt: {excerpt or '(no excerpt available)'}\n\n"
-        "Write exactly 2 sentences: (1) what happened, (2) the practical impact "
-        "on telecom infrastructure professionals. Be specific and avoid filler words."
-    )
-    result = call_llm(
-        prompt=prompt,
-        system_prompt=_IMPACT_SYSTEM,
-        max_tokens=120,
-        temperature=0.3,
-        task="summarise",
-    )
-    return result.strip() if result else "Impact analysis unavailable."
-
-
-# ---------------------------------------------------------------------------
-# Per-source scrape
-# ---------------------------------------------------------------------------
-
-def _scrape_source(source: dict) -> List[NewsItem]:
-    items: List[NewsItem] = []
-    soup = _scrape_with_requests(source["url"])
-    if soup is None:
-        return items
-
-    anchors = soup.select(source["article_selector"])[:MAX_ARTICLES_PER_SOURCE]
-    now = datetime.now(timezone.utc).isoformat()
-
-    for a in anchors:
-        title = a.get_text(strip=True)
-        href  = _make_absolute(a.get("href", ""), source["url"])
-
-        if not title or not href:
+        # Normalise relative URLs
+        if href.startswith("/"):
+            href = base_domain.rstrip("/") + href
+        if not href.startswith("http"):
             continue
 
-        # Try to get a raw excerpt from the listing page
-        parent  = a.find_parent(["article", "div", "li"])
-        excerpt = ""
-        if parent:
-            for sel in source.get("summary_selector", "").split(", "):
-                node = parent.select_one(sel.strip())
-                if node:
-                    excerpt = node.get_text(strip=True)[:400]
-                    break
+        # Same domain, longer than the listing URL, not an anchor/query
+        if (
+            base_domain.split("//")[-1].split("/")[0] in href
+            and len(href) > len(listing_url) + 5
+            and "#" not in href
+            and href not in seen
+        ):
+            seen.add(href)
+            links.append(href)
 
-        # Generate AI impact (with a small delay to be polite to the LLM)
-        ai_impact = _generate_impact(title, excerpt)
-        time.sleep(0.4)
-
-        items.append(NewsItem(
-            id           = _article_id(title, source["name"]),
-            title        = title,
-            source       = source["name"],
-            source_url   = source["url"],
-            article_url  = href,
-            raw_summary  = excerpt,
-            ai_impact    = ai_impact,
-            category     = _categorize(title, source["category"]),
-            published_at = now,   # replace with parsed date if source exposes it
-            scraped_at   = now,
-        ))
-
-    logger.info(f"[{source['name']}] scraped {len(items)} articles")
-    return items
+    return links
 
 
-# ---------------------------------------------------------------------------
-# Cache helpers
-# ---------------------------------------------------------------------------
-
-def _load_cache() -> Optional[List[dict]]:
-    try:
-        with open(CACHE_PATH) as f:
-            data = json.load(f)
-        age = time.time() - data.get("ts", 0)
-        if age < CACHE_TTL_SECONDS:
-            return data["items"]
-    except Exception:
-        pass
-    return None
-
-
-def _save_cache(items: List[NewsItem]) -> None:
-    try:
-        with open(CACHE_PATH, "w") as f:
-            json.dump({"ts": time.time(), "items": [asdict(i) for i in items]}, f)
-    except Exception as e:
-        logger.warning(f"Cache write failed: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def run_news_agent(force_refresh: bool = False) -> List[NewsItem]:
+def _parse_article(html: str) -> dict:
     """
-    Main entry point. Returns a list of NewsItem objects.
-
-    Args:
-        force_refresh: Skip cache and re-scrape even if cache is fresh.
-
-    Returns:
-        List of NewsItem, sorted newest-scraped first.
+    Extract title, first image, publish date, and body text from article HTML.
+    Returns a dict with keys: title, image_url, published_at, text.
     """
-    if not force_refresh:
-        cached = _load_cache()
-        if cached:
-            logger.info(f"Returning {len(cached)} cached news items")
-            return [NewsItem(**d) for d in cached]
+    soup = BeautifulSoup(html, "lxml")
 
-    logger.info("Starting Bimlo Industry Analyst agent…")
-    all_items: List[NewsItem] = []
+    # Title
+    title = ""
+    for sel in ["h1", "meta[property='og:title']", "title"]:
+        tag = soup.select_one(sel)
+        if tag:
+            title = tag.get("content", "") or tag.get_text(strip=True)
+            if title:
+                break
+
+    # Image (og:image first, then first <img> with src)
+    image_url = None
+    og_img = soup.select_one("meta[property='og:image']")
+    if og_img:
+        image_url = og_img.get("content")
+    if not image_url:
+        img = soup.select_one("article img[src], .post img[src], main img[src]")
+        if img:
+            image_url = img.get("src")
+    # Filter out tiny icons / SVG data URIs
+    if image_url and (image_url.startswith("data:") or len(image_url) < 12):
+        image_url = None
+
+    # Published date
+    published_at = datetime.utcnow().isoformat()
+    for sel in [
+        "meta[property='article:published_time']",
+        "meta[name='publishedTime']",
+        "time[datetime]",
+        "meta[name='date']",
+    ]:
+        tag = soup.select_one(sel)
+        if tag:
+            val = tag.get("content") or tag.get("datetime", "")
+            if val:
+                published_at = val
+                break
+
+    # Body text — prefer <article>, fall back to <main>, then <body>
+    for sel in ["article", "main", "body"]:
+        container = soup.select_one(sel)
+        if container:
+            # Remove noise
+            for noise in container.select("nav, footer, aside, script, style, [class*='ad'], [class*='sidebar']"):
+                noise.decompose()
+            text = container.get_text(separator="\n", strip=True)
+            if len(text) > 200:
+                break
+    else:
+        text = soup.get_text(separator="\n", strip=True)
+
+    return {
+        "title":        title[:200],
+        "image_url":    image_url,
+        "published_at": published_at,
+        "text":         text[:4000],  # trim for LLM context
+    }
+
+# ── LangGraph nodes ────────────────────────────────────────────────────────
+
+def scrape_sources(state: AgentState) -> AgentState:
+    """Node 1 — scrape listing pages and individual articles."""
+    raw_articles: List[RawArticle] = []
+    errors: List[str] = []
 
     for source in NEWS_SOURCES:
+        html = _fetch_html(source["url"])
+        if not html:
+            errors.append(f"Source unreachable: {source['url']}")
+            continue
+
+        base_domain = "/".join(source["url"].split("/")[:3])  # https://domain.com
+        links = _extract_article_links(html, base_domain, source["url"])[:MAX_ARTICLES_PER_SOURCE]
+
+        if not links:
+            errors.append(f"No article links found on {source['url']}")
+
+        for link in links:
+            art_html = _fetch_html(link)
+            if not art_html:
+                errors.append(f"Article unreachable: {link}")
+                continue
+
+            parsed = _parse_article(art_html)
+            title  = parsed["title"] or link.split("/")[-1].replace("-", " ").title()
+
+            raw_articles.append({
+                "title":        title,
+                "url":          link,
+                "image_url":    parsed["image_url"],
+                "raw_text":     parsed["text"],
+                "category":     source["category"],
+                "source":       source["source"],
+                "source_url":   source["source_url"],
+                "published_at": parsed["published_at"],
+            })
+
+            time.sleep(0.4)  # polite crawl rate
+
+    return {"raw_articles": raw_articles, "errors": errors, "status": "scraped"}
+
+
+def enrich_articles(state: AgentState) -> AgentState:
+    """Node 2 — use the shared llm_client (Groq/CF) to summarise + analyse each article."""
+    enriched: List[EnrichedArticle] = []
+    errors: List[str] = []
+
+    try:
+        from llm_client import call_llm, check_llm_available
+        if not check_llm_available():
+            errors.append("No LLM provider available (set GROQ_API_KEY or CF_API_KEY) — skipping enrichment")
+            return {"enriched_articles": enriched, "errors": errors, "status": "enriched"}
+    except ImportError:
+        errors.append("llm_client module not found — skipping enrichment")
+        return {"enriched_articles": enriched, "errors": errors, "status": "enriched"}
+
+    system_prompt = (
+        "You are a senior telecom industry analyst. "
+        "Given raw article text, return ONLY a JSON object with exactly these two fields:\n"
+        '{\n'
+        '  "raw_summary": "2-sentence factual summary of the article",\n'
+        '  "ai_impact":   "2-3 sentences on what this means for telecom/construction professionals right now — specific, actionable"\n'
+        '}\n'
+        "No markdown fences, no preamble, just the JSON object."
+    )
+
+    for i, art in enumerate(state["raw_articles"]):
         try:
-            items = _scrape_source(source)
-            all_items.extend(items)
+            raw = call_llm(
+                prompt=f"Title: {art['title']}\n\nContent:\n{art['raw_text']}",
+                system_prompt=system_prompt,
+                max_tokens=600,
+                temperature=0.3,
+                task="synthesise",
+            )
+
+            raw = re.sub(r"```json|```", "", raw).strip()
+            parsed = json.loads(raw)
+
+            uid = f"art_{i}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
+
+            enriched.append({
+                "id":           uid,
+                "title":        art["title"],
+                "source":       art["source"],
+                "source_url":   art["source_url"],
+                "article_url":  art["url"],
+                "image_url":    art.get("image_url"),
+                "raw_summary":  parsed.get("raw_summary", ""),
+                "ai_impact":    parsed.get("ai_impact", ""),
+                "category":     art["category"],
+                "published_at": art["published_at"],
+                "scraped_at":   datetime.utcnow().isoformat(),
+            })
+
+        except json.JSONDecodeError as e:
+            errors.append(f"JSON parse failed for '{art['title']}': {e}")
         except Exception as e:
-            logger.error(f"Source {source['name']} failed: {e}")
+            errors.append(f"Enrichment failed for '{art['title']}': {e}")
 
-    # Deduplicate by id
-    seen: set[str] = set()
-    unique: List[NewsItem] = []
-    for item in all_items:
-        if item.id not in seen:
-            seen.add(item.id)
-            unique.append(item)
-
-    unique.sort(key=lambda x: x.scraped_at, reverse=True)
-    _save_cache(unique)
-    logger.info(f"Agent complete — {len(unique)} articles collected")
-    return unique
+    return {"enriched_articles": enriched, "errors": errors, "status": "enriched"}
 
 
-# ---------------------------------------------------------------------------
-# FastAPI route helper (import in main.py)
-# ---------------------------------------------------------------------------
+def finalize(state: AgentState) -> AgentState:
+    return {"status": "done"}
+
+# ── Build graph ────────────────────────────────────────────────────────────
+
+def _build_graph():
+    g = StateGraph(AgentState)
+    g.add_node("scrape",   scrape_sources)
+    g.add_node("enrich",   enrich_articles)
+    g.add_node("finalize", finalize)
+    g.set_entry_point("scrape")
+    g.add_edge("scrape",   "enrich")
+    g.add_edge("enrich",   "finalize")
+    g.add_edge("finalize", END)
+    return g.compile()
+
+_graph = _build_graph()
+
+# ── In-memory cache ────────────────────────────────────────────────────────
+
+_cache: dict = {}
+_cache_time: Optional[datetime] = None
+
 
 def get_news_briefing(force: bool = False) -> dict:
     """
-    Convenience wrapper for the FastAPI route.
-    Returns JSON-serialisable dict with metadata + items.
+    Public synchronous API consumed by main.py:
+
+        from news_agent import get_news_briefing
+        briefing = get_news_briefing(force=False)
+
+    Returns:
+        {
+            "generated_at": "ISO-8601",
+            "count": int,
+            "items": [ EnrichedArticle, ... ],
+            "errors": [ str, ... ]
+        }
+
+    Cache is valid for CACHE_TTL_HOURS (default 6 h).
+    Pass force=True to bypass the cache.
     """
-    items = run_news_agent(force_refresh=force)
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "count": len(items),
-        "items": [asdict(i) for i in items],
+    global _cache, _cache_time
+
+    now = datetime.utcnow()
+    cache_valid = (
+        _cache
+        and _cache_time is not None
+        and (now - _cache_time) < timedelta(hours=CACHE_TTL_HOURS)
+    )
+
+    if cache_valid and not force:
+        logger.info("📰 Returning cached news briefing")
+        return _cache
+
+    logger.info("📰 Running news agent…")
+
+    initial_state: AgentState = {
+        "raw_articles":      [],
+        "enriched_articles": [],
+        "errors":            [],
+        "status":            "starting",
     }
 
+    result = _graph.invoke(initial_state)
 
-# ---------------------------------------------------------------------------
-# Standalone run
-# ---------------------------------------------------------------------------
+    _cache = {
+        "generated_at": now.isoformat(),
+        "count":        len(result["enriched_articles"]),
+        "items":        result["enriched_articles"],
+        "errors":       result["errors"],
+    }
+    _cache_time = now
 
-if __name__ == "__main__":
-    import pprint
-    logging.basicConfig(level=logging.INFO)
-    briefing = get_news_briefing(force=True)
-    print(f"\n✅ {briefing['count']} articles collected at {briefing['generated_at']}\n")
-    for item in briefing["items"][:5]:
-        print(f"  [{item['category']}] {item['title']}")
-        print(f"  → {item['ai_impact']}")
-        print(f"  {item['article_url']}\n")
+    logger.info(
+        f"📰 News briefing ready — {_cache['count']} articles, "
+        f"{len(result['errors'])} errors"
+    )
+    return _cache

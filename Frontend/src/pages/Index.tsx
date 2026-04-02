@@ -1,270 +1,376 @@
-import { useState, useEffect } from "react";
-import { Radio, Cable, Scale, HardHat, Newspaper, ExternalLink, Zap, Clock, ArrowLeft } from "lucide-react";
 import { Link } from "react-router-dom";
+import { motion } from "framer-motion";
+import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
+import RotatingWords from "@/components/RotatingWords";
 import BackgroundManager from "@/components/BackgroundManager";
-import { getCachedBriefing, prefetchNews, type NewsItem } from "@/lib/newsCache";
+import CardSwap, { Card } from "@/components/CardSwap";
+import { useState, useEffect } from "react";
 
-// ── Category config ────────────────────────────────────────────────────────
-
-const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
-  "5G":           { label: "5G & Wireless", Icon: Radio,     color: "hsl(200 90% 55%)" },
-  "Fiber":        { label: "Fiber",          Icon: Cable,     color: "hsl(160 70% 45%)" },
-  "Regulation":   { label: "Regulation",     Icon: Scale,     color: "hsl(38 90% 55%)"  },
-  "Construction": { label: "Construction",   Icon: HardHat,   color: "hsl(280 60% 60%)" },
-  "General":      { label: "General",        Icon: Newspaper, color: "hsl(var(--primary))" },
+const fadeUp = {
+  hidden: { opacity: 0, y: 24 },
+  visible: (i: number) => ({
+    opacity: 1,
+    y: 0,
+    transition: { delay: i * 0.12, duration: 0.5, ease: "easeOut" as const },
+  }),
 };
 
-const ALL_FILTERS = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
-
-function timeAgo(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 60)  return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24)  return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-// ── Bento card sizes cycle: big, small, small, big, small, small … ─────────
-// "big" spans 2 cols on desktop, "small" spans 1.
-const SIZE_PATTERN = ["big", "small", "small", "big", "small", "small"];
-
-function NewsCard({ item, big }: { item: NewsItem; big: boolean }) {
-  const meta = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
-  const href = item.article_url && item.article_url !== "#" ? item.article_url : item.source_url;
-
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      style={{
-        gridColumn: big ? "span 2" : "span 1",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.75rem",
-        padding: big ? "1.75rem" : "1.25rem",
-        borderRadius: 18,
-        border: "1px solid hsl(var(--border))",
-        background: "linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--secondary)) 100%)",
-        textDecoration: "none",
-        position: "relative",
-        overflow: "hidden",
-        cursor: "pointer",
-        transition: "border-color 0.2s, transform 0.15s",
-      }}
-      onMouseEnter={e => {
-        (e.currentTarget as HTMLElement).style.borderColor = meta.color + "66";
-        (e.currentTarget as HTMLElement).style.transform = "translateY(-2px)";
-      }}
-      onMouseLeave={e => {
-        (e.currentTarget as HTMLElement).style.borderColor = "hsl(var(--border))";
-        (e.currentTarget as HTMLElement).style.transform = "translateY(0)";
-      }}
-    >
-      {/* top accent bar */}
-      <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, height: 2,
-        background: `linear-gradient(90deg, ${meta.color}, transparent)`,
-      }} />
-
-      {/* category + time */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: "0.3rem",
-          fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em",
-          color: meta.color,
-          background: meta.color + "1a",
-          border: `1px solid ${meta.color}33`,
-          borderRadius: 999, padding: "0.18rem 0.6rem",
-        }}>
-          <meta.Icon size={10} />
-          {meta.label}
-        </span>
-        <span style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.68rem", color: "hsl(var(--muted-foreground))" }}>
-          <Clock size={9} />
-          {timeAgo(item.scraped_at)}
-        </span>
-      </div>
-
-      {/* title */}
-      <h3 style={{
-        margin: 0,
-        fontSize: big ? "1.05rem" : "0.9rem",
-        fontWeight: 700,
-        lineHeight: 1.4,
-        color: "hsl(var(--foreground))",
-      }}>
-        {item.title}
-      </h3>
-
-      {/* AI impact — only on big cards or as truncated on small */}
-      {big ? (
-        <div style={{
-          background: "hsl(var(--primary) / 0.06)",
-          border: "1px solid hsl(var(--primary) / 0.12)",
-          borderRadius: 10, padding: "0.65rem 0.9rem",
-          display: "flex", gap: "0.5rem", alignItems: "flex-start",
-        }}>
-          <Zap size={12} style={{ color: "hsl(var(--primary))", flexShrink: 0, marginTop: 2 }} />
-          <p style={{ margin: 0, fontSize: "0.8rem", color: "hsl(var(--foreground)/0.75)", lineHeight: 1.55 }}>
-            {item.ai_impact}
-          </p>
-        </div>
-      ) : (
-        <p style={{
-          margin: 0, fontSize: "0.78rem", color: "hsl(var(--muted-foreground))",
-          lineHeight: 1.5,
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical" as const,
-          overflow: "hidden",
-        }}>
-          {item.raw_summary}
-        </p>
-      )}
-
-      {/* source + read link */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: "auto" }}>
-        <span style={{ fontSize: "0.68rem", color: "hsl(var(--muted-foreground))" }}>{item.source}</span>
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: "0.25rem",
-          fontSize: "0.68rem", fontWeight: 600, color: meta.color,
-        }}>
-          Read <ExternalLink size={9} />
-        </span>
-      </div>
-    </a>
+const Index = () => {
+  const [showScrollArrow, setShowScrollArrow] = useState(true);
+  const [isDark, setIsDark] = useState(() =>
+    document.documentElement.classList.contains("dark")
   );
-}
-
-// ── Main ───────────────────────────────────────────────────────────────────
-
-const NewsPage = () => {
-  const [items, setItems]   = useState<NewsItem[]>(getCachedBriefing()?.items ?? []);
-  const [loading, setLoading] = useState(items.length === 0);
-  const [filter, setFilter] = useState<string>("All");
 
   useEffect(() => {
-    if (items.length > 0) return; // already have data from cache
-    prefetchNews().then(b => {
-      setItems(b.items);
-      setLoading(false);
-    });
+    const observer = new MutationObserver(() =>
+      setIsDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributeFilter: ["class"] });
+    return () => observer.disconnect();
   }, []);
 
-  const filtered = filter === "All" ? items : items.filter(i => i.category === filter);
+  useEffect(() => {
+    const handleScroll = () => setShowScrollArrow(window.scrollY < 100);
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.style.scrollBehavior = 'smooth';
+    document.documentElement.classList.add('scrollbar-thin');
+    return () => {
+      document.documentElement.style.scrollBehavior = 'auto';
+      document.documentElement.classList.remove('scrollbar-thin');
+    };
+  }, []);
 
   return (
-    <div className="min-h-screen bg-background overflow-x-hidden" style={{ animation: "bgFadeIn 0.4s ease-out both" }}>
+    <>
       <style>{`
-        @keyframes bgFadeIn { from { opacity: 0 } to { opacity: 1 } }
-        @keyframes shimmer { 0%,100% { opacity: 0.4 } 50% { opacity: 0.8 } }
+        @keyframes bgFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes liquidFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 0.5; }
+        }
+        .animate-fade-in {
+          animation: liquidFadeIn 1.2s ease-out 0.3s both;
+        }
+        .swap-card {
+          background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--secondary)) 100%);
+          border: 1px solid hsl(var(--border)) !important;
+          border-radius: 20px !important;
+          padding: 2rem;
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+        }
+        .swap-card-icon {
+          width: 48px;
+          height: 48px;
+          border-radius: 12px;
+          background: hsl(var(--accent));
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 0.5rem;
+        }
+        .swap-card h3 {
+          font-size: 1.1rem;
+          font-weight: 700;
+          color: hsl(var(--foreground));
+          margin: 0;
+        }
+        .swap-card p {
+          font-size: 0.875rem;
+          color: hsl(var(--muted-foreground));
+          line-height: 1.6;
+          margin: 0;
+        }
+        .swap-card .tag {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.4rem;
+          font-size: 0.75rem;
+          font-weight: 600;
+          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 0.1);
+          border: 1px solid hsl(var(--primary) / 0.2);
+          border-radius: 999px;
+          padding: 0.25rem 0.75rem;
+          width: fit-content;
+        }
       `}</style>
-      <BackgroundManager />
-      <Navbar />
 
-      <div className="container mx-auto px-6 pt-28 pb-24 max-w-6xl">
+      <div className="min-h-screen bg-background overflow-x-hidden" style={{ animation: "bgFadeIn 0.6s ease-out both", ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}>
+        <BackgroundManager />
+        <Navbar />
 
-        {/* Header */}
-        <div style={{ marginBottom: "2rem" }}>
-          <Link to="/" style={{
-            display: "inline-flex", alignItems: "center", gap: "0.4rem",
-            fontSize: "0.78rem", color: "hsl(var(--muted-foreground))",
-            textDecoration: "none", marginBottom: "1.25rem",
-          }}>
-            <ArrowLeft size={13} /> Back
-          </Link>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "0.75rem" }}>
-            <div>
-              <h1 style={{ margin: 0, fontSize: "2rem", fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.2 }}>
-                Industry Briefing
-              </h1>
-              <p style={{ margin: "0.4rem 0 0", fontSize: "0.875rem", color: "hsl(var(--muted-foreground))" }}>
-                AI-curated telecom news with impact analysis
-              </p>
-            </div>
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: "0.35rem",
-              fontSize: "0.72rem", fontWeight: 600,
-              color: "hsl(var(--primary))",
-              background: "hsl(var(--primary) / 0.08)",
-              border: "1px solid hsl(var(--primary) / 0.18)",
-              borderRadius: 999, padding: "0.3rem 0.8rem",
-            }}>
-              <Zap size={11} /> {items.length} articles
-            </span>
-          </div>
-        </div>
+        {/* Hero — centered */}
+        <section className="relative pt-40 pb-24 px-6 min-h-screen flex items-center overflow-hidden">
+          <div className="absolute top-20 left-1/4 w-[500px] h-[500px] rounded-full bg-primary/5 blur-3xl pointer-events-none" />
+          <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] rounded-full bg-primary/8 blur-3xl pointer-events-none" />
 
-        {/* Filter pills */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.45rem", marginBottom: "1.75rem" }}>
-          {ALL_FILTERS.map(cat => {
-            const meta = CATEGORY_META[cat];
-            const active = filter === cat;
-            const color = meta?.color ?? "hsl(var(--primary))";
-            return (
-              <button
-                key={cat}
-                onClick={() => setFilter(cat)}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                  fontSize: "0.72rem", fontWeight: 600,
-                  padding: "0.28rem 0.8rem", borderRadius: 999, cursor: "pointer",
-                  border: `1px solid ${active ? color : "hsl(var(--border))"}`,
-                  color: active ? color : "hsl(var(--muted-foreground))",
-                  background: active ? color + "1a" : "hsl(var(--secondary))",
-                  transition: "all 0.15s",
-                }}
+          <div className="container mx-auto relative z-10 flex flex-col items-center text-center">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6 }}
+            >
+              <span className="inline-block mb-6 px-4 py-1.5 rounded-full bg-accent text-accent-foreground text-sm font-medium border border-primary/10">
+                AI-Powered Telecom Assistant
+              </span>
+            </motion.div>
+
+            <motion.h1
+              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-tight max-w-4xl mb-6 flex flex-col items-center"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.15 }}
+            >
+              <span>Your intelligent partner</span>
+              <motion.span
+                className="flex items-center justify-center gap-3"
+                layout
+                transition={{ duration: 0.3, ease: "easeInOut" }}
               >
-                {meta?.Icon && <meta.Icon size={10} />}
-                {cat}
-              </button>
-            );
-          })}
-        </div>
+                for <RotatingWords />
+              </motion.span>
+            </motion.h1>
 
-        {/* Bento grid */}
-        {loading ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem" }}>
-            {[...Array(6)].map((_, i) => (
-              <div key={i} style={{
-                gridColumn: i % 3 === 0 ? "span 2" : "span 1",
-                height: i % 3 === 0 ? 200 : 160,
-                borderRadius: 18,
-                background: "hsl(var(--card))",
-                border: "1px solid hsl(var(--border))",
-                animation: "shimmer 1.5s ease-in-out infinite",
-              }} />
-            ))}
+            <motion.p
+              className="text-lg text-muted-foreground max-w-2xl mb-10"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+            >
+              Bimlo Copilot helps telecom professionals analyze documents, plan networks,
+              and make data-driven decisions — powered by specialized AI.
+            </motion.p>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.45 }}
+              className="flex flex-col items-center gap-10"
+            >
+              <div className="flex flex-col sm:flex-row items-center gap-4">
+                <Link to="/chat">
+                  <Button
+                    size="lg"
+                    className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-8 h-12 gap-2"
+                  >
+                    Start a conversation
+                    <ArrowRight className="h-4 w-4" />
+                  </Button>
+                </Link>
+                <Link to="/news">
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    className="font-heading font-semibold text-base px-8 h-12 gap-2 border-primary/20 hover:border-primary/50 hover:bg-primary/5 transition-all"
+                  >
+                    <Newspaper className="h-4 w-4" />
+                    Industry Briefing
+                  </Button>
+                </Link>
+              </div>
+
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{
+                  opacity: showScrollArrow ? 1 : 0,
+                  y: [0, 10, 0]
+                }}
+                transition={{
+                  opacity: { duration: 0.3 },
+                  y: { duration: 1.5, repeat: Infinity, ease: "easeInOut" }
+                }}
+                className="cursor-pointer text-3xl text-primary"
+                onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}
+              >
+                ↓
+              </motion.div>
+            </motion.div>
           </div>
-        ) : filtered.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "5rem 0", color: "hsl(var(--muted-foreground))" }}>
-            <Newspaper size={36} style={{ margin: "0 auto 1rem", opacity: 0.3 }} />
-            <p style={{ margin: 0 }}>No articles in this category.</p>
-            <button onClick={() => setFilter("All")} style={{ marginTop: "0.75rem", fontSize: "0.82rem", color: "hsl(var(--primary))", background: "none", border: "none", cursor: "pointer" }}>
-              View all →
-            </button>
+        </section>
+
+        {/* Features — text left, CardSwap right */}
+        <section className="pt-0 pb-24 px-6 mt-8">
+          <div id="features" style={{ position: "relative", top: "-110px" }} />
+          <div className="container mx-auto">
+            <div className="flex flex-col lg:flex-row items-center gap-16">
+
+              {/* Left: text + feature list */}
+              <div className="flex-1">
+                <motion.h2
+                  className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-4"
+                  initial="hidden"
+                  whileInView="visible"
+                  viewport={{ once: true }}
+                  variants={fadeUp}
+                  custom={0}
+                >
+                  Built for telecom professionals
+                </motion.h2>
+                <motion.p
+                  className="text-foreground/75 max-w-xl mb-8"
+                  initial="hidden"
+                  whileInView="visible"
+                  viewport={{ once: true }}
+                  variants={fadeUp}
+                  custom={1}
+                >
+                  Everything you need to accelerate your telecom projects — from document analysis to network planning and real-time decision support.
+                </motion.p>
+
+                <div className="flex flex-col gap-3">
+                  {[
+                    { icon: MessageSquare, title: "Intelligent Conversations" },
+                    { icon: FileText,      title: "Document Analysis" },
+                    { icon: Network,       title: "Network Expertise" },
+                    { icon: Zap,           title: "Instant Answers" },
+                    { icon: Newspaper,     title: "Industry News Briefings" },
+                  ].map((f, i) => (
+                    <motion.div
+                      key={f.title}
+                      className="flex items-center gap-3"
+                      initial="hidden"
+                      whileInView="visible"
+                      viewport={{ once: true }}
+                      variants={fadeUp}
+                      custom={i + 2}
+                    >
+                      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+                        <f.icon className="h-4 w-4 text-primary" />
+                      </div>
+                      <span className="text-sm font-medium text-foreground/80 whitespace-nowrap"
+                        style={{ textShadow: "0 0 12px hsl(var(--primary) / 0.6), 0 0 24px hsl(var(--primary) / 0.3)" }}>
+                        {f.title}
+                      </span>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Right: CardSwap */}
+              <motion.div
+                className="flex-1 hidden lg:flex items-center justify-center"
+                initial={{ opacity: 0, x: 40 }}
+                whileInView={{ opacity: 1, x: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.8, delay: 0.3 }}
+                style={{ height: 500, position: 'relative', marginTop: '-60px' }}
+              >
+                <CardSwap
+                  width={480}
+                  height={320}
+                  cardDistance={60}
+                  verticalDistance={70}
+                  delay={4000}
+                  easing="elastic"
+                >
+                  <Card customClass="swap-card">
+                    <div className="swap-card-icon">
+                      <MessageSquare size={22} color="hsl(var(--accent-foreground))" />
+                    </div>
+                    <span className="tag"><Zap size={11} /> Intelligent Chat</span>
+                    <h3>Intelligent Conversations</h3>
+                    <p>Chat naturally about telecom infrastructure with context-aware AI that understands your projects.</p>
+                  </Card>
+                  <Card customClass="swap-card">
+                    <div className="swap-card-icon">
+                      <FileText size={22} color="hsl(var(--accent-foreground))" />
+                    </div>
+                    <span className="tag"><Zap size={11} /> Doc Analysis</span>
+                    <h3>Document Analysis</h3>
+                    <p>Upload PDFs, specs, and reports for instant AI-powered insights and citations.</p>
+                  </Card>
+                  <Card customClass="swap-card">
+                    <div className="swap-card-icon">
+                      <Network size={22} color="hsl(var(--accent-foreground))" />
+                    </div>
+                    <span className="tag"><Zap size={11} /> Deep Expertise</span>
+                    <h3>Network Expertise</h3>
+                    <p>Deep knowledge of fiber, 5G, and optical network deployments built right in.</p>
+                  </Card>
+                  <Card customClass="swap-card">
+                    <div className="swap-card-icon">
+                      <Zap size={22} color="hsl(var(--accent-foreground))" />
+                    </div>
+                    <span className="tag"><Zap size={11} /> Instant Answers</span>
+                    <h3>Instant Answers</h3>
+                    <p>Get fast, accurate technical guidance for complex telecom decisions powered by specialized AI.</p>
+                  </Card>
+                  <Card customClass="swap-card">
+                    <div className="swap-card-icon">
+                      <Newspaper size={22} color="hsl(var(--accent-foreground))" />
+                    </div>
+                    <span className="tag"><Zap size={11} /> Daily Briefing</span>
+                    <h3>Industry News</h3>
+                    <p>AI-curated telecom news with expert impact analysis, delivered fresh every morning.</p>
+                  </Card>
+                </CardSwap>
+              </motion.div>
+
+            </div>
           </div>
-        ) : (
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: "1rem",
-          }}>
-            {filtered.map((item, i) => (
-              <NewsCard
-                key={item.id}
-                item={item}
-                big={SIZE_PATTERN[i % SIZE_PATTERN.length] === "big"}
-              />
-            ))}
+        </section>
+
+        {/* How it works */}
+        <section className="py-8 px-6 bg-secondary/50 backdrop-blur-xl mb-24 mt-16">
+          <div id="how-it-works" style={{ position: "relative", top: "400px" }} />
+          <div className="container mx-auto text-center">
+            <motion.h2
+              className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-6"
+              initial="hidden"
+              whileInView="visible"
+              viewport={{ once: true }}
+              variants={fadeUp}
+              custom={0}
+            >
+              How it works
+            </motion.h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto pt-4 pb-8">
+              {[
+                { step: "01", title: "Upload Documents", desc: "Add your technical PDFs, specs, and reports." },
+                { step: "02", title: "Ask Questions",    desc: "Chat naturally about your telecom projects." },
+                { step: "03", title: "Get Insights",     desc: "Receive accurate, context-aware answers instantly." },
+              ].map((item, i) => (
+                <motion.div
+                  key={item.step}
+                  className="text-center"
+                  initial="hidden"
+                  whileInView="visible"
+                  viewport={{ once: true }}
+                  variants={fadeUp}
+                  custom={i + 1}
+                >
+                  <span className="text-5xl font-heading font-bold text-gradient-blue">{item.step}</span>
+                  <h3 className="font-heading font-semibold text-foreground mt-3 mb-1.5">{item.title}</h3>
+                  <p className="text-sm text-muted-foreground">{item.desc}</p>
+                </motion.div>
+              ))}
+            </div>
           </div>
-        )}
+        </section>
+
+        {/* Footer */}
+        <footer className="py-12 px-6 border-t border-border">
+          <div className="container mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+            <span className="font-heading font-semibold text-foreground">Bimlo Copilot</span>
+            <span className="text-sm text-muted-foreground">© 2026 Bimlo. All rights reserved.</span>
+          </div>
+        </footer>
       </div>
-    </div>
+    </>
   );
 };
 
-export default NewsPage;
+export default Index;
