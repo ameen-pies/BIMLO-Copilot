@@ -1,10 +1,23 @@
 import { Renderer, Program, Mesh, Triangle } from 'ogl';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import './LineWaves.css';
+/**
+ * LineWaves Component
+ * 
+ * A high-performance WebGL background component that adapts to light and dark modes.
+ * It uses the OGL library for efficient rendering and supports interactive mouse effects.
+ * Optimized for clarity in light mode, using a fresh Sky Blue palette and refined alpha blending.
+ */
 
-function hexToVec3(hex) {
+function hexToVec3(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
+  if (h.length === 3) {
+    return [
+      parseInt(h[0] + h[0], 16) / 255,
+      parseInt(h[1] + h[1], 16) / 255,
+      parseInt(h[2] + h[2], 16) / 255
+    ];
+  }
   return [
     parseInt(h.slice(0, 2), 16) / 255,
     parseInt(h.slice(2, 4), 16) / 255,
@@ -41,6 +54,7 @@ uniform vec3 uColor3;
 uniform vec2 uMouse;
 uniform float uMouseInfluence;
 uniform bool uEnableMouse;
+uniform bool uIsDark;
 
 #define HALF_PI 1.5707963
 
@@ -125,11 +139,36 @@ void main() {
   float bChannel = (pattern + lines * ridge) * (cos(blended.x + cycleT * 0.534) * 0.5 + 1.0);
 
   vec3 col = (rChannel * uColor1 + gChannel * uColor2 + bChannel * uColor3) * uBrightness;
-  float alpha = clamp(length(col), 0.0, 1.0);
+  
+  // Refined alpha calculation to prevent muddy shadows in light mode
+  float alpha;
+  if (uIsDark) {
+    alpha = clamp(length(col), 0.0, 1.0);
+  } else {
+    // In light mode, we use a sharper alpha curve to keep the lines crisp and avoid gray halos
+    alpha = clamp(length(col) * 1.5, 0.0, 0.8);
+  }
 
   gl_FragColor = vec4(col, alpha);
 }
 `;
+
+interface LineWavesProps {
+  speed?: number;
+  innerLineCount?: number;
+  outerLineCount?: number;
+  warpIntensity?: number;
+  rotation?: number;
+  edgeFadeWidth?: number;
+  colorCycleSpeed?: number;
+  brightness?: number;
+  lightColors?: [string, string, string];
+  darkColors?: [string, string, string];
+  enableMouseInteraction?: boolean;
+  mouseInfluence?: number;
+  className?: string;
+  isDark?: boolean;
+}
 
 export default function LineWaves({
   speed = 0.3,
@@ -140,26 +179,65 @@ export default function LineWaves({
   edgeFadeWidth = 0.0,
   colorCycleSpeed = 1.0,
   brightness = 0.2,
-  color1 = '#ffffff',
-  color2 = '#ffffff',
-  color3 = '#ffffff',
+  // Clean, vibrant Sky Blue palette for light mode
+  lightColors = ['#0ea5e9', '#38bdf8', '#0284c7'], 
+  // Neon Blue palette for dark mode
+  darkColors = ['#3b82f6', '#60a5fa', '#2563eb'],  
   enableMouseInteraction = true,
-  mouseInfluence = 2.0
-}) {
-  const containerRef = useRef(null);
+  mouseInfluence = 2.0,
+  className = "",
+  isDark: externalIsDark
+}: LineWavesProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const programRef = useRef<Program | null>(null);
+  const [internalIsDark, setInternalIsDark] = useState(false);
+
+  useEffect(() => {
+    if (externalIsDark !== undefined) {
+      setInternalIsDark(externalIsDark);
+      return;
+    }
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    setInternalIsDark(mediaQuery.matches);
+    const handler = (e: MediaQueryListEvent) => setInternalIsDark(e.matches);
+    mediaQuery.addEventListener('change', handler);
+    return () => mediaQuery.removeEventListener('change', handler);
+  }, [externalIsDark]);
+
+  const activeColors = internalIsDark ? darkColors : lightColors;
+
+  useEffect(() => {
+    if (programRef.current) {
+      const p = programRef.current;
+      p.uniforms.uSpeed.value = speed;
+      p.uniforms.uInnerLines.value = innerLineCount;
+      p.uniforms.uOuterLines.value = outerLineCount;
+      p.uniforms.uWarpIntensity.value = warpIntensity;
+      p.uniforms.uRotation.value = (rotation * Math.PI) / 180;
+      p.uniforms.uEdgeFadeWidth.value = edgeFadeWidth;
+      p.uniforms.uColorCycleSpeed.value = colorCycleSpeed;
+      p.uniforms.uBrightness.value = brightness;
+      p.uniforms.uColor1.value = hexToVec3(activeColors[0]);
+      p.uniforms.uColor2.value = hexToVec3(activeColors[1]);
+      p.uniforms.uColor3.value = hexToVec3(activeColors[2]);
+      p.uniforms.uMouseInfluence.value = mouseInfluence;
+      p.uniforms.uEnableMouse.value = enableMouseInteraction;
+      p.uniforms.uIsDark.value = internalIsDark;
+    }
+  }, [speed, innerLineCount, outerLineCount, warpIntensity, rotation, edgeFadeWidth, colorCycleSpeed, brightness, activeColors, enableMouseInteraction, mouseInfluence, internalIsDark]);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
+    
     const renderer = new Renderer({ alpha: true, premultipliedAlpha: false });
     const gl = renderer.gl;
     gl.clearColor(0, 0, 0, 0);
 
-    let program;
     let currentMouse = [0.5, 0.5];
     let targetMouse = [0.5, 0.5];
 
-    function handleMouseMove(e) {
+    function handleMouseMove(e: MouseEvent) {
       const rect = gl.canvas.getBoundingClientRect();
       targetMouse = [
         (e.clientX - rect.left) / rect.width,
@@ -172,50 +250,55 @@ export default function LineWaves({
     }
 
     function resize() {
-      renderer.setSize(container.offsetWidth, container.offsetHeight);
-      if (program) {
-        program.uniforms.uResolution.value = [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height];
+      const w = container.offsetWidth || window.innerWidth;
+      const h = container.offsetHeight || window.innerHeight;
+      renderer.setSize(w, h);
+      if (programRef.current) {
+        programRef.current.uniforms.uResolution.value = [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height];
       }
     }
+    
     window.addEventListener('resize', resize);
-    resize();
 
     const geometry = new Triangle(gl);
-    const rotationRad = (rotation * Math.PI) / 180;
-    program = new Program(gl, {
+    const program = new Program(gl, {
       vertex: vertexShader,
       fragment: fragmentShader,
       uniforms: {
         uTime: { value: 0 },
-        uResolution: { value: [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height] },
+        uResolution: { value: [0, 0, 0] },
         uSpeed: { value: speed },
         uInnerLines: { value: innerLineCount },
         uOuterLines: { value: outerLineCount },
         uWarpIntensity: { value: warpIntensity },
-        uRotation: { value: rotationRad },
+        uRotation: { value: (rotation * Math.PI) / 180 },
         uEdgeFadeWidth: { value: edgeFadeWidth },
         uColorCycleSpeed: { value: colorCycleSpeed },
         uBrightness: { value: brightness },
-        uColor1: { value: hexToVec3(color1) },
-        uColor2: { value: hexToVec3(color2) },
-        uColor3: { value: hexToVec3(color3) },
+        uColor1: { value: hexToVec3(activeColors[0]) },
+        uColor2: { value: hexToVec3(activeColors[1]) },
+        uColor3: { value: hexToVec3(activeColors[2]) },
         uMouse: { value: new Float32Array([0.5, 0.5]) },
         uMouseInfluence: { value: mouseInfluence },
-        uEnableMouse: { value: enableMouseInteraction }
+        uEnableMouse: { value: enableMouseInteraction },
+        uIsDark: { value: internalIsDark }
       }
     });
+
+    programRef.current = program;
+    resize();
 
     const mesh = new Mesh(gl, { geometry, program });
     container.appendChild(gl.canvas);
 
     if (enableMouseInteraction) {
-      gl.canvas.addEventListener('mousemove', handleMouseMove);
-      gl.canvas.addEventListener('mouseleave', handleMouseLeave);
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseleave', handleMouseLeave);
     }
 
-    let animationFrameId;
+    let animationFrameId: number;
 
-    function update(time) {
+    function update(time: number) {
       animationFrameId = requestAnimationFrame(update);
       program.uniforms.uTime.value = time * 0.001;
 
@@ -237,13 +320,32 @@ export default function LineWaves({
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', resize);
       if (enableMouseInteraction) {
-        gl.canvas.removeEventListener('mousemove', handleMouseMove);
-        gl.canvas.removeEventListener('mouseleave', handleMouseLeave);
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseleave', handleMouseLeave);
       }
-      container.removeChild(gl.canvas);
+      if (container.contains(gl.canvas)) {
+        container.removeChild(gl.canvas);
+      }
       gl.getExtension('WEBGL_lose_context')?.loseContext();
+      programRef.current = null;
     };
-  }, [speed, innerLineCount, outerLineCount, warpIntensity, rotation, edgeFadeWidth, colorCycleSpeed, brightness, color1, color2, color3, enableMouseInteraction, mouseInfluence]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  return <div ref={containerRef} className="line-waves-container" />;
+  return (
+    <div 
+      ref={containerRef} 
+      className={`line-waves-container ${className}`}
+      style={{ 
+        width: '100%', 
+        height: '100%', 
+        overflow: 'hidden',
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        zIndex: -1,
+        pointerEvents: 'none'
+      }} 
+    />
+  );
 }
