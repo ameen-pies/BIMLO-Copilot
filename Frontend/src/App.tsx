@@ -7,6 +7,7 @@ import Index from "./pages/Index";
 import Chat from "./pages/Chat";
 import NotFound from "./pages/NotFound";
 import CallPage from "./pages/CallPage";
+import NewsPage from "./pages/NewsPage";
 import ClickSpark from "@/components/ClickSpark";
 import './scrollbar.css';
 
@@ -30,6 +31,7 @@ const App = () => (
               <Route path="/" element={<Index />} />
               <Route path="/chat" element={<Chat />} />
               <Route path="/call" element={<CallPage />} />
+              <Route path="/news" element={<NewsPage />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>

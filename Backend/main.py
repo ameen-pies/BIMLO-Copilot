@@ -28,6 +28,14 @@ from services.report_agent import (
 # SharedContext also exposes set_analytics — call it after every query
 # so the report agent can embed charts generated in analytics routes.
 
+# News agent — agentic scraper + LLM impact analysis
+try:
+    from news_agent import get_news_briefing
+    _news_agent_available = True
+except ImportError:
+    _news_agent_available = False
+    print("⚠️  news_agent not found — /api/news endpoints will return 503")
+
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
     version="3.0.0",
@@ -731,6 +739,63 @@ async def download_document(doc_id: str):
         raise HTTPException(500, f"Error downloading document: {e}")
 
 
+@app.get("/api/news")
+async def news_endpoint(force: bool = False):
+    """
+    Returns the latest telecom industry news briefing.
+
+    The response is cached for 6 hours by the news agent.
+    Pass ?force=true to bypass the cache and trigger a fresh scrape + LLM analysis.
+
+    Response shape:
+      {
+        "generated_at": "ISO-8601",
+        "count": int,
+        "items": [
+          {
+            "id", "title", "source", "source_url", "article_url",
+            "raw_summary", "ai_impact", "category",
+            "published_at", "scraped_at"
+          }
+        ]
+      }
+    """
+    if not _news_agent_available:
+        raise HTTPException(
+            503,
+            "News agent not available. Install beautifulsoup4 and lxml, "
+            "then ensure news_agent.py is in the project root.",
+        )
+    try:
+        loop = asyncio.get_event_loop()
+        briefing = await loop.run_in_executor(None, get_news_briefing, force)
+        return briefing
+    except Exception as e:
+        print(f"❌ News endpoint error: {e}")
+        raise HTTPException(500, f"Error fetching news: {e}")
+
+
+@app.post("/api/news/refresh")
+async def news_refresh():
+    """
+    Force a full re-scrape. Useful for cron jobs or a manual admin trigger.
+    Returns minimal metadata — the next GET /api/news will serve fresh data.
+    """
+    if not _news_agent_available:
+        raise HTTPException(503, "News agent not available.")
+    try:
+        loop = asyncio.get_event_loop()
+        briefing = await loop.run_in_executor(None, get_news_briefing, True)
+        return {
+            "status":       "refreshed",
+            "generated_at": briefing["generated_at"],
+            "count":        briefing["count"],
+        }
+    except Exception as e:
+        print(f"❌ News refresh error: {e}")
+        raise HTTPException(500, f"Error refreshing news: {e}")
+
+
 @app.get("/health")
 async def health_check():
     try:
@@ -766,6 +831,25 @@ async def startup_event():
     except:
         print("⚠️  Vector store stats unavailable")
     print(f"🔑 Groq API: {'✅ configured' if os.getenv('GROQ_API_KEY') else '⚠️  not configured'}")
+    print(f"📰 News agent: {'✅ available' if _news_agent_available else '⚠️  not available'}")
+
+    # ── Optional: schedule a daily 07:00 news refresh ──────────────────────
+    # Uncomment the block below and `pip install apscheduler` to enable it.
+    #
+    # try:
+    #     from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    #     from news_agent import run_news_agent
+    #     _scheduler = AsyncIOScheduler()
+    #     _scheduler.add_job(
+    #         lambda: run_news_agent(force_refresh=True),
+    #         trigger="cron", hour=7, minute=0,
+    #         id="daily_news_refresh", replace_existing=True,
+    #     )
+    #     _scheduler.start()
+    #     print("⏰ News scheduler: 07:00 daily refresh enabled")
+    # except ImportError:
+    #     print("⚠️  apscheduler not installed — daily news refresh disabled")
+
     print("="*60 + "\n")
 
 
