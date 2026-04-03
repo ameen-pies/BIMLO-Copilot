@@ -34,34 +34,24 @@ logger = logging.getLogger("news_agent")
 # ── Improved search queries — broader, more resilient ────────────────────────
 
 SEARCH_QUERIES = [
-    # 5G queries
+    # 5G — one broader query gets more results than 4 narrow ones
     {"query": "5G network 2025",                          "category": "5G"},
-    {"query": "5G deployment",                            "category": "5G"},
-    {"query": "5G infrastructure",                        "category": "5G"},
-    {"query": "5G telecom",                               "category": "5G"},
-    # Fiber queries
-    {"query": "fiber broadband 2025",                     "category": "Fiber"},
-    {"query": "fiber optic",                              "category": "Fiber"},
-    {"query": "broadband expansion",                      "category": "Fiber"},
-    {"query": "fiber internet",                           "category": "Fiber"},
-    # Regulation queries
-    {"query": "FCC regulation 2025",                      "category": "Regulation"},
-    {"query": "telecom regulation",                       "category": "Regulation"},
-    {"query": "spectrum auction",                         "category": "Regulation"},
-    {"query": "broadband policy",                         "category": "Regulation"},
-    # Construction queries
-    {"query": "tower construction",                       "category": "Construction"},
-    {"query": "infrastructure construction",              "category": "Construction"},
-    {"query": "telecom tower",                            "category": "Construction"},
-    {"query": "broadband infrastructure",                 "category": "Construction"},
-    # General queries
-    {"query": "telecom news",                             "category": "General"},
-    {"query": "carrier news",                             "category": "General"},
-    {"query": "ISP news",                                 "category": "General"},
-    {"query": "telecom industry",                         "category": "General"},
+    {"query": "5G deployment infrastructure",             "category": "5G"},
+    # Fiber
+    {"query": "fiber broadband internet 2025",            "category": "Fiber"},
+    {"query": "broadband expansion rural",                "category": "Fiber"},
+    # Regulation
+    {"query": "FCC telecom regulation 2025",              "category": "Regulation"},
+    {"query": "spectrum broadband policy",                "category": "Regulation"},
+    # Construction
+    {"query": "telecom tower construction",               "category": "Construction"},
+    {"query": "broadband infrastructure build",           "category": "Construction"},
+    # General
+    {"query": "telecom carrier ISP news 2025",            "category": "General"},
+    {"query": "telecom industry news",                    "category": "General"},
 ]
 
-MAX_RESULTS_PER_QUERY = 5
+MAX_RESULTS_PER_QUERY = 8  # Fewer queries but more results each
 CACHE_TTL_HOURS = 6
 JUDGE_SCORE_THRESHOLD = 0.30  # More lenient: 0.30+ instead of 0.50
 
@@ -106,33 +96,57 @@ def search_news(state: AgentState) -> dict:
     print("📡 NEWS AGENT — Node 1: DDG Search (Improved)")
     print("="*60)
 
+    # Support both old and new package names
+    DDGS = None
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
-        msg = "duckduckgo-search not installed. Run: pip install duckduckgo-search"
-        print(f"❌ {msg}")
-        return {"raw_articles": [], "errors": [msg], "status": "searched"}
+        pass
+    if DDGS is None:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            msg = "ddgs not installed. Run: pip install ddgs"
+            print(f"❌ {msg}")
+            return {"raw_articles": [], "errors": [msg], "status": "searched"}
+
+    import random
 
     raw_articles: List[RawArticle] = []
     errors: List[str] = []
     seen_urls: set = set()
 
     with DDGS() as ddgs:
-        for entry in SEARCH_QUERIES:
+        for i, entry in enumerate(SEARCH_QUERIES):
+            # Respectful delay between queries to avoid DDG rate limits
+            if i > 0:
+                sleep_sec = random.uniform(3.0, 5.5)
+                print(f"     ⏳ Waiting {sleep_sec:.1f}s…")
+                time.sleep(sleep_sec)
+
             print(f"  🔍 Searching: \"{entry['query']}\" [{entry['category']}]")
-            try:
-                results = list(ddgs.news(
-                    entry["query"],
-                    max_results=MAX_RESULTS_PER_QUERY,
-                    safesearch="off",
-                    timelimit="m",  # Last month
-                ))
-                print(f"     → {len(results)} results")
-            except Exception as e:
-                err = f"DDG search failed for '{entry['query']}': {e}"
-                print(f"     ⚠️  {err}")
-                errors.append(err)
-                continue
+            results = []
+            for attempt in range(3):
+                try:
+                    results = list(ddgs.news(
+                        entry["query"],
+                        max_results=MAX_RESULTS_PER_QUERY,
+                        safesearch="off",
+                        timelimit="m",
+                    ))
+                    print(f"     → {len(results)} results")
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if "Ratelimit" in err_str and attempt < 2:
+                        wait = random.uniform(8, 15) * (attempt + 1)
+                        print(f"     ⏳ Rate limited — retrying in {wait:.0f}s (attempt {attempt+1}/3)…")
+                        time.sleep(wait)
+                    else:
+                        err = f"DDG search failed for '{entry['query']}': {e}"
+                        print(f"     ⚠️  {err}")
+                        errors.append(err)
+                        break
 
             for r in results:
                 url = r.get("url", "")
@@ -169,10 +183,52 @@ def search_news(state: AgentState) -> dict:
                     "published_at": published_at,
                 })
 
-            time.sleep(0.2)
-
     print(f"\n✅ DDG search done — {len(raw_articles)} raw articles, {len(errors)} errors")
     return {"raw_articles": raw_articles, "errors": errors, "status": "searched"}
+
+
+
+# ── Robust JSON extractor (handles markdown fences, truncation, bad quotes) ──
+
+def _extract_json(raw: str) -> dict:
+    """
+    Try multiple strategies to extract a JSON object from LLM output.
+    Cloudflare Workers AI often wraps output in markdown or truncates it.
+    """
+    # Strip markdown fences
+    text = re.sub(r"```json|```", "", raw).strip()
+
+    # Strategy 1: direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: find first {...} block
+    m = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: extract key-value pairs manually (score + reason / raw_summary + ai_impact)
+    result = {}
+    for key in ("score", "reason", "raw_summary", "ai_impact"):
+        pattern = rf'"{key}"\s*:\s*"([^"]*)"'
+        m = re.search(pattern, text)
+        if m:
+            result[key] = m.group(1)
+        else:
+            # Try numeric value (for score)
+            num_pattern = rf'"{key}"\s*:\s*([0-9.]+)'
+            m2 = re.search(num_pattern, text)
+            if m2:
+                result[key] = float(m2.group(1))
+    if result:
+        return result
+
+    raise ValueError(f"Could not extract JSON from: {text[:200]!r}")
 
 
 # ── Node 2: Multi-factor LLM Judge (improved) ──────────────────────────────
@@ -245,11 +301,7 @@ def judge_articles(state: AgentState) -> dict:
                 temperature=0.0,
                 task="evaluate",
             )
-            clean = re.sub(r"```json|```", "", raw).strip()
-            if clean.startswith("["):
-                clean = json.loads(clean)
-                clean = json.dumps(clean[0]) if isinstance(clean, list) and clean else "{}"
-            verdict = json.loads(clean)
+            verdict = _extract_json(raw)
 
             score = float(verdict.get("score", 0.5))
             reason = verdict.get("reason", "")
@@ -338,8 +390,7 @@ def enrich_articles(state: AgentState) -> dict:
                 temperature=0.3,
                 task="synthesise",
             )
-            raw = re.sub(r"```json|```", "", raw).strip()
-            parsed = json.loads(raw)
+            parsed = _extract_json(raw)
 
             uid = f"art_{i}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
             enriched.append({
@@ -349,7 +400,7 @@ def enrich_articles(state: AgentState) -> dict:
                 "source_url": art["source_url"],
                 "article_url": art["url"],
                 "image_url": art.get("image_url"),
-                "raw_summary": parsed.get("raw_summary", ""),
+                "raw_summary": parsed.get("raw_summary", art["raw_text"][:200]),
                 "ai_impact": parsed.get("ai_impact", ""),
                 "category": art["category"],
                 "published_at": art["published_at"],
@@ -357,15 +408,11 @@ def enrich_articles(state: AgentState) -> dict:
             })
             print(f"       ✅ enriched")
 
-        except json.JSONDecodeError as e:
-            err = f"JSON parse failed for '{art['title']}': {e}"
+        except Exception as e:
+            err = f"Enrichment failed for '{art['title']}': {e}"
             print(f"       ⚠️  {err} — using unenriched fallback")
             errors.append(err)
             enriched.append(_make_unenriched(i, art))
-        except Exception as e:
-            err = f"Enrichment failed for '{art['title']}': {e}"
-            print(f"       ❌ {err}")
-            errors.append(err)
 
     print(f"\n✅ Enrichment done — {len(enriched)} articles ready")
     return {"enriched_articles": enriched, "errors": errors, "status": "enriched"}

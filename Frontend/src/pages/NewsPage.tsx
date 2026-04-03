@@ -8,30 +8,31 @@ import {
 // ── Category config ────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
-  "5G": { label: "5G", Icon: Radio, color: "#3b9eff" },
-  "Fiber": { label: "Fiber", Icon: Cable, color: "#34d399" },
-  "Regulation": { label: "Regulation", Icon: Scale, color: "#fbbf24" },
-  "Construction": { label: "Construction", Icon: HardHat, color: "#a78bfa" },
-  "General": { label: "General", Icon: Newspaper, color: "#94a3b8" },
+  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff" },
+  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399" },
+  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24" },
+  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa" },
+  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8" },
 };
 
 const ALL_FILTERS = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
 
 const FALLBACK_GRADIENTS: Record<string, string> = {
-  "5G": "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
-  "Fiber": "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
-  "Regulation": "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
+  "5G":           "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
+  "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
+  "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
   "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
-  "General": "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+  "General":      "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
 };
 
 const SIZE_PATTERN = ["wide", "narrow", "narrow"] as const;
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 5;
 
-// Spring config
-const SPRING_RESISTANCE = 0.18;
-const SPRING_TRIGGER_PX = 80;
-const SPRING_STIFFNESS = 0.12;
+// Spring physics
+const SPRING_STIFFNESS = 0.14;
+const SPRING_DAMPING   = 0.72;
+const MAX_PULL_PX      = 110;
+const TRIGGER_PX       = 72;
 
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -42,79 +43,77 @@ function timeAgo(iso: string) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-// ── Spring pull-zone hook ──────────────────────────────────────────────────
+function normalize(item: any) {
+  return {
+    ...item,
+    articleUrl:  item.article_url  ?? item.articleUrl  ?? "#",
+    imageUrl:    item.image_url    ?? item.imageUrl    ?? null,
+    aiImpact:    item.ai_impact    ?? item.aiImpact    ?? "",
+    sourceUrl:   item.source_url   ?? item.sourceUrl   ?? "#",
+    publishedAt: item.published_at ?? item.publishedAt ?? new Date().toISOString(),
+  };
+}
 
-function useSpringPull(
-  onTrigger: () => void,
-  enabled: boolean,
-): React.RefObject<HTMLDivElement> {
-  const pullRef = useRef<HTMLDivElement>(null);
-  const springY = useRef(0);
-  const targetY = useRef(0);
-  const rafId = useRef<number>(0);
-  const triggered = useRef(false);
-  const isSettling = useRef(false);
+// ── Spring pull-to-load hook ───────────────────────────────────────────────
 
-  const animate = useCallback(() => {
-    const diff = targetY.current - springY.current;
-    springY.current += diff * SPRING_STIFFNESS;
+function useSpringPull(onTrigger: () => void, enabled: boolean) {
+  const ref    = useRef<HTMLDivElement>(null);
+  const pos    = useRef(0);
+  const vel    = useRef(0);
+  const target = useRef(0);
+  const rafId  = useRef(0);
+  const fired  = useRef(false);
 
-    if (pullRef.current) {
-      pullRef.current.style.height = `${Math.max(0, springY.current)}px`;
-      const progress = Math.min(springY.current / SPRING_TRIGGER_PX, 1);
-      pullRef.current.style.opacity = String(progress);
+  const tick = useCallback(() => {
+    const spring = (target.current - pos.current) * SPRING_STIFFNESS;
+    vel.current   = vel.current * SPRING_DAMPING + spring;
+    pos.current  += vel.current;
+    const clamped = Math.min(Math.max(pos.current, 0), MAX_PULL_PX);
+
+    if (ref.current) {
+      ref.current.style.height  = `${clamped}px`;
+      ref.current.style.opacity = String(Math.min((clamped / TRIGGER_PX) * 1.4, 1));
     }
 
-    if (Math.abs(diff) > 0.5) {
-      rafId.current = requestAnimationFrame(animate);
+    const moving = Math.abs(vel.current) > 0.3 || Math.abs(target.current - pos.current) > 0.3;
+    if (moving) {
+      rafId.current = requestAnimationFrame(tick);
     } else {
-      springY.current = targetY.current;
-      if (pullRef.current) {
-        pullRef.current.style.height = `${Math.max(0, targetY.current)}px`;
-      }
-      isSettling.current = false;
+      pos.current = target.current;
+      if (ref.current) ref.current.style.height = `${Math.max(target.current, 0)}px`;
     }
   }, []);
+
+  const startRaf = useCallback(() => {
+    cancelAnimationFrame(rafId.current);
+    rafId.current = requestAnimationFrame(tick);
+  }, [tick]);
 
   useEffect(() => {
     if (!enabled) return;
 
     const onScroll = () => {
-      const scrolled = window.scrollY;
-      const totalH = document.body.scrollHeight;
-      const windowH = window.innerHeight;
-      const distFromBot = totalH - scrolled - windowH;
+      const distFromBottom = document.body.scrollHeight - window.scrollY - window.innerHeight;
 
-      if (distFromBot < 40) {
-        const excess = Math.max(0, 40 - distFromBot);
-        targetY.current = excess * SPRING_RESISTANCE * 100;
+      if (distFromBottom <= 0) {
+        const overscroll = Math.abs(distFromBottom);
+        target.current = Math.min(overscroll * 0.55, MAX_PULL_PX);
+        startRaf();
 
-        if (!isSettling.current) {
-          isSettling.current = true;
-          rafId.current = requestAnimationFrame(animate);
-        }
-
-        if (excess > SPRING_TRIGGER_PX && !triggered.current) {
-          triggered.current = true;
+        if (overscroll >= TRIGGER_PX && !fired.current) {
+          fired.current = true;
           onTrigger();
           setTimeout(() => {
-            targetY.current = 0;
-            triggered.current = false;
-            if (!isSettling.current) {
-              isSettling.current = true;
-              rafId.current = requestAnimationFrame(animate);
-            }
-          }, 400);
+            target.current = 0;
+            vel.current = 6; // outward kick for the boing
+            startRaf();
+            fired.current = false;
+          }, 180);
         }
-      } else {
-        if (targetY.current > 0) {
-          targetY.current = 0;
-          triggered.current = false;
-          if (!isSettling.current) {
-            isSettling.current = true;
-            rafId.current = requestAnimationFrame(animate);
-          }
-        }
+      } else if (target.current > 0) {
+        target.current = 0;
+        fired.current  = false;
+        startRaf();
       }
     };
 
@@ -123,20 +122,16 @@ function useSpringPull(
       window.removeEventListener("scroll", onScroll);
       cancelAnimationFrame(rafId.current);
     };
-  }, [enabled, onTrigger, animate]);
+  }, [enabled, onTrigger, startRaf]);
 
-  return pullRef as React.RefObject<HTMLDivElement>;
+  return ref;
 }
 
 // ── Cards ──────────────────────────────────────────────────────────────────
 
-interface NewsCardProps {
-  item: any;
-  size: "wide" | "narrow";
-  revealed: boolean;
-}
-
-function NewsCard({ item, size, revealed }: NewsCardProps) {
+function NewsCard({ item, size, revealed, theme }: {
+  item: any; size: "wide" | "narrow"; revealed: boolean; theme: "light" | "dark";
+}) {
   const meta = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href = item.articleUrl && item.articleUrl !== "#" ? item.articleUrl : item.sourceUrl;
   const [imgError, setImgError] = useState(false);
@@ -149,17 +144,14 @@ function NewsCard({ item, size, revealed }: NewsCardProps) {
       rel="noopener noreferrer"
       style={{
         gridColumn: size === "wide" ? "span 2" : "span 1",
-        position: "relative",
-        display: "block",
+        position: "relative", display: "block",
         height: size === "wide" ? 260 : 200,
-        borderRadius: 12,
-        overflow: "hidden",
-        textDecoration: "none",
-        cursor: "pointer",
-        zIndex: 1,
+        borderRadius: 12, overflow: "hidden",
+        textDecoration: "none", cursor: "pointer", zIndex: 1,
         opacity: revealed ? 1 : 0,
         transform: revealed ? "translateY(0) scale(1)" : "translateY(18px) scale(0.97)",
         transition: "opacity 0.38s ease, transform 0.38s ease",
+        border: `1px solid ${theme === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)"}`,
       }}
       onMouseEnter={e => {
         (e.currentTarget as HTMLElement).style.transform = "scale(1.015)";
@@ -174,16 +166,11 @@ function NewsCard({ item, size, revealed }: NewsCardProps) {
         if (ov) ov.style.background = "linear-gradient(to top,rgba(0,0,0,0.84) 0%,rgba(0,0,0,0.36) 55%,transparent 100%)";
       }}
     >
-      {hasImage ? (
-        <img
-          src={item.imageUrl}
-          alt=""
-          onError={() => setImgError(true)}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
-        />
-      ) : (
-        <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"] }} />
-      )}
+      {hasImage
+        ? <img src={item.imageUrl} alt="" onError={() => setImgError(true)}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+        : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"] }} />
+      }
 
       <div className="ov" style={{
         position: "absolute", inset: 0,
@@ -195,8 +182,7 @@ function NewsCard({ item, size, revealed }: NewsCardProps) {
         position: "absolute", top: 10, left: 10,
         display: "inline-flex", alignItems: "center", gap: "0.28rem",
         fontSize: "0.63rem", fontWeight: 700, color: "#fff",
-        background: meta.color + "cc",
-        borderRadius: 999, padding: "0.18rem 0.5rem",
+        background: meta.color + "cc", borderRadius: 999, padding: "0.18rem 0.5rem",
         backdropFilter: "blur(6px)",
       }}>
         <meta.Icon size={9} />
@@ -205,32 +191,23 @@ function NewsCard({ item, size, revealed }: NewsCardProps) {
 
       <ExternalLink size={12} style={{ position: "absolute", top: 12, right: 12, color: "rgba(255,255,255,0.5)" }} />
 
-      <div style={{
-        position: "absolute", bottom: 0, left: 0, right: 0,
-        padding: size === "wide" ? "1rem 1.15rem" : "0.8rem 0.95rem",
-      }}>
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: size === "wide" ? "1rem 1.15rem" : "0.8rem 0.95rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.35rem" }}>
           <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.5)", fontWeight: 500 }}>{item.source}</span>
           <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.3)" }}>·</span>
           <span style={{ fontSize: "0.6rem", color: "rgba(255,255,255,0.4)" }}>{timeAgo(item.publishedAt)}</span>
         </div>
-
         <h3 style={{
-          margin: 0,
-          fontSize: size === "wide" ? "0.98rem" : "0.8rem",
+          margin: 0, fontSize: size === "wide" ? "0.98rem" : "0.8rem",
           fontWeight: 700, color: "#fff", lineHeight: 1.35,
-          display: "-webkit-box",
-          WebkitLineClamp: size === "wide" ? 2 : 3,
-          WebkitBoxOrient: "vertical" as const,
-          overflow: "hidden",
+          display: "-webkit-box", WebkitLineClamp: size === "wide" ? 2 : 3,
+          WebkitBoxOrient: "vertical" as const, overflow: "hidden",
         }}>
           {item.title}
         </h3>
-
         {size === "wide" && item.aiImpact && (
           <p style={{
-            margin: "0.45rem 0 0",
-            fontSize: "0.7rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.5,
+            margin: "0.45rem 0 0", fontSize: "0.7rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.5,
             display: "-webkit-box", WebkitLineClamp: 2,
             WebkitBoxOrient: "vertical" as const, overflow: "hidden",
           }}>
@@ -243,18 +220,20 @@ function NewsCard({ item, size, revealed }: NewsCardProps) {
   );
 }
 
-function SkeletonCard({ size }: { size: "wide" | "narrow" }) {
+function SkeletonCard({ size, theme }: { size: "wide" | "narrow"; theme: "light" | "dark" }) {
   return (
     <div style={{
       gridColumn: size === "wide" ? "span 2" : "span 1",
       height: size === "wide" ? 260 : 200,
       borderRadius: 12,
-      background: "#e0e0e0",
+      background: theme === "dark" ? "#1a1a1a" : "#e8e8e8",
       position: "relative", overflow: "hidden",
     }}>
       <div style={{
         position: "absolute", inset: 0,
-        backgroundImage: "linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.05) 50%,transparent 100%)",
+        backgroundImage: theme === "dark"
+          ? "linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.04) 50%,transparent 100%)"
+          : "linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.6) 50%,transparent 100%)",
         backgroundSize: "200% 100%",
         animation: "shimmer 1.6s ease-in-out infinite",
       }} />
@@ -262,35 +241,23 @@ function SkeletonCard({ size }: { size: "wide" | "narrow" }) {
   );
 }
 
-function SpringPullZone({
-  pullRef,
-  loadingMore,
-}: {
+function SpringPullZone({ pullRef, loadingMore, hasMore, theme }: {
   pullRef: React.RefObject<HTMLDivElement>;
-  loadingMore: boolean;
+  loadingMore: boolean; hasMore: boolean; theme: "light" | "dark";
 }) {
   return (
-    <div
-      ref={pullRef}
-      style={{
-        height: 0,
-        overflow: "hidden",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        opacity: 0,
-        transition: "none",
-      }}
-    >
+    <div ref={pullRef} style={{
+      height: 0, overflow: "hidden",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      opacity: 0, marginTop: "0.8rem",
+    }}>
       <div style={{
         display: "flex", alignItems: "center", gap: "0.5rem",
-        fontSize: "0.7rem", color: "#666", opacity: 0.6,
+        fontSize: "0.72rem", fontWeight: 500,
+        color: theme === "dark" ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.5)",
       }}>
-        <RefreshCw
-          size={12}
-          style={{ animation: loadingMore ? "spin 0.8s linear infinite" : "none" }}
-        />
-        {loadingMore ? "Loading more…" : "Pull to load more"}
+        <RefreshCw size={13} style={{ animation: loadingMore ? "spin 0.7s linear infinite" : "none" }} />
+        {loadingMore ? "Loading…" : hasMore ? "Pull to load more" : "You're all caught up"}
       </div>
     </div>
   );
@@ -300,110 +267,113 @@ function SpringPullZone({
 
 const NewsPage = () => {
   const navigate = useNavigate();
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window !== "undefined") {
-      return (localStorage.getItem("theme") as "light" | "dark") || "light";
-    }
-    return "light";
-  });
 
+  const [theme, setTheme] = useState<"light" | "dark">(() =>
+    (typeof window !== "undefined" && (localStorage.getItem("theme") as "light" | "dark")) || "light"
+  );
   const toggleTheme = () => {
-    const newTheme = theme === "light" ? "dark" : "light";
-    setTheme(newTheme);
-    localStorage.setItem("theme", newTheme);
+    const t = theme === "light" ? "dark" : "light";
+    setTheme(t); localStorage.setItem("theme", t);
   };
 
-  const [filter, setFilter] = useState<string>("All");
-  const [offset, setOffset] = useState(0);
-  const [allItems, setAllItems] = useState<any[]>([]);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+  const [filter, setFilter]           = useState<string>("All");
+  const [allFetched, setAllFetched]   = useState<any[]>([]);
+  const [visible, setVisible]         = useState<any[]>([]);
   const [revealedSet, setRevealedSet] = useState<Set<number>>(new Set());
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading]     = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore]         = useState(false);
+  const prevCount = useRef(0);
 
-  const prevVisibleCount = useRef(0);
-
-  // TODO: Connect your news agent API here
-  // Replace this with your actual API call to fetch news from your agent
+  // Match scrollbar style of other pages
   useEffect(() => {
-    const fetchNews = async () => {
-      setIsLoading(true);
-      try {
-        // Example: Replace with your actual endpoint
-        // const response = await fetch(`/api/news?category=${filter}&offset=${offset}`);
-        // const data = await response.json();
-        // setAllItems(data.items);
-        // setHasMore(data.hasMore);
-
-        // For now, this is a placeholder
-        setAllItems([]);
-        setHasMore(false);
-      } catch (error) {
-        console.error("Failed to fetch news:", error);
-      }
-      setIsLoading(false);
-    };
-    fetchNews();
-  }, [filter, offset]);
-
-  // Reveal cards with stagger
-  useEffect(() => {
-    const start = prevVisibleCount.current;
-    const end = allItems.length;
-    prevVisibleCount.current = end;
-
-    if (end <= start) return;
-
-    for (let i = start; i < end; i++) {
-      const delay = (i - start) * 60;
-      setTimeout(() => {
-        setRevealedSet(prev => {
-          const newSet = new Set(prev);
-          newSet.add(i);
-          return newSet;
-        });
-      }, delay);
-    }
-  }, [allItems.length]);
-
-  // Reset when filter changes
-  useEffect(() => {
-    setOffset(0);
-    setAllItems([]);
-    setRevealedSet(new Set());
-    prevVisibleCount.current = 0;
-  }, [filter]);
-
-  // Load more
-  const loadMore = useCallback(() => {
-    if (!hasMore || loadingMore) return;
-    setLoadingMore(true);
-    setTimeout(() => {
-      setOffset(prev => prev + PAGE_SIZE);
-      setLoadingMore(false);
-    }, 350);
-  }, [hasMore, loadingMore]);
-
-  // Refresh
-  const handleRefresh = useCallback(async () => {
-    setIsRefreshing(true);
-    setAllItems([]);
-    setOffset(0);
-    setRevealedSet(new Set());
-    prevVisibleCount.current = 0;
-    
-    // TODO: Call your news agent refresh endpoint here
-    // Example: await fetch('/api/news/refresh', { method: 'POST' });
-    
-    setTimeout(() => {
-      setIsRefreshing(false);
-      setIsLoading(true);
-    }, 500);
+    document.documentElement.classList.add("scrollbar-thin");
+    return () => document.documentElement.classList.remove("scrollbar-thin");
   }, []);
 
-  // Spring pull hook
-  const pullRef = useSpringPull(loadMore, hasMore && !isLoading && !loadingMore) as React.RefObject<HTMLDivElement>;
+  const fetchNews = useCallback(async (force = false) => {
+    try {
+      const res  = await fetch(`http://localhost:8000/api/news?force=${force}`);
+      const data = await res.json();
+      if (data.items) return (data.items as any[]).map(normalize);
+    } catch (e) {
+      console.error("Failed to fetch news:", e);
+    }
+    return [];
+  }, []);
+
+  const applyFilter = useCallback((items: any[], f: string) =>
+    f === "All" ? items : items.filter(i => i.category === f), []);
+
+  // Initial load
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      setVisible([]); setRevealedSet(new Set()); prevCount.current = 0;
+      const items = await fetchNews(false);
+      if (cancelled) return;
+      setAllFetched(items);
+      const filtered = applyFilter(items, filter);
+      setVisible(filtered.slice(0, PAGE_SIZE));
+      setHasMore(filtered.length > PAGE_SIZE);
+      setIsLoading(false);
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Re-filter on tab change
+  useEffect(() => {
+    setRevealedSet(new Set()); prevCount.current = 0;
+    const filtered = applyFilter(allFetched, filter);
+    setVisible(filtered.slice(0, PAGE_SIZE));
+    setHasMore(filtered.length > PAGE_SIZE);
+  }, [filter, allFetched, applyFilter]);
+
+  // Spring trigger — load next 5 from already-fetched data
+  const loadMore = useCallback(() => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const filtered = applyFilter(allFetched, filter);
+    const next     = filtered.slice(0, visible.length + PAGE_SIZE);
+    setTimeout(() => {
+      setVisible(next);
+      setHasMore(next.length < filtered.length);
+      setLoadingMore(false);
+    }, 600);
+  }, [loadingMore, hasMore, allFetched, filter, visible.length, applyFilter]);
+
+  // Refresh — force re-fetch from backend
+  const handleRefresh = useCallback(async () => {
+    if (isRefreshing || isLoading) return;
+    setIsRefreshing(true);
+    setVisible([]); setRevealedSet(new Set()); prevCount.current = 0;
+    const items    = await fetchNews(true);
+    setAllFetched(items);
+    const filtered = applyFilter(items, filter);
+    setVisible(filtered.slice(0, PAGE_SIZE));
+    setHasMore(filtered.length > PAGE_SIZE);
+    setIsRefreshing(false);
+  }, [isRefreshing, isLoading, fetchNews, filter, applyFilter]);
+
+  const pullRef = useSpringPull(loadMore, hasMore && !loadingMore && !isLoading);
+
+  // Staggered card reveal
+  useEffect(() => {
+    const start = prevCount.current;
+    const end   = visible.length;
+    prevCount.current = end;
+    if (end <= start) return;
+    for (let i = start; i < end; i++) {
+      setTimeout(() => {
+        setRevealedSet(prev => { const s = new Set(prev); s.add(i); return s; });
+      }, (i - start) * 55);
+    }
+  }, [visible.length]);
+
+  const totalFiltered = applyFilter(allFetched, filter).length;
 
   return (
     <div style={{
@@ -411,23 +381,11 @@ const NewsPage = () => {
       background: theme === "dark" ? "#0a0a0a" : "#ffffff",
       padding: "2rem 2.5rem 3rem",
       transition: "background 0.15s ease",
-      opacity: 1,
-      animation: "fadeIn 0.5s ease-out",
       color: theme === "dark" ? "#ffffff" : "#000000",
     }}>
       <style>{`
-        @keyframes shimmer {
-          0%   { background-position: -200% 0 }
-          100% { background-position:  200% 0 }
-        }
-        @keyframes spin {
-          from { transform: rotate(0deg) }
-          to   { transform: rotate(360deg) }
-        }
-        @keyframes fadeIn {
-          from { opacity: 0 }
-          to { opacity: 1 }
-        }
+        @keyframes shimmer { 0% { background-position: -200% 0 } 100% { background-position: 200% 0 } }
+        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
         @media (max-width: 768px) {
           .news-grid { grid-template-columns: 1fr !important; }
           .news-grid > * { grid-column: span 1 !important; height: 180px !important; }
@@ -437,171 +395,103 @@ const NewsPage = () => {
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.6rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <button
-            onClick={() => navigate(-1)}
-            style={{
-              display: "inline-flex", alignItems: "center",
-              color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)",
-              textDecoration: "none", opacity: 0.6,
-              background: "none", border: "none", cursor: "pointer", padding: 0,
-            }}
-          >
+          <button onClick={() => navigate(-1)} style={{
+            display: "inline-flex", alignItems: "center",
+            color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)",
+            background: "none", border: "none", cursor: "pointer", padding: 0, opacity: 0.6,
+          }}>
             <ArrowLeft size={15} />
           </button>
           <div>
-            <h1 style={{
-              margin: 0,
-              fontSize: "1.35rem",
-              fontWeight: 800,
-              color: theme === "dark" ? "#ffffff" : "#000000",
-              lineHeight: 1.2,
-            }}>
+            <h1 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 800, color: theme === "dark" ? "#fff" : "#000", lineHeight: 1.2 }}>
               Industry Briefing
             </h1>
-            <p style={{
-              margin: "0.1rem 0 0",
-              fontSize: "0.72rem",
-              color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)",
-              opacity: 0.65,
-            }}>
+            <p style={{ margin: "0.1rem 0 0", fontSize: "0.72rem", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", opacity: 0.65 }}>
               Live telecom &amp; construction news
             </p>
           </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "0.8rem" }}>
-          {!isLoading && allItems.length > 0 && (
-            <span style={{
-              fontSize: "0.65rem",
-              color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)",
-              opacity: 0.4,
-            }}>
-              {allItems.length}
+          {!isLoading && visible.length > 0 && (
+            <span style={{ fontSize: "0.65rem", color: theme === "dark" ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)" }}>
+              {visible.length} / {totalFiltered}
             </span>
           )}
-          
-          <button
-            onClick={handleRefresh}
-            disabled={isRefreshing || isLoading}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 36,
-              height: 36,
-              borderRadius: 8,
-              background: theme === "dark" ? "#1a1a1a" : "#f0f0f0",
-              border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`,
-              cursor: isRefreshing || isLoading ? "not-allowed" : "pointer",
-              transition: "all 0.15s ease",
-              color: theme === "dark" ? "#94a3b8" : "#666",
-              opacity: isRefreshing || isLoading ? 0.5 : 1,
-            }}
-            title="Refresh news"
-          >
-            <RefreshCw
-              size={16}
-              style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }}
-            />
+          <button onClick={handleRefresh} disabled={isRefreshing || isLoading} style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 36, height: 36, borderRadius: 8,
+            background: theme === "dark" ? "#1a1a1a" : "#f0f0f0",
+            border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`,
+            cursor: isRefreshing || isLoading ? "not-allowed" : "pointer",
+            transition: "all 0.15s", color: theme === "dark" ? "#94a3b8" : "#666",
+            opacity: isRefreshing || isLoading ? 0.5 : 1,
+          }} title="Refresh news">
+            <RefreshCw size={16} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
           </button>
-
-          <button
-            onClick={toggleTheme}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 36,
-              height: 36,
-              borderRadius: 8,
-              background: theme === "dark" ? "#1a1a1a" : "#f0f0f0",
-              border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`,
-              cursor: "pointer",
-              transition: "all 0.15s ease",
-              color: theme === "dark" ? "#fbbf24" : "#3b9eff",
-            }}
-            title="Toggle theme"
-          >
+          <button onClick={toggleTheme} style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 36, height: 36, borderRadius: 8,
+            background: theme === "dark" ? "#1a1a1a" : "#f0f0f0",
+            border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`,
+            cursor: "pointer", transition: "all 0.15s",
+            color: theme === "dark" ? "#fbbf24" : "#3b9eff",
+          }} title="Toggle theme">
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
       </div>
 
       {/* Filter pills */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.38rem", marginBottom: "1.35rem", alignItems: "center" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.38rem", marginBottom: "1.35rem" }}>
         {ALL_FILTERS.map(cat => {
-          const meta = CATEGORY_META[cat];
-          const active = filter === cat;
-          const color = meta?.color ?? "#3b9eff";
+          const meta = CATEGORY_META[cat]; const active = filter === cat; const color = meta?.color ?? "#3b9eff";
           return (
             <button key={cat} onClick={() => setFilter(cat)} style={{
               display: "inline-flex", alignItems: "center", gap: "0.25rem",
-              fontSize: "0.68rem", fontWeight: 600,
-              padding: "0.22rem 0.7rem", borderRadius: 999, cursor: "pointer",
+              fontSize: "0.68rem", fontWeight: 600, padding: "0.22rem 0.7rem",
+              borderRadius: 999, cursor: "pointer",
               border: `1px solid ${active ? color + "88" : theme === "dark" ? "#333" : "#ddd"}`,
               color: active ? color : theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)",
-              background: active ? color + "18" : "transparent",
-              transition: "all 0.12s",
+              background: active ? color + "18" : "transparent", transition: "all 0.12s",
             }}>
-              {meta?.Icon && <meta.Icon size={9} />}
-              {cat}
+              {meta?.Icon && <meta.Icon size={9} />}{cat}
             </button>
           );
         })}
       </div>
 
-      {/* Bento grid with dense layout */}
-      {isLoading && allItems.length === 0 ? (
-        <div className="news-grid" style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: "0.8rem",
-          gridAutoFlow: "dense",
-        }}>
-          {[...Array(6)].map((_, i) => (
-            <SkeletonCard key={i} size={SIZE_PATTERN[i % 3]} />
-          ))}
+      {/* Grid */}
+      {isLoading ? (
+        <div className="news-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem", gridAutoFlow: "dense" }}>
+          {[...Array(6)].map((_, i) => <SkeletonCard key={i} size={SIZE_PATTERN[i % 3]} theme={theme} />)}
         </div>
-      ) : allItems.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "5rem 0", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", opacity: 0.45 }}>
+      ) : visible.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "5rem 0", color: theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.4)" }}>
           <Newspaper size={30} style={{ margin: "0 auto 0.6rem", display: "block" }} />
-          <p style={{ margin: 0, fontSize: "0.82rem" }}>No articles in this category. Connect your news agent to start fetching articles.</p>
-          <button onClick={() => setFilter("All")} style={{
-            marginTop: "0.5rem", fontSize: "0.75rem", color: "#3b9eff",
-            background: "none", border: "none", cursor: "pointer",
-          }}>
-            View all →
+          <p style={{ margin: 0, fontSize: "0.82rem" }}>No articles in this category.</p>
+          <button onClick={handleRefresh} style={{ marginTop: "0.5rem", fontSize: "0.75rem", color: "#3b9eff", background: "none", border: "none", cursor: "pointer" }}>
+            Refresh →
           </button>
         </div>
       ) : (
         <>
-          <div className="news-grid" style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: "0.8rem",
-            gridAutoFlow: "dense",
-          }}>
-            {allItems.map((item, i) => (
-              <NewsCard
-                key={item.id}
-                item={item}
-                size={SIZE_PATTERN[i % 3]}
-                revealed={revealedSet.has(i)}
-              />
+          <div className="news-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem", gridAutoFlow: "dense" }}>
+            {visible.map((item, i) => (
+              <NewsCard key={item.id ?? i} item={item} size={SIZE_PATTERN[i % 3]} revealed={revealedSet.has(i)} theme={theme} />
             ))}
-
             {loadingMore && [...Array(PAGE_SIZE)].map((_, i) => (
-              <SkeletonCard key={`skel-${i}`} size={SIZE_PATTERN[(allItems.length + i) % 3]} />
+              <SkeletonCard key={`skel-${i}`} size={SIZE_PATTERN[(visible.length + i) % 3]} theme={theme} />
             ))}
           </div>
 
-          <SpringPullZone pullRef={pullRef} loadingMore={loadingMore} />
+          <SpringPullZone pullRef={pullRef} loadingMore={loadingMore} hasMore={hasMore} theme={theme} />
 
-          {!hasMore && !loadingMore && allItems.length > PAGE_SIZE && (
+          {!hasMore && visible.length > 0 && (
             <div style={{
               textAlign: "center", padding: "2rem 0 0",
-              fontSize: "0.65rem", color: theme === "dark" ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)", opacity: 0.3,
-              letterSpacing: "0.08em",
+              fontSize: "0.65rem", letterSpacing: "0.08em",
+              color: theme === "dark" ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.22)",
             }}>
               — end of briefing —
             </div>
