@@ -28,13 +28,20 @@ from services.report_agent import (
 # SharedContext also exposes set_analytics — call it after every query
 # so the report agent can embed charts generated in analytics routes.
 
-# News agent — agentic scraper + LLM impact analysis
+# News agent — streaming scraper + LLM judge/enrich
 try:
-    from news_agent import get_news_briefing, enrich_one as _enrich_one
+    from news_agent import (
+        stream_briefing,
+        get_cached_briefing,
+        cache_is_valid,
+        get_next_page_queries,
+        invalidate_cache,
+        get_news_briefing,       # backwards-compat blocking version
+        PAGE_0_QUERIES,
+    )
     _news_agent_available = True
 except ImportError:
     _news_agent_available = False
-    _enrich_one = None
     print("⚠️  news_agent not found — /api/news endpoints will return 503")
 
 app = FastAPI(
@@ -743,31 +750,15 @@ async def download_document(doc_id: str):
 @app.get("/api/news")
 async def news_endpoint(force: bool = False):
     """
-    Returns the latest telecom industry news briefing.
-
-    The response is cached for 6 hours by the news agent.
-    Pass ?force=true to bypass the cache and trigger a fresh scrape + LLM analysis.
-
-    Response shape:
-      {
-        "generated_at": "ISO-8601",
-        "count": int,
-        "items": [
-          {
-            "id", "title", "source", "source_url", "article_url",
-            "raw_summary", "ai_impact", "category",
-            "published_at", "scraped_at"
-          }
-        ]
-      }
+    Returns cached briefing instantly if valid.
+    If cache is cold or force=true, triggers a fresh run (blocking).
+    Prefer /api/news/stream for a non-blocking streaming experience.
     """
     if not _news_agent_available:
-        raise HTTPException(
-            503,
-            "News agent not available. Install beautifulsoup4 and lxml, "
-            "then ensure news_agent.py is in the project root.",
-        )
+        raise HTTPException(503, "News agent not available.")
     try:
+        if cache_is_valid() and not force:
+            return get_cached_briefing()
         loop = asyncio.get_event_loop()
         briefing = await loop.run_in_executor(None, get_news_briefing, force)
         return briefing
@@ -776,50 +767,162 @@ async def news_endpoint(force: bool = False):
         raise HTTPException(500, f"Error fetching news: {e}")
 
 
-@app.post("/api/news/refresh")
-async def news_refresh():
+@app.get("/api/news/stream")
+async def news_stream(force: bool = False):
     """
-    Force a full re-scrape. Useful for cron jobs or a manual admin trigger.
-    Returns minimal metadata — the next GET /api/news will serve fresh data.
+    SSE endpoint — streams articles one-by-one as each finishes judge+enrich.
+    The frontend receives cards immediately instead of waiting for the full run.
+
+    Events:
+      data: {"type": "article", "item": {...}}
+      data: {"type": "done",    "count": N}
+      data: {"type": "error",   "message": "..."}
+
+    If the cache is still valid (and force=false), emits cached articles
+    immediately then sends "done" — effectively instant for repeat visits.
     """
     if not _news_agent_available:
         raise HTTPException(503, "News agent not available.")
-    try:
-        loop = asyncio.get_event_loop()
-        briefing = await loop.run_in_executor(None, get_news_briefing, True)
-        return {
-            "status":       "refreshed",
-            "generated_at": briefing["generated_at"],
-            "count":        briefing["count"],
-        }
-    except Exception as e:
-        print(f"❌ News refresh error: {e}")
-        raise HTTPException(500, f"Error refreshing news: {e}")
+
+    async def event_generator():
+        try:
+            # Fast path: serve cache immediately
+            if cache_is_valid() and not force:
+                cached = get_cached_briefing()
+                count  = 0
+                for item in cached.get("items", []):
+                    payload = json.dumps({"type": "article", "item": item})
+                    yield f"data: {payload}\n\n"
+                    count += 1
+                    await asyncio.sleep(0)  # yield control so FastAPI can flush
+                yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
+                return
+
+            # Slow path: run the full pipeline, streaming results
+            loop    = asyncio.get_event_loop()
+            q: asyncio.Queue = asyncio.Queue()
+            sentinel = object()
+
+            def run_stream():
+                try:
+                    from news_agent import stream_briefing, PAGE_0_QUERIES, invalidate_cache
+                    if force:
+                        invalidate_cache()
+                    for item in stream_briefing(PAGE_0_QUERIES, force_reset_dedup=force):
+                        loop.call_soon_threadsafe(q.put_nowait, item)
+                except Exception as exc:
+                    loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
+                finally:
+                    loop.call_soon_threadsafe(q.put_nowait, sentinel)
+
+            thread = threading.Thread(target=run_stream, daemon=True)
+            thread.start()
+
+            count = 0
+            while True:
+                item = await q.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, dict) and "__error__" in item:
+                    yield f"data: {json.dumps({'type': 'error', 'message': item['__error__']})}\n\n"
+                    break
+                payload = json.dumps({"type": "article", "item": item})
+                yield f"data: {payload}\n\n"
+                count += 1
+
+            yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
+
+        except asyncio.CancelledError:
+            pass  # client disconnected — clean exit
+        except Exception as e:
+            print(f"❌ SSE stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":   "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "Connection":      "keep-alive",
+        },
+    )
 
 
-@app.post("/api/news/enrich/{article_id}")
-async def news_enrich_one(article_id: str):
+@app.get("/api/news/next-page")
+async def news_next_page():
     """
-    Lazy enrichment for a single article (called when a user opens a card).
+    SSE endpoint for infinite scroll — fetches the next batch of articles
+    using a rotating set of extended queries.  Returns only articles that
+    haven't been served yet (global dedup).
 
-    Runs the LLM summary + ai_impact for one article only, updates the cache
-    in-place, and returns the enriched article. Cheap: one LLM call, ~350 tokens.
-
-    If already enriched, returns instantly from cache with no LLM call.
+    Same SSE protocol as /api/news/stream.
     """
-    if not _news_agent_available or _enrich_one is None:
+    if not _news_agent_available:
+        raise HTTPException(503, "News agent not available.")
+
+    async def event_generator():
+        try:
+            queries = get_next_page_queries()
+            loop    = asyncio.get_event_loop()
+            q: asyncio.Queue = asyncio.Queue()
+            sentinel = object()
+
+            def run_stream():
+                try:
+                    from news_agent import stream_briefing
+                    for item in stream_briefing(queries, force_reset_dedup=False):
+                        loop.call_soon_threadsafe(q.put_nowait, item)
+                except Exception as exc:
+                    loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
+                finally:
+                    loop.call_soon_threadsafe(q.put_nowait, sentinel)
+
+            thread = threading.Thread(target=run_stream, daemon=True)
+            thread.start()
+
+            count = 0
+            while True:
+                item = await q.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, dict) and "__error__" in item:
+                    yield f"data: {json.dumps({'type': 'error', 'message': item['__error__']})}\n\n"
+                    break
+                payload = json.dumps({"type": "article", "item": item})
+                yield f"data: {payload}\n\n"
+                count += 1
+
+            yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"❌ Next-page SSE error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":   "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":      "keep-alive",
+        },
+    )
+
+
+@app.post("/api/news/refresh")
+async def news_refresh():
+    """Force a full re-scrape. Returns immediately; stream via /api/news/stream?force=true."""
+    if not _news_agent_available:
         raise HTTPException(503, "News agent not available.")
     try:
-        loop    = asyncio.get_event_loop()
-        updated = await loop.run_in_executor(None, _enrich_one, article_id)
-        if updated is None:
-            raise HTTPException(404, f"Article '{article_id}' not found in cache.")
-        return updated
-    except HTTPException:
-        raise
+        from news_agent import invalidate_cache
+        invalidate_cache()
+        return {"status": "cache_invalidated", "message": "Connect to /api/news/stream?force=true to stream fresh articles."}
     except Exception as e:
-        print(f"❌ Enrich error for {article_id}: {e}")
-        raise HTTPException(500, f"Error enriching article: {e}")
+        raise HTTPException(500, f"Error invalidating cache: {e}")
 
 
 @app.get("/health")

@@ -1,31 +1,37 @@
 """
 Industry Analyst Agent — news_agent.py
 ────────────────────────────────────────────────────────────────
-Pipeline (LangGraph):
-  1. search_news    — DuckDuckGo News
-  2. judge_articles — Concurrent LLM Judge (all articles in parallel)
-  3. finalize       — Serve immediately, NO blocking enrichment
+Pipeline (streaming):
+  1. search_news  — concurrent DuckDuckGo across all query buckets
+  2. judge+enrich — single merged LLM call per article (concurrent)
+  3. stream_briefing — generator that yields articles one-by-one as
+                       they finish, so the frontend can render immediately
 
-Enrichment is lazy: call enrich_one(article_id) on-demand when a user
-opens a card. This keeps the initial load fast and cheap.
+Key changes vs v1:
+  • Judge + enrich collapsed into ONE LLM call per article
+  • All DDG searches run concurrently (ThreadPoolExecutor)
+  • Results stream out via SSE as each article finishes — no waiting
+  • Global URL + title dedup across all pages/sessions
+  • Rotating extended query set for infinite-scroll "next page" fetches
+  • Full cache kept for instant repeat visits within TTL
 
 Public API (used by main.py):
-    from news_agent import get_news_briefing, enrich_one
-    briefing = get_news_briefing(force=False)
-    enriched = enrich_one(article_id)           # called by /api/news/enrich/<id>
+    from news_agent import stream_briefing, get_cached_briefing, get_next_page
 
 Requirements:
-    pip install duckduckgo-search langgraph
+    pip install ddgs langgraph
 """
 
 import re
 import json
 import time
 import hashlib
+import random
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import TypedDict, Annotated, List, Optional
+from typing import Generator, Iterator, List, Optional, TypedDict, Annotated
 import operator
 
 logging.basicConfig(
@@ -35,31 +41,71 @@ logging.basicConfig(
 )
 logger = logging.getLogger("news_agent")
 
-# ── Search queries ────────────────────────────────────────────────────────────
 
-SEARCH_QUERIES = [
-    {"query": "5G network 2025",                 "category": "5G"},
-    {"query": "5G deployment infrastructure",    "category": "5G"},
-    {"query": "fiber broadband internet 2025",   "category": "Fiber"},
-    {"query": "broadband expansion rural",       "category": "Fiber"},
-    {"query": "FCC telecom regulation 2025",     "category": "Regulation"},
-    {"query": "spectrum broadband policy",       "category": "Regulation"},
-    {"query": "telecom tower construction",      "category": "Construction"},
-    {"query": "broadband infrastructure build",  "category": "Construction"},
-    {"query": "telecom carrier ISP news 2025",   "category": "General"},
-    {"query": "telecom industry news",           "category": "General"},
+# ── Query buckets ──────────────────────────────────────────────────────────────
+# PAGE_0 = initial load queries (shown on first open)
+# PAGE_N = extended queries rotated in for infinite scroll pages
+
+PAGE_0_QUERIES = [
+    {"query": "5G network deployment 2025",          "category": "5G"},
+    {"query": "5G infrastructure rollout",           "category": "5G"},
+    {"query": "fiber broadband expansion 2025",      "category": "Fiber"},
+    {"query": "rural broadband internet access",     "category": "Fiber"},
+    {"query": "FCC telecom regulation 2025",         "category": "Regulation"},
+    {"query": "spectrum policy broadband",           "category": "Regulation"},
+    {"query": "telecom tower construction permit",   "category": "Construction"},
+    {"query": "broadband infrastructure build",      "category": "Construction"},
+    {"query": "telecom carrier ISP news 2025",       "category": "General"},
+    {"query": "telecom industry quarterly results",  "category": "General"},
+]
+
+# Each sub-list = one "infinite scroll page" of fresh queries
+EXTENDED_QUERY_PAGES = [
+    [
+        {"query": "5G mmWave private network",           "category": "5G"},
+        {"query": "open RAN vRAN 2025",                  "category": "5G"},
+        {"query": "FTTH FTTB fiber to the home",         "category": "Fiber"},
+        {"query": "submarine cable internet 2025",       "category": "Fiber"},
+        {"query": "net neutrality FCC ruling",           "category": "Regulation"},
+        {"query": "telecom merger acquisition 2025",     "category": "Regulation"},
+        {"query": "cell tower zoning approval",          "category": "Construction"},
+        {"query": "data center power infrastructure",    "category": "Construction"},
+        {"query": "Verizon AT&T T-Mobile news",          "category": "General"},
+        {"query": "satellite internet Starlink LEO",     "category": "General"},
+    ],
+    [
+        {"query": "5G standalone core network",          "category": "5G"},
+        {"query": "network slicing edge computing 5G",   "category": "5G"},
+        {"query": "dark fiber lease IRU deal",           "category": "Fiber"},
+        {"query": "broadband subsidy BEAD program",      "category": "Fiber"},
+        {"query": "EU telecom regulation digital act",   "category": "Regulation"},
+        {"query": "radio frequency interference ruling", "category": "Regulation"},
+        {"query": "small cell densification urban",      "category": "Construction"},
+        {"query": "underground conduit fiber dig",       "category": "Construction"},
+        {"query": "MVNO wholesale agreement 2025",       "category": "General"},
+        {"query": "telecom workforce layoff hiring",     "category": "General"},
+    ],
+    [
+        {"query": "C-band 5G spectrum deployment",       "category": "5G"},
+        {"query": "millimeter wave 5G enterprise",       "category": "5G"},
+        {"query": "ISP fixed wireless broadband rural",  "category": "Fiber"},
+        {"query": "middle mile broadband grant",         "category": "Fiber"},
+        {"query": "telecom antitrust DOJ FTC 2025",      "category": "Regulation"},
+        {"query": "universal service fund USF reform",   "category": "Regulation"},
+        {"query": "utility pole attachment rate",        "category": "Construction"},
+        {"query": "fiber aerial vs underground cost",    "category": "Construction"},
+        {"query": "wholesale bandwidth pricing trend",   "category": "General"},
+        {"query": "IoT connectivity smart city 2025",    "category": "General"},
+    ],
 ]
 
 MAX_RESULTS_PER_QUERY = 8
 CACHE_TTL_HOURS       = 6
-JUDGE_SCORE_THRESHOLD = 0.30
-
-# How many judge calls to fire in parallel.
-# Keep this modest so you don't hammer your LLM provider.
-JUDGE_WORKERS = 6
+JUDGE_SCORE_THRESHOLD = 0.28
+LLM_WORKERS           = 8   # concurrent judge+enrich calls
 
 
-# ── State ─────────────────────────────────────────────────────────────────────
+# ── TypedDicts ─────────────────────────────────────────────────────────────────
 
 class RawArticle(TypedDict):
     title:        str
@@ -83,112 +129,42 @@ class EnrichedArticle(TypedDict):
     category:     str
     published_at: str
     scraped_at:   str
-    enriched:     bool   # False until enrich_one() has been called
-
-class AgentState(TypedDict):
-    raw_articles:      Annotated[List[RawArticle],    operator.add]
-    accepted_articles: Annotated[List[RawArticle],    operator.add]
-    enriched_articles: Annotated[List[EnrichedArticle], operator.add]
-    errors:            Annotated[List[str],            operator.add]
-    status:            str
+    enriched:     bool
 
 
-# ── Node 1: DuckDuckGo search ─────────────────────────────────────────────────
+# ── Global dedup state ─────────────────────────────────────────────────────────
+# Tracks every URL + title-fingerprint ever served so no dupe survives
+# a page reload or infinite-scroll fetch.
 
-def search_news(state: AgentState) -> dict:
-    print("\n" + "="*60)
-    print("📡 NEWS AGENT — Node 1: DDG Search")
-    print("="*60)
+_seen_urls:        set = set()
+_seen_fingerprints: set = set()
+_dedup_lock = threading.Lock()
 
-    DDGS = None
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        pass
-    if DDGS is None:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            msg = "ddgs not installed. Run: pip install ddgs"
-            print(f"❌ {msg}")
-            return {"raw_articles": [], "errors": [msg], "status": "searched"}
+def _fingerprint(title: str) -> str:
+    """Aggressively normalised 60-char prefix — catches rephrased headlines."""
+    return re.sub(r"[^a-z0-9]", "", title.lower())[:60]
 
-    import random
+def _is_dupe(url: str, title: str) -> bool:
+    fp = _fingerprint(title)
+    with _dedup_lock:
+        if url in _seen_urls or fp in _seen_fingerprints:
+            return True
+        return False
 
-    raw_articles: List[RawArticle] = []
-    errors:       List[str]        = []
-    seen_urls:    set              = set()
+def _register(url: str, title: str):
+    fp = _fingerprint(title)
+    with _dedup_lock:
+        _seen_urls.add(url)
+        _seen_fingerprints.add(fp)
 
-    with DDGS() as ddgs:
-        for i, entry in enumerate(SEARCH_QUERIES):
-            if i > 0:
-                sleep_sec = random.uniform(3.0, 5.5)
-                print(f"     ⏳ Waiting {sleep_sec:.1f}s…")
-                time.sleep(sleep_sec)
-
-            print(f"  🔍 Searching: \"{entry['query']}\" [{entry['category']}]")
-            results = []
-            for attempt in range(3):
-                try:
-                    results = list(ddgs.news(
-                        entry["query"],
-                        max_results=MAX_RESULTS_PER_QUERY,
-                        safesearch="off",
-                        timelimit="m",
-                    ))
-                    print(f"     → {len(results)} results")
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    if "Ratelimit" in err_str and attempt < 2:
-                        wait = random.uniform(8, 15) * (attempt + 1)
-                        print(f"     ⏳ Rate limited — retrying in {wait:.0f}s…")
-                        time.sleep(wait)
-                    else:
-                        err = f"DDG search failed for '{entry['query']}': {e}"
-                        print(f"     ⚠️  {err}")
-                        errors.append(err)
-                        break
-
-            for r in results:
-                url = r.get("url", "")
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-
-                try:
-                    raw_date = r.get("date", "")
-                    if isinstance(raw_date, (int, float)):
-                        published_at = datetime.utcfromtimestamp(raw_date).isoformat()
-                    elif raw_date:
-                        published_at = str(raw_date)
-                    else:
-                        published_at = datetime.utcnow().isoformat()
-                except Exception:
-                    published_at = datetime.utcnow().isoformat()
-
-                parts      = url.split("/")
-                source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
-                title      = r.get("title", "")[:200]
-                image      = r.get("image") or None
-                print(f"     + [{entry['category']}] {title[:70]}")
-
-                raw_articles.append({
-                    "title":        title,
-                    "url":          url,
-                    "image_url":    image,
-                    "raw_text":     r.get("body", "")[:2000],
-                    "category":     entry["category"],
-                    "source":       r.get("source", "Unknown"),
-                    "source_url":   source_url,
-                    "published_at": published_at,
-                })
-
-    print(f"\n✅ DDG search done — {len(raw_articles)} raw articles, {len(errors)} errors")
-    return {"raw_articles": raw_articles, "errors": errors, "status": "searched"}
+def reset_dedup():
+    """Call before a force-refresh so old articles don't block new ones."""
+    with _dedup_lock:
+        _seen_urls.clear()
+        _seen_fingerprints.clear()
 
 
-# ── JSON extractor ────────────────────────────────────────────────────────────
+# ── JSON extractor ─────────────────────────────────────────────────────────────
 
 def _extract_json(raw: str) -> dict:
     text = re.sub(r"```json|```", "", raw).strip()
@@ -209,8 +185,8 @@ def _extract_json(raw: str) -> dict:
         if m2:
             result[key] = m2.group(1)
         else:
-            num_pattern = rf'"{key}"\s*:\s*([0-9.]+)'
-            m3 = re.search(num_pattern, text)
+            num_p = rf'"{key}"\s*:\s*([0-9.]+)'
+            m3 = re.search(num_p, text)
             if m3:
                 result[key] = float(m3.group(1))
     if result:
@@ -218,289 +194,359 @@ def _extract_json(raw: str) -> dict:
     raise ValueError(f"Could not extract JSON from: {text[:200]!r}")
 
 
-# ── Node 2: Concurrent LLM Judge ──────────────────────────────────────────────
+# ── DDG search (concurrent) ────────────────────────────────────────────────────
 
-# Trimmed system prompt — fewer tokens = cheaper + faster
-_JUDGE_SYSTEM = (
-    "Telecom/construction news filter. "
-    "Reply ONLY with JSON, no markdown."
-)
+def _search_one(entry: dict, ddgs_instance, seen_local: set) -> List[RawArticle]:
+    """Search a single query and return raw articles. Thread-safe per ddgs instance."""
+    results = []
+    for attempt in range(3):
+        try:
+            results = list(ddgs_instance.news(
+                entry["query"],
+                max_results=MAX_RESULTS_PER_QUERY,
+                safesearch="off",
+                timelimit="m",
+            ))
+            break
+        except Exception as e:
+            if "Ratelimit" in str(e) and attempt < 2:
+                wait = random.uniform(6, 12) * (attempt + 1)
+                logger.warning(f"DDG rate limited — retry in {wait:.0f}s")
+                time.sleep(wait)
+            else:
+                logger.warning(f"DDG failed for '{entry['query']}': {e}")
+                break
 
-# Shorter prompt: title + 300 chars of snippet is plenty for a relevance score
-_JUDGE_PROMPT = (
-    "Score this article 0.0-1.0 for a telecom/construction briefing.\n"
-    "Factors: relevance to telecom/infrastructure (0-0.4), "
-    "newsworthiness (0-0.3), specificity (0-0.3).\n\n"
-    "Title: {title}\n"
-    "Snippet: {snippet}\n"
-    "Source: {source}\n\n"
-    'Reply ONLY: {{"score": 0.85, "reason": "one line"}}'
-)
+    articles: List[RawArticle] = []
+    for r in results:
+        url = r.get("url", "")
+        if not url or url in seen_local:
+            continue
+        seen_local.add(url)
+
+        try:
+            raw_date = r.get("date", "")
+            if isinstance(raw_date, (int, float)):
+                published_at = datetime.utcfromtimestamp(raw_date).isoformat()
+            elif raw_date:
+                published_at = str(raw_date)
+            else:
+                published_at = datetime.utcnow().isoformat()
+        except Exception:
+            published_at = datetime.utcnow().isoformat()
+
+        parts      = url.split("/")
+        source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
+        title      = r.get("title", "")[:200]
+        image      = r.get("image") or None
+
+        articles.append({
+            "title":        title,
+            "url":          url,
+            "image_url":    image,
+            "raw_text":     r.get("body", "")[:2000],
+            "category":     entry["category"],
+            "source":       r.get("source", "Unknown"),
+            "source_url":   source_url,
+            "published_at": published_at,
+        })
+    return articles
 
 
-def _judge_one(art: RawArticle, call_llm) -> tuple[RawArticle | None, str | None]:
-    """Judge a single article. Returns (article_or_None, error_or_None)."""
+def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
+    """
+    Run all queries concurrently using multiple DDGS sessions.
+    DDG sessions are not thread-safe — each worker gets its own.
+    """
+    DDGS = None
     try:
-        prompt = _JUDGE_PROMPT.format(
+        from ddgs import DDGS
+    except ImportError:
+        pass
+    if DDGS is None:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            logger.error("ddgs not installed. Run: pip install ddgs")
+            return []
+
+    seen_local: set = set()
+    seen_lock = threading.Lock()
+    all_articles: List[RawArticle] = []
+    results_lock = threading.Lock()
+
+    def worker(entry):
+        # Each thread gets its own DDGS session
+        with DDGS() as ddgs:
+            # Add a small random stagger to avoid burst rate-limits
+            time.sleep(random.uniform(0.2, 1.2))
+            arts = _search_one(entry, ddgs, seen_local)
+            with results_lock:
+                all_articles.extend(arts)
+
+    with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
+        futures = [pool.submit(worker, q) for q in queries]
+        for f in as_completed(futures):
+            try:
+                f.result()
+            except Exception as e:
+                logger.warning(f"Search worker error: {e}")
+
+    logger.info(f"DDG fetch done — {len(all_articles)} raw articles from {len(queries)} queries")
+    return all_articles
+
+
+# ── Merged judge + enrich (one LLM call) ──────────────────────────────────────
+
+_JUDGE_ENRICH_SYSTEM = (
+    "You are a senior telecom & infrastructure industry analyst and news editor. "
+    "Given a news article title, snippet, and category, do TWO things in one response:\n"
+    "1. Score its relevance 0.0-1.0 for a telecom/construction professional briefing.\n"
+    "2. If score >= 0.28, write a polished 2-sentence summary and a 2-sentence analyst insight.\n\n"
+    "Reply ONLY with this JSON, no markdown:\n"
+    '{"score": 0.85, "raw_summary": "...", "ai_impact": "..."}\n'
+    "If score < 0.28, still return JSON but leave raw_summary and ai_impact as empty strings."
+)
+
+_JUDGE_ENRICH_PROMPT = (
+    "Category: {category}\n"
+    "Title: {title}\n"
+    "Snippet: {snippet}\n\n"
+    "Score + summarise if relevant."
+)
+
+
+def _judge_and_enrich_one(
+    art: RawArticle, call_llm, idx: int
+) -> tuple[Optional["EnrichedArticle"], Optional[str]]:
+    """Single LLM call: judge relevance AND produce summary+impact together."""
+    try:
+        prompt = _JUDGE_ENRICH_PROMPT.format(
+            category=art["category"],
             title=art["title"],
-            snippet=art["raw_text"][:300],   # was 500 — 300 is plenty
-            source=art["source"],
+            snippet=art["raw_text"][:400],
         )
-        raw     = call_llm(
+        raw    = call_llm(
             prompt=prompt,
-            system_prompt=_JUDGE_SYSTEM,
-            max_tokens=60,          # was 100 — score+reason fit in 60 easily
-            temperature=0.0,
+            system_prompt=_JUDGE_ENRICH_SYSTEM,
+            max_tokens=300,
+            temperature=0.25,
             task="evaluate",
         )
-        verdict = _extract_json(raw)
-        score   = float(verdict.get("score", 0.5))
-        reason  = verdict.get("reason", "")
+        parsed = _extract_json(raw)
+        score  = float(parsed.get("score", 0.5))
 
-        if score >= JUDGE_SCORE_THRESHOLD:
-            print(f"  ✅ ACCEPT [{score:.2f}] {art['title'][:65]}")
-            return art, None
-        else:
-            print(f"  ❌ REJECT [{score:.2f}] {art['title'][:65]}"
-                  + (f"\n            {reason}" if reason else ""))
+        if score < JUDGE_SCORE_THRESHOLD:
+            logger.info(f"  ❌ REJECT [{score:.2f}] {art['title'][:65]}")
             return None, None
 
+        uid = f"art_{idx}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
+        item: EnrichedArticle = {
+            "id":           uid,
+            "title":        art["title"],
+            "source":       art["source"],
+            "source_url":   art["source_url"],
+            "article_url":  art["url"],
+            "image_url":    art.get("image_url"),
+            "raw_summary":  parsed.get("raw_summary") or art["raw_text"][:300],
+            "ai_impact":    parsed.get("ai_impact", ""),
+            "category":     art["category"],
+            "published_at": art["published_at"],
+            "scraped_at":   datetime.utcnow().isoformat(),
+            "enriched":     True,
+        }
+        logger.info(f"  ✅ ACCEPT [{score:.2f}] {art['title'][:65]}")
+        return item, None
+
     except Exception as e:
-        # Fail-open: keep the article on any error
-        err = f"Judge error for '{art['title'][:50]}': {e}"
-        print(f"  ⚠️  {err} → keeping")
-        return art, err
-
-
-def judge_articles(state: AgentState) -> dict:
-    print("\n" + "="*60)
-    print(f"⚖️  NEWS AGENT — Node 2: Concurrent LLM Judge (workers={JUDGE_WORKERS})")
-    print("="*60)
-
-    articles = state["raw_articles"]
-    print(f"  Judging {len(articles)} articles in parallel…")
-
-    if not articles:
-        print("  ⚠️  No articles to judge!")
-        return {"accepted_articles": [], "errors": [], "status": "judged"}
-
-    errors: List[str] = []
-
-    try:
-        from llm_client import call_llm, check_llm_available
-        available, provider = check_llm_available()
-        if not available:
-            print("  ⚠️  No LLM available — accepting all articles (fail-open)")
-            return {"accepted_articles": _dedup(articles), "errors": errors, "status": "judged"}
-        print(f"  🤖 Using: {provider}")
-    except ImportError:
-        print("  ⚠️  llm_client not found — accepting all articles")
-        return {"accepted_articles": _dedup(articles), "errors": errors, "status": "judged"}
-
-    # Fire all judge calls concurrently instead of one-by-one
-    accepted: List[RawArticle] = []
-    with ThreadPoolExecutor(max_workers=JUDGE_WORKERS) as pool:
-        futures = {pool.submit(_judge_one, art, call_llm): art for art in articles}
-        for future in as_completed(futures):
-            art_result, err = future.result()
-            if err:
-                errors.append(err)
-            if art_result is not None:
-                accepted.append(art_result)
-
-    deduped = _dedup(accepted)
-    print(f"\n✅ Judge done — {len(deduped)} accepted, {len(articles) - len(deduped)} dropped")
-    return {"accepted_articles": deduped, "errors": errors, "status": "judged"}
-
-
-def _dedup(articles: List[RawArticle]) -> List[RawArticle]:
-    seen: set = set()
-    out:  List[RawArticle] = []
-    for art in articles:
-        key = re.sub(r"[^a-z0-9]", "", art["title"].lower())[:60]
-        if key not in seen:
-            seen.add(key)
-            out.append(art)
-    return out
-
-
-# ── Node 3: Finalize (no blocking enrichment) ─────────────────────────────────
-#
-# Articles are served immediately with raw_text as the summary.
-# Enrichment (ai_impact + polished summary) happens lazily via enrich_one().
-
-def _make_unenriched(i: int, art: RawArticle) -> EnrichedArticle:
-    uid = f"art_{i}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
-    return {
-        "id":           uid,
-        "title":        art["title"],
-        "source":       art["source"],
-        "source_url":   art["source_url"],
-        "article_url":  art["url"],
-        "image_url":    art.get("image_url"),
-        "raw_summary":  art["raw_text"][:300],
-        "ai_impact":    "",
-        "category":     art["category"],
-        "published_at": art["published_at"],
-        "scraped_at":   datetime.utcnow().isoformat(),
-        "enriched":     False,
-    }
-
-
-def finalize(state: AgentState) -> dict:
-    articles  = state["accepted_articles"]
-    items     = [_make_unenriched(i, art) for i, art in enumerate(articles)]
-    print("\n" + "="*60)
-    print(f"📰 NEWS AGENT — Done: {len(items)} articles ready (unenriched, fast)")
-    print("="*60 + "\n")
-    return {"enriched_articles": items, "status": "done"}
-
-
-# ── Graph ──────────────────────────────────────────────────────────────────────
-
-def _build_graph():
-    from langgraph.graph import StateGraph, END
-    g = StateGraph(AgentState)
-    g.add_node("search",   search_news)
-    g.add_node("judge",    judge_articles)
-    g.add_node("finalize", finalize)
-    g.set_entry_point("search")
-    g.add_edge("search",   "judge")
-    g.add_edge("judge",    "finalize")
-    g.add_edge("finalize", END)
-    return g.compile()
-
-try:
-    _graph = _build_graph()
-    print("📰 News agent graph compiled ✅")
-except Exception as _graph_err:
-    _graph = None
-    print(f"❌ Failed to build news graph: {_graph_err}")
+        # Fail-open: keep the article with raw text
+        err = f"LLM error for '{art['title'][:50]}': {e}"
+        logger.warning(f"  ⚠️  {err} → keeping raw")
+        uid = f"art_{idx}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
+        item = {
+            "id":           uid,
+            "title":        art["title"],
+            "source":       art["source"],
+            "source_url":   art["source_url"],
+            "article_url":  art["url"],
+            "image_url":    art.get("image_url"),
+            "raw_summary":  art["raw_text"][:300],
+            "ai_impact":    "",
+            "category":     art["category"],
+            "published_at": art["published_at"],
+            "scraped_at":   datetime.utcnow().isoformat(),
+            "enriched":     False,
+        }
+        return item, err
 
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
 
-_cache:      dict              = {}
+_cache:      dict               = {}
 _cache_time: Optional[datetime] = None
-# article_id → raw RawArticle, kept so enrich_one() can re-use raw_text
-_raw_by_id:  dict[str, RawArticle] = {}
+_cache_lock  = threading.Lock()
+
+# Tracks which extended query page we've served (for infinite scroll)
+_next_page_idx: int = 0
+_page_lock = threading.Lock()
 
 
-def get_news_briefing(force: bool = False) -> dict:
+# ── Core streaming pipeline ────────────────────────────────────────────────────
+
+def stream_briefing(
+    queries: List[dict],
+    force_reset_dedup: bool = False,
+) -> Iterator[EnrichedArticle]:
     """
-    Public API for main.py. Cached for CACHE_TTL_HOURS.
-    Pass force=True to bypass cache and trigger a fresh scrape.
+    Generator — yields EnrichedArticle dicts one by one as they come out of
+    the LLM pool. The FastAPI SSE endpoint iterates this and pushes each
+    article to the client immediately.
+
+    Articles are globally deduped before being yielded.
+    Results are also accumulated into the cache.
     """
-    global _cache, _cache_time, _raw_by_id
-
-    if _graph is None:
-        raise RuntimeError(
-            "News agent graph failed to initialise. "
-            "Ensure langgraph is installed: pip install langgraph"
-        )
-
-    now         = datetime.utcnow()
-    cache_valid = (
-        _cache
-        and _cache_time is not None
-        and (now - _cache_time) < timedelta(hours=CACHE_TTL_HOURS)
-    )
-    if cache_valid and not force:
-        print("📰 Returning cached briefing")
-        return _cache
-
-    print("\n🚀 Starting news agent run…")
-
-    initial_state: AgentState = {
-        "raw_articles":      [],
-        "accepted_articles": [],
-        "enriched_articles": [],
-        "errors":            [],
-        "status":            "starting",
-    }
-
-    result = _graph.invoke(initial_state)
-
-    items = result["enriched_articles"]
-
-    # Rebuild raw-article lookup so lazy enrichment can use raw_text
-    _raw_by_id = {}
-    for item in items:
-        # We stored raw_summary from raw_text[:300]; stash the full item for now.
-        # enrich_one() will use this when the user opens a card.
-        _raw_by_id[item["id"]] = item
-
-    _cache = {
-        "generated_at": now.isoformat(),
-        "count":        len(items),
-        "items":        items,
-        "errors":       result["errors"],
-    }
-    _cache_time = now
-
-    print(f"📰 Briefing cached — {_cache['count']} articles, {len(result['errors'])} errors")
-    return _cache
-
-
-# ── Lazy enrichment ────────────────────────────────────────────────────────────
-
-_ENRICH_SYSTEM = (
-    "You are a senior telecom industry analyst. "
-    "Given a news article title and snippet, return ONLY a JSON object:\n"
-    '{\n'
-    '  "raw_summary": "2-sentence factual summary",\n'
-    '  "ai_impact":   "2-3 sentences on what this means for telecom/construction professionals"\n'
-    '}\n'
-    "No markdown fences, no preamble. Just the JSON."
-)
-
-
-def enrich_one(article_id: str) -> Optional[dict]:
-    """
-    Enrich a single article on-demand (called when a user opens a card).
-    Returns the updated article dict, or None if the id is unknown.
-    Updates the in-memory cache in-place so subsequent GETs are already enriched.
-    """
-    item = _raw_by_id.get(article_id)
-    if item is None:
-        return None
-
-    # Already enriched — return immediately, no LLM call
-    if item.get("enriched"):
-        return item
+    if force_reset_dedup:
+        reset_dedup()
 
     try:
         from llm_client import call_llm, check_llm_available
-        available, _ = check_llm_available()
-        if not available:
-            return item
+        available, provider = check_llm_available()
+        logger.info(f"LLM provider: {provider if available else 'unavailable (fail-open)'}")
     except ImportError:
-        return item
+        available = False
+        call_llm   = None
+        logger.warning("llm_client not found — serving raw articles without scoring")
 
-    try:
-        raw = call_llm(
-            prompt=f"Title: {item['title']}\n\nSnippet:\n{item['raw_summary']}",
-            system_prompt=_ENRICH_SYSTEM,
-            max_tokens=350,
-            temperature=0.3,
-            task="synthesise",
+    # 1. Fetch all raw articles (concurrent DDG)
+    logger.info(f"🔍 Fetching raw articles for {len(queries)} queries…")
+    raw_articles = fetch_raw_articles(queries)
+
+    # Filter out dupes from global seen set BEFORE sending to LLM
+    fresh = [a for a in raw_articles if not _is_dupe(a["url"], a["title"])]
+    logger.info(f"📋 {len(fresh)} fresh articles (deduped from {len(raw_articles)})")
+
+    if not fresh:
+        return
+
+    new_items: List[EnrichedArticle] = []
+
+    if not available or call_llm is None:
+        # No LLM — serve everything raw
+        for idx, art in enumerate(fresh):
+            _register(art["url"], art["title"])
+            uid  = f"art_{idx}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
+            item: EnrichedArticle = {
+                "id":           uid,
+                "title":        art["title"],
+                "source":       art["source"],
+                "source_url":   art["source_url"],
+                "article_url":  art["url"],
+                "image_url":    art.get("image_url"),
+                "raw_summary":  art["raw_text"][:300],
+                "ai_impact":    "",
+                "category":     art["category"],
+                "published_at": art["published_at"],
+                "scraped_at":   datetime.utcnow().isoformat(),
+                "enriched":     False,
+            }
+            new_items.append(item)
+            yield item
+    else:
+        # 2. Judge + enrich concurrently — yield each as it finishes
+        with ThreadPoolExecutor(max_workers=LLM_WORKERS) as pool:
+            futures = {
+                pool.submit(_judge_and_enrich_one, art, call_llm, idx): art
+                for idx, art in enumerate(fresh)
+            }
+            for future in as_completed(futures):
+                try:
+                    item, err = future.result()
+                except Exception as e:
+                    logger.warning(f"Worker exception: {e}")
+                    continue
+
+                if item is None:
+                    continue
+
+                # Register in global dedup now that it's accepted
+                art = futures[future]
+                _register(art["url"], art["title"])
+                new_items.append(item)
+                yield item
+
+    # 3. Merge new items into the main cache
+    _merge_into_cache(new_items)
+    logger.info(f"✅ stream_briefing done — {len(new_items)} articles yielded & cached")
+
+
+def _merge_into_cache(new_items: List[EnrichedArticle]):
+    global _cache, _cache_time
+    with _cache_lock:
+        existing = _cache.get("items", [])
+        existing_ids = {i["id"] for i in existing}
+        merged = existing + [i for i in new_items if i["id"] not in existing_ids]
+        _cache = {
+            "generated_at": (_cache_time or datetime.utcnow()).isoformat(),
+            "count":        len(merged),
+            "items":        merged,
+        }
+        if _cache_time is None:
+            _cache_time = datetime.utcnow()
+
+
+def get_cached_briefing() -> dict:
+    """Return current cache immediately (for fast repeat loads)."""
+    with _cache_lock:
+        return dict(_cache)
+
+
+def cache_is_valid() -> bool:
+    with _cache_lock:
+        return bool(
+            _cache
+            and _cache_time is not None
+            and (datetime.utcnow() - _cache_time) < timedelta(hours=CACHE_TTL_HOURS)
         )
-        parsed = _extract_json(raw)
 
-        item["raw_summary"] = parsed.get("raw_summary", item["raw_summary"])
-        item["ai_impact"]   = parsed.get("ai_impact", "")
-        item["enriched"]    = True
 
-        # Patch the cached briefing in-place
-        if _cache and "items" in _cache:
-            for cached_item in _cache["items"]:
-                if cached_item["id"] == article_id:
-                    cached_item.update(item)
-                    break
+def get_next_page_queries() -> List[dict]:
+    """
+    Return the next batch of extended queries for infinite scroll.
+    Rotates through EXTENDED_QUERY_PAGES endlessly.
+    """
+    global _next_page_idx
+    with _page_lock:
+        queries = EXTENDED_QUERY_PAGES[_next_page_idx % len(EXTENDED_QUERY_PAGES)]
+        _next_page_idx += 1
+        return queries
 
-        print(f"  ✅ Enriched on-demand: {item['title'][:65]}")
-        return item
 
-    except Exception as e:
-        print(f"  ⚠️  On-demand enrich failed for {article_id}: {e}")
-        return item
+def invalidate_cache():
+    global _cache, _cache_time, _next_page_idx
+    with _cache_lock:
+        _cache      = {}
+        _cache_time = None
+    with _page_lock:
+        _next_page_idx = 0
+    reset_dedup()
+
+
+# ── Backwards-compat shim (so existing imports don't break) ───────────────────
+
+def get_news_briefing(force: bool = False) -> dict:
+    """
+    Blocking version kept for any callers that still use it.
+    Drains the stream_briefing generator fully before returning.
+    """
+    if cache_is_valid() and not force:
+        logger.info("📰 Returning cached briefing")
+        return get_cached_briefing()
+
+    if force:
+        invalidate_cache()
+
+    queries = PAGE_0_QUERIES
+    for _ in stream_briefing(queries, force_reset_dedup=force):
+        pass  # generator populates the cache as a side-effect
+
+    return get_cached_briefing()
