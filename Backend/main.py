@@ -30,10 +30,11 @@ from services.report_agent import (
 
 # News agent — agentic scraper + LLM impact analysis
 try:
-    from news_agent import get_news_briefing
+    from news_agent import get_news_briefing, enrich_one as _enrich_one
     _news_agent_available = True
 except ImportError:
     _news_agent_available = False
+    _enrich_one = None
     print("⚠️  news_agent not found — /api/news endpoints will return 503")
 
 app = FastAPI(
@@ -794,6 +795,31 @@ async def news_refresh():
     except Exception as e:
         print(f"❌ News refresh error: {e}")
         raise HTTPException(500, f"Error refreshing news: {e}")
+
+
+@app.post("/api/news/enrich/{article_id}")
+async def news_enrich_one(article_id: str):
+    """
+    Lazy enrichment for a single article (called when a user opens a card).
+
+    Runs the LLM summary + ai_impact for one article only, updates the cache
+    in-place, and returns the enriched article. Cheap: one LLM call, ~350 tokens.
+
+    If already enriched, returns instantly from cache with no LLM call.
+    """
+    if not _news_agent_available or _enrich_one is None:
+        raise HTTPException(503, "News agent not available.")
+    try:
+        loop    = asyncio.get_event_loop()
+        updated = await loop.run_in_executor(None, _enrich_one, article_id)
+        if updated is None:
+            raise HTTPException(404, f"Article '{article_id}' not found in cache.")
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Enrich error for {article_id}: {e}")
+        raise HTTPException(500, f"Error enriching article: {e}")
 
 
 @app.get("/health")

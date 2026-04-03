@@ -28,12 +28,6 @@ const FALLBACK_GRADIENTS: Record<string, string> = {
 const SIZE_PATTERN = ["wide", "narrow", "narrow"] as const;
 const PAGE_SIZE = 5;
 
-// Spring physics
-const SPRING_STIFFNESS = 0.14;
-const SPRING_DAMPING   = 0.72;
-const MAX_PULL_PX      = 110;
-const TRIGGER_PX       = 72;
-
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
@@ -54,88 +48,94 @@ function normalize(item: any) {
   };
 }
 
-// ── Spring pull-to-load hook ───────────────────────────────────────────────
+// ── IntersectionObserver infinite-scroll hook ──────────────────────────────
+//
+// Attaches an observer to a sentinel <div> at the bottom of the list.
+// When it enters the viewport, onLoadMore is called once.
+// Re-arms automatically after loadingMore flips back to false.
 
-function useSpringPull(onTrigger: () => void, enabled: boolean) {
-  const ref    = useRef<HTMLDivElement>(null);
-  const pos    = useRef(0);
-  const vel    = useRef(0);
-  const target = useRef(0);
-  const rafId  = useRef(0);
-  const fired  = useRef(false);
-
-  const tick = useCallback(() => {
-    const spring = (target.current - pos.current) * SPRING_STIFFNESS;
-    vel.current   = vel.current * SPRING_DAMPING + spring;
-    pos.current  += vel.current;
-    const clamped = Math.min(Math.max(pos.current, 0), MAX_PULL_PX);
-
-    if (ref.current) {
-      ref.current.style.height  = `${clamped}px`;
-      ref.current.style.opacity = String(Math.min((clamped / TRIGGER_PX) * 1.4, 1));
-    }
-
-    const moving = Math.abs(vel.current) > 0.3 || Math.abs(target.current - pos.current) > 0.3;
-    if (moving) {
-      rafId.current = requestAnimationFrame(tick);
-    } else {
-      pos.current = target.current;
-      if (ref.current) ref.current.style.height = `${Math.max(target.current, 0)}px`;
-    }
-  }, []);
-
-  const startRaf = useCallback(() => {
-    cancelAnimationFrame(rafId.current);
-    rafId.current = requestAnimationFrame(tick);
-  }, [tick]);
+function useInfiniteScroll(
+  onLoadMore: () => void,
+  enabled: boolean,
+) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!enabled) return;
+    const el = sentinelRef.current;
+    if (!el) return;
 
-    const onScroll = () => {
-      const distFromBottom = document.body.scrollHeight - window.scrollY - window.innerHeight;
-
-      if (distFromBottom <= 0) {
-        const overscroll = Math.abs(distFromBottom);
-        target.current = Math.min(overscroll * 0.55, MAX_PULL_PX);
-        startRaf();
-
-        if (overscroll >= TRIGGER_PX && !fired.current) {
-          fired.current = true;
-          onTrigger();
-          setTimeout(() => {
-            target.current = 0;
-            vel.current = 6; // outward kick for the boing
-            startRaf();
-            fired.current = false;
-          }, 180);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          onLoadMore();
         }
-      } else if (target.current > 0) {
-        target.current = 0;
-        fired.current  = false;
-        startRaf();
-      }
-    };
+      },
+      {
+        // Start loading a little before the sentinel is fully in view
+        rootMargin: "0px 0px 120px 0px",
+        threshold: 0,
+      },
+    );
 
-    window.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      window.removeEventListener("scroll", onScroll);
-      cancelAnimationFrame(rafId.current);
-    };
-  }, [enabled, onTrigger, startRaf]);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [enabled, onLoadMore]);
 
-  return ref;
+  return sentinelRef;
 }
 
 // ── Cards ──────────────────────────────────────────────────────────────────
 
-function NewsCard({ item, size, revealed, theme }: {
+const _enrichRequested = new Set<string>();
+
+async function requestEnrich(articleId: string, onDone: (enriched: any) => void) {
+  if (!articleId || _enrichRequested.has(articleId)) return;
+  _enrichRequested.add(articleId);
+  try {
+    const res = await fetch(`http://localhost:8000/api/news/enrich/${articleId}`, { method: "POST" });
+    if (res.ok) {
+      const data = await res.json();
+      onDone(data);
+    }
+  } catch {
+    // silently ignore — card stays unenriched
+  }
+}
+
+function NewsCard({ item: initialItem, size, revealed, theme, onEnriched }: {
   item: any; size: "wide" | "narrow"; revealed: boolean; theme: "light" | "dark";
+  onEnriched?: (id: string, enriched: any) => void;
 }) {
+  const [item, setItem] = useState(initialItem);
   const meta = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href = item.articleUrl && item.articleUrl !== "#" ? item.articleUrl : item.sourceUrl;
   const [imgError, setImgError] = useState(false);
   const hasImage = item.imageUrl && !imgError;
+
+  useEffect(() => { setItem(initialItem); }, [initialItem]);
+
+  const handleMouseEnter = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    (e.currentTarget as HTMLElement).style.transform = "scale(1.015)";
+    (e.currentTarget as HTMLElement).style.zIndex = "2";
+    const ov = (e.currentTarget as HTMLElement).querySelector(".ov") as HTMLElement;
+    if (ov) ov.style.background = "linear-gradient(to top,rgba(0,0,0,0.93) 0%,rgba(0,0,0,0.52) 55%,rgba(0,0,0,0.12) 100%)";
+
+    if (!item.enriched && item.id) {
+      requestEnrich(item.id, (enriched) => {
+        const normalized = {
+          ...enriched,
+          articleUrl:  enriched.article_url  ?? enriched.articleUrl  ?? "#",
+          imageUrl:    enriched.image_url    ?? enriched.imageUrl    ?? null,
+          aiImpact:    enriched.ai_impact    ?? enriched.aiImpact    ?? "",
+          sourceUrl:   enriched.source_url   ?? enriched.sourceUrl   ?? "#",
+          publishedAt: enriched.published_at ?? enriched.publishedAt ?? new Date().toISOString(),
+        };
+        setItem(normalized);
+        onEnriched?.(item.id, normalized);
+      });
+    }
+  };
 
   return (
     <a
@@ -153,12 +153,7 @@ function NewsCard({ item, size, revealed, theme }: {
         transition: "opacity 0.38s ease, transform 0.38s ease",
         border: `1px solid ${theme === "dark" ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)"}`,
       }}
-      onMouseEnter={e => {
-        (e.currentTarget as HTMLElement).style.transform = "scale(1.015)";
-        (e.currentTarget as HTMLElement).style.zIndex = "2";
-        const ov = (e.currentTarget as HTMLElement).querySelector(".ov") as HTMLElement;
-        if (ov) ov.style.background = "linear-gradient(to top,rgba(0,0,0,0.93) 0%,rgba(0,0,0,0.52) 55%,rgba(0,0,0,0.12) 100%)";
-      }}
+      onMouseEnter={handleMouseEnter}
       onMouseLeave={e => {
         (e.currentTarget as HTMLElement).style.transform = "scale(1)";
         (e.currentTarget as HTMLElement).style.zIndex = "1";
@@ -241,24 +236,45 @@ function SkeletonCard({ size, theme }: { size: "wide" | "narrow"; theme: "light"
   );
 }
 
-function SpringPullZone({ pullRef, loadingMore, hasMore, theme }: {
-  pullRef: React.RefObject<HTMLDivElement>;
-  loadingMore: boolean; hasMore: boolean; theme: "light" | "dark";
+// ── Sentinel / load-more indicator ────────────────────────────────────────
+
+function LoadMoreSentinel({
+  sentinelRef,
+  loadingMore,
+  hasMore,
+  theme,
+}: {
+  sentinelRef: React.RefObject<HTMLDivElement>;
+  loadingMore: boolean;
+  hasMore: boolean;
+  theme: "light" | "dark";
 }) {
   return (
-    <div ref={pullRef} style={{
-      height: 0, overflow: "hidden",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      opacity: 0, marginTop: "0.8rem",
-    }}>
-      <div style={{
-        display: "flex", alignItems: "center", gap: "0.5rem",
-        fontSize: "0.72rem", fontWeight: 500,
-        color: theme === "dark" ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.5)",
-      }}>
-        <RefreshCw size={13} style={{ animation: loadingMore ? "spin 0.7s linear infinite" : "none" }} />
-        {loadingMore ? "Loading…" : hasMore ? "Pull to load more" : "You're all caught up"}
-      </div>
+    <div
+      ref={sentinelRef}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "1.5rem 0",
+        gap: "0.5rem",
+        fontSize: "0.72rem",
+        fontWeight: 500,
+        color: theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.4)",
+        // Keep it in the layout so IntersectionObserver can see it
+        minHeight: 40,
+      }}
+    >
+      {loadingMore && (
+        <>
+          <RefreshCw size={13} style={{ animation: "spin 0.7s linear infinite" }} />
+          Loading more…
+        </>
+      )}
+      {!loadingMore && hasMore && (
+        // Invisible placeholder — observer watches this
+        <span style={{ opacity: 0, userSelect: "none" }}>·</span>
+      )}
     </div>
   );
 }
@@ -286,7 +302,6 @@ const NewsPage = () => {
   const [hasMore, setHasMore]         = useState(false);
   const prevCount = useRef(0);
 
-  // Match scrollbar style of other pages
   useEffect(() => {
     document.documentElement.classList.add("scrollbar-thin");
     return () => document.documentElement.classList.remove("scrollbar-thin");
@@ -332,18 +347,22 @@ const NewsPage = () => {
     setHasMore(filtered.length > PAGE_SIZE);
   }, [filter, allFetched, applyFilter]);
 
-  // Spring trigger — load next 5 from already-fetched data
+  // Load next batch when sentinel enters viewport
   const loadMore = useCallback(() => {
     if (loadingMore || !hasMore) return;
     setLoadingMore(true);
     const filtered = applyFilter(allFetched, filter);
     const next     = filtered.slice(0, visible.length + PAGE_SIZE);
+    // Small delay so skeleton cards are visible and the UX feels deliberate
     setTimeout(() => {
       setVisible(next);
       setHasMore(next.length < filtered.length);
       setLoadingMore(false);
-    }, 600);
+    }, 500);
   }, [loadingMore, hasMore, allFetched, filter, visible.length, applyFilter]);
+
+  // Observer is enabled only when there's more to load and we're not already loading
+  const sentinelRef = useInfiniteScroll(loadMore, hasMore && !loadingMore && !isLoading);
 
   // Refresh — force re-fetch from backend
   const handleRefresh = useCallback(async () => {
@@ -357,8 +376,6 @@ const NewsPage = () => {
     setHasMore(filtered.length > PAGE_SIZE);
     setIsRefreshing(false);
   }, [isRefreshing, isLoading, fetchNews, filter, applyFilter]);
-
-  const pullRef = useSpringPull(loadMore, hasMore && !loadingMore && !isLoading);
 
   // Staggered card reveal
   useEffect(() => {
@@ -478,18 +495,34 @@ const NewsPage = () => {
         <>
           <div className="news-grid" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.8rem", gridAutoFlow: "dense" }}>
             {visible.map((item, i) => (
-              <NewsCard key={item.id ?? i} item={item} size={SIZE_PATTERN[i % 3]} revealed={revealedSet.has(i)} theme={theme} />
+              <NewsCard
+                key={item.id ?? i}
+                item={item}
+                size={SIZE_PATTERN[i % 3]}
+                revealed={revealedSet.has(i)}
+                theme={theme}
+                onEnriched={(id, enriched) => {
+                  setAllFetched(prev => prev.map(a => a.id === id ? { ...a, ...enriched } : a));
+                  setVisible(prev => prev.map(a => a.id === id ? { ...a, ...enriched } : a));
+                }}
+              />
             ))}
             {loadingMore && [...Array(PAGE_SIZE)].map((_, i) => (
               <SkeletonCard key={`skel-${i}`} size={SIZE_PATTERN[(visible.length + i) % 3]} theme={theme} />
             ))}
           </div>
 
-          <SpringPullZone pullRef={pullRef} loadingMore={loadingMore} hasMore={hasMore} theme={theme} />
+          {/* Sentinel lives outside the grid so the observer doesn't fight with grid layout */}
+          <LoadMoreSentinel
+            sentinelRef={sentinelRef}
+            loadingMore={loadingMore}
+            hasMore={hasMore}
+            theme={theme}
+          />
 
           {!hasMore && visible.length > 0 && (
             <div style={{
-              textAlign: "center", padding: "2rem 0 0",
+              textAlign: "center", padding: "0.5rem 0 0",
               fontSize: "0.65rem", letterSpacing: "0.08em",
               color: theme === "dark" ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.22)",
             }}>
