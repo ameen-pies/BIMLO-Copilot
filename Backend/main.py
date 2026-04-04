@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -28,21 +28,20 @@ from services.report_agent import (
 # SharedContext also exposes set_analytics — call it after every query
 # so the report agent can embed charts generated in analytics routes.
 
-# News agent — streaming scraper + LLM judge/enrich
+# News pipeline — scheduled global cache (every 4 days)
 try:
-    from news_agent import (
-        stream_briefing,
-        get_cached_briefing,
-        cache_is_valid,
-        get_next_page_queries,
-        invalidate_cache,
-        get_news_briefing,       # backwards-compat blocking version
-        PAGE_0_QUERIES,
+    from news_pipeline import (
+        run_news_pipeline,
+        pipeline_is_running,
+        get_meta,
+        get_page,
+        get_status as _pipeline_get_status,
+        CACHE_DIR as NEWS_CACHE_DIR,
     )
-    _news_agent_available = True
+    _news_pipeline_available = True
 except ImportError:
-    _news_agent_available = False
-    print("⚠️  news_agent not found — /api/news endpoints will return 503")
+    _news_pipeline_available = False
+    print("⚠️  news_pipeline not found — /api/news endpoints will return 503")
 
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
@@ -747,182 +746,86 @@ async def download_document(doc_id: str):
         raise HTTPException(500, f"Error downloading document: {e}")
 
 
-@app.get("/api/news")
-async def news_endpoint(force: bool = False):
+@app.get("/api/news/meta")
+async def news_meta():
     """
-    Returns cached briefing instantly if valid.
-    If cache is cold or force=true, triggers a fresh run (blocking).
-    Prefer /api/news/stream for a non-blocking streaming experience.
+    Returns the cache manifest: total_pages, run_at, next_run_at, status.
+    Frontend calls this once on mount to know how many pages exist.
     """
-    if not _news_agent_available:
-        raise HTTPException(503, "News agent not available.")
-    try:
-        if cache_is_valid() and not force:
-            return get_cached_briefing()
-        loop = asyncio.get_event_loop()
-        briefing = await loop.run_in_executor(None, get_news_briefing, force)
-        return briefing
-    except Exception as e:
-        print(f"❌ News endpoint error: {e}")
-        raise HTTPException(500, f"Error fetching news: {e}")
+    if not _news_pipeline_available:
+        raise HTTPException(503, "News pipeline not available.")
+    meta = get_meta()
+    if meta is None:
+        raise HTTPException(503, "No news cache available yet. The pipeline may still be running.")
+    return meta
 
 
-@app.get("/api/news/stream")
-async def news_stream(force: bool = False):
+@app.get("/api/news/pages/{page_num}")
+async def news_page(page_num: int):
     """
-    SSE endpoint — streams articles one-by-one as each finishes judge+enrich.
-    The frontend receives cards immediately instead of waiting for the full run.
-
-    Events:
-      data: {"type": "article", "item": {...}}
-      data: {"type": "done",    "count": N}
-      data: {"type": "error",   "message": "..."}
-
-    If the cache is still valid (and force=false), emits cached articles
-    immediately then sends "done" — effectively instant for repeat visits.
+    Returns a single pre-computed page of articles.
+    This is the only endpoint the frontend needs for infinite scroll.
+    Response includes has_more so the frontend knows when to stop.
     """
-    if not _news_agent_available:
-        raise HTTPException(503, "News agent not available.")
+    if not _news_pipeline_available:
+        raise HTTPException(503, "News pipeline not available.")
+    if page_num < 0:
+        raise HTTPException(400, "page_num must be >= 0")
 
-    async def event_generator():
-        try:
-            # Fast path: serve cache immediately
-            if cache_is_valid() and not force:
-                cached = get_cached_briefing()
-                count  = 0
-                for item in cached.get("items", []):
-                    payload = json.dumps({"type": "article", "item": item})
-                    yield f"data: {payload}\n\n"
-                    count += 1
-                    await asyncio.sleep(0)  # yield control so FastAPI can flush
-                yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
-                return
+    data = get_page(page_num)
+    if data is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "page_not_found", "has_more": False, "page": page_num},
+            headers={"Cache-Control": "no-store"},
+        )
 
-            # Slow path: run the full pipeline, streaming results
-            loop    = asyncio.get_event_loop()
-            q: asyncio.Queue = asyncio.Queue()
-            sentinel = object()
+    # Attach has_more from meta
+    meta = get_meta()
+    total_pages = meta.get("total_pages", 0) if meta else 0
+    data["has_more"] = (page_num + 1) < total_pages
 
-            def run_stream():
-                try:
-                    from news_agent import stream_briefing, PAGE_0_QUERIES, invalidate_cache
-                    if force:
-                        invalidate_cache()
-                    for item in stream_briefing(PAGE_0_QUERIES, force_reset_dedup=force):
-                        loop.call_soon_threadsafe(q.put_nowait, item)
-                except Exception as exc:
-                    loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
-                finally:
-                    loop.call_soon_threadsafe(q.put_nowait, sentinel)
-
-            thread = threading.Thread(target=run_stream, daemon=True)
-            thread.start()
-
-            count = 0
-            while True:
-                item = await q.get()
-                if item is sentinel:
-                    break
-                if isinstance(item, dict) and "__error__" in item:
-                    yield f"data: {json.dumps({'type': 'error', 'message': item['__error__']})}\n\n"
-                    break
-                payload = json.dumps({"type": "article", "item": item})
-                yield f"data: {payload}\n\n"
-                count += 1
-
-            yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
-
-        except asyncio.CancelledError:
-            pass  # client disconnected — clean exit
-        except Exception as e:
-            print(f"❌ SSE stream error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":   "no-cache",
-            "X-Accel-Buffering": "no",  # disable nginx buffering
-            "Connection":      "keep-alive",
-        },
+    # Pages are immutable within a cycle — cache aggressively
+    return JSONResponse(
+        content=data,
+        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=1800"},
     )
 
 
-@app.get("/api/news/next-page")
-async def news_next_page():
+@app.get("/api/news/status")
+async def news_status():
     """
-    SSE endpoint for infinite scroll — fetches the next batch of articles
-    using a rotating set of extended queries.  Returns only articles that
-    haven't been served yet (global dedup).
-
-    Same SSE protocol as /api/news/stream.
+    Lightweight polling endpoint — frontend uses this to detect when a fresh
+    cycle has finished and show the "New articles available" banner.
     """
-    if not _news_agent_available:
-        raise HTTPException(503, "News agent not available.")
+    if not _news_pipeline_available:
+        return {"running": False, "status": "unavailable"}
+    return _pipeline_get_status()
 
-    async def event_generator():
-        try:
-            queries = get_next_page_queries()
-            loop    = asyncio.get_event_loop()
-            q: asyncio.Queue = asyncio.Queue()
-            sentinel = object()
 
-            def run_stream():
-                try:
-                    from news_agent import stream_briefing
-                    for item in stream_briefing(queries, force_reset_dedup=False):
-                        loop.call_soon_threadsafe(q.put_nowait, item)
-                except Exception as exc:
-                    loop.call_soon_threadsafe(q.put_nowait, {"__error__": str(exc)})
-                finally:
-                    loop.call_soon_threadsafe(q.put_nowait, sentinel)
-
-            thread = threading.Thread(target=run_stream, daemon=True)
-            thread.start()
-
-            count = 0
-            while True:
-                item = await q.get()
-                if item is sentinel:
-                    break
-                if isinstance(item, dict) and "__error__" in item:
-                    yield f"data: {json.dumps({'type': 'error', 'message': item['__error__']})}\n\n"
-                    break
-                payload = json.dumps({"type": "article", "item": item})
-                yield f"data: {payload}\n\n"
-                count += 1
-
-            yield f"data: {json.dumps({'type': 'done', 'count': count})}\n\n"
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"❌ Next-page SSE error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control":   "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":      "keep-alive",
-        },
-    )
+@app.post("/api/news/trigger")
+async def news_trigger(background_tasks: BackgroundTasks, force: bool = False):
+    """
+    Manually trigger a pipeline run (admin / refresh button).
+    Returns immediately; the pipeline runs in a FastAPI background task.
+    """
+    if not _news_pipeline_available:
+        raise HTTPException(503, "News pipeline not available.")
+    if pipeline_is_running():
+        return {"status": "already_running", "message": "Pipeline is already in progress."}
+    background_tasks.add_task(run_news_pipeline, force)
+    return {"status": "accepted", "message": "Pipeline triggered. Poll /api/news/status for progress."}
 
 
 @app.post("/api/news/refresh")
-async def news_refresh():
-    """Force a full re-scrape. Returns immediately; stream via /api/news/stream?force=true."""
-    if not _news_agent_available:
-        raise HTTPException(503, "News agent not available.")
-    try:
-        from news_agent import invalidate_cache
-        invalidate_cache()
-        return {"status": "cache_invalidated", "message": "Connect to /api/news/stream?force=true to stream fresh articles."}
-    except Exception as e:
-        raise HTTPException(500, f"Error invalidating cache: {e}")
+async def news_refresh(background_tasks: BackgroundTasks):
+    """Backwards-compatible alias for POST /api/news/trigger?force=true."""
+    if not _news_pipeline_available:
+        raise HTTPException(503, "News pipeline not available.")
+    if pipeline_is_running():
+        return {"status": "already_running"}
+    background_tasks.add_task(run_news_pipeline, True)
+    return {"status": "accepted", "message": "Force refresh triggered."}
 
 
 @app.get("/health")
@@ -960,24 +863,39 @@ async def startup_event():
     except:
         print("⚠️  Vector store stats unavailable")
     print(f"🔑 Groq API: {'✅ configured' if os.getenv('GROQ_API_KEY') else '⚠️  not configured'}")
-    print(f"📰 News agent: {'✅ available' if _news_agent_available else '⚠️  not available'}")
+    print(f"📰 News pipeline: {'✅ available' if _news_pipeline_available else '⚠️  not available'}")
 
-    # ── Optional: schedule a daily 07:00 news refresh ──────────────────────
-    # Uncomment the block below and `pip install apscheduler` to enable it.
-    #
-    # try:
-    #     from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    #     from news_agent import run_news_agent
-    #     _scheduler = AsyncIOScheduler()
-    #     _scheduler.add_job(
-    #         lambda: run_news_agent(force_refresh=True),
-    #         trigger="cron", hour=7, minute=0,
-    #         id="daily_news_refresh", replace_existing=True,
-    #     )
-    #     _scheduler.start()
-    #     print("⏰ News scheduler: 07:00 daily refresh enabled")
-    # except ImportError:
-    #     print("⚠️  apscheduler not installed — daily news refresh disabled")
+    # ── News pipeline scheduler (every 4 days) ────────────────────────────
+    if _news_pipeline_available:
+        try:
+            from apscheduler.schedulers.background import BackgroundScheduler
+            import os as _os
+
+            _scheduler = BackgroundScheduler()
+            _scheduler.add_job(
+                run_news_pipeline,
+                trigger="interval",
+                days=int(_os.getenv("NEWS_CYCLE_DAYS", "4")),
+                id="news_pipeline_4day",
+                replace_existing=True,
+            )
+            _scheduler.start()
+
+            cycle_days = int(_os.getenv("NEWS_CYCLE_DAYS", "4"))
+            print(f"⏰ News scheduler: every {cycle_days} days (APScheduler)")
+
+            # If no cache exists yet, trigger the first run immediately in background
+            meta = get_meta()
+            if meta is None:
+                print("📰 No news cache found — triggering initial pipeline run…")
+                import threading as _th
+                _th.Thread(target=run_news_pipeline, kwargs={"force": False}, daemon=True).start()
+            else:
+                print(f"📰 News cache: {meta.get('total_pages', 0)} pages "
+                      f"(run_at={meta.get('run_at', 'unknown')})")
+        except ImportError:
+            print("⚠️  apscheduler not installed — run: pip install apscheduler")
+            print("    News pipeline will only run via POST /api/news/trigger")
 
     print("="*60 + "\n")
 
