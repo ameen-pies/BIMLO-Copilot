@@ -152,16 +152,16 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
         transform: revealed ? "translateY(0) scale(1)" : "translateY(20px) scale(0.97)",
         transition: "opacity 0.38s ease, transform 0.38s ease, box-shadow 0.22s ease",
         border: isPinned
-          ? `1.5px solid ${meta.color}88`
+          ? `1.5px solid ${theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.3)"}`
           : `1px solid ${theme === "dark" ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`,
-        boxShadow: isPinned ? `0 0 0 2px ${meta.color}22, inset 0 0 0 1px ${meta.color}22` : "none",
+        boxShadow: isPinned ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}` : "none",
       }}
       onMouseEnter={e => {
         const el = e.currentTarget as HTMLElement;
         el.style.transform = "scale(1.012)";
         el.style.zIndex    = "10";
         el.style.boxShadow = isPinned
-          ? `0 0 0 2px ${meta.color}55, 0 16px 48px rgba(0,0,0,0.35)`
+          ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)"}, 0 16px 48px rgba(0,0,0,0.35)`
           : "0 16px 48px rgba(0,0,0,0.35)";
         const ov = el.querySelector(".card-ov") as HTMLElement;
         if (ov) ov.style.background = "linear-gradient(to top,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.55) 50%,rgba(0,0,0,0.15) 100%)";
@@ -170,7 +170,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
         const el = e.currentTarget as HTMLElement;
         el.style.transform = "scale(1)";
         el.style.zIndex    = "1";
-        el.style.boxShadow = isPinned ? `0 0 0 2px ${meta.color}22` : "none";
+        el.style.boxShadow = isPinned ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}` : "none";
         const ov = el.querySelector(".card-ov") as HTMLElement;
         if (ov) ov.style.background = overlayGradient;
       }}
@@ -193,7 +193,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
         position: "absolute", top: 12, left: 12,
         display: "inline-flex", alignItems: "center", gap: "0.28rem",
         fontSize: "0.62rem", fontWeight: 700, color: "#fff",
-        background: meta.color + "cc", borderRadius: 999,
+        background: "rgba(0,0,0,0.45)", borderRadius: 999,
         padding: "0.18rem 0.55rem", backdropFilter: "blur(6px)",
         letterSpacing: "0.02em",
       }}>
@@ -208,9 +208,9 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
           style={{
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             width: 24, height: 24, borderRadius: 6,
-            background: isPinned ? meta.color + "ee" : "rgba(0,0,0,0.5)",
+            background: isPinned ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.5)",
             backdropFilter: "blur(8px)",
-            border: isPinned ? `1px solid ${meta.color}` : "1px solid rgba(255,255,255,0.18)",
+            border: isPinned ? "1px solid rgba(255,255,255,0.5)" : "1px solid rgba(255,255,255,0.18)",
             color: "#fff", cursor: "pointer",
             transition: "all 0.15s",
           }}
@@ -230,7 +230,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
 
       {/* Featured accent bar */}
       {isFeatured && (
-        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${meta.color}, transparent)` }} />
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "linear-gradient(90deg, rgba(255,255,255,0.25), transparent)" }} />
       )}
 
       {/* Content */}
@@ -303,11 +303,13 @@ function NewsChatPanel({
   theme,
   pinnedArticles,
   onRemovePin,
+  onClearPins,
   onClose,
 }: {
   theme: "light" | "dark";
   pinnedArticles: PinnedArticle[];
   onRemovePin: (id: string) => void;
+  onClearPins: () => void;
   onClose: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -355,6 +357,7 @@ function NewsChatPanel({
 
     setMessages(prev => [...prev, userMsg, loadingMsg]);
     setInput("");
+    onClearPins();
     setIsLoading(true);
 
     try {
@@ -383,7 +386,7 @@ function NewsChatPanel({
   }, [input, isLoading, pinnedArticles, sessionId]);
 
   const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!isLoading) handleSend(); }
   };
 
   return (
@@ -445,54 +448,61 @@ function NewsChatPanel({
         scrollbarWidth: "thin",
         scrollbarColor: dark ? "rgba(255,255,255,0.08) transparent" : "rgba(0,0,0,0.08) transparent",
       }}>
-        {messages.map(msg => (
-          <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", gap: "0.22rem" }}>
-            {/* Pinned chips above user message */}
-            {msg.role === "user" && msg.pinnedArticles && msg.pinnedArticles.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.22rem", justifyContent: "flex-end", maxWidth: "90%" }}>
-                {msg.pinnedArticles.map(a => {
-                  const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
-                  const c = catColor(m, theme);
-                  return (
-                    <span key={a.id} style={{
-                      fontSize: "0.54rem", fontWeight: 600,
-                      color: c, background: c + (dark ? "15" : "12"),
-                      border: `1px solid ${c}45`, borderRadius: 999,
-                      padding: "0.1rem 0.38rem",
-                      maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    }}>{a.title}</span>
-                  );
-                })}
+        {messages.map(msg => {
+          const hasRef = msg.role === "user" && msg.pinnedArticles && msg.pinnedArticles.length > 0;
+          return (
+            <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", gap: "0.18rem" }}>
+              {/* Pinned chips ABOVE bubble, right-aligned — nudge on bubble points up-right toward page edge */}
+              {hasRef && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.22rem", justifyContent: "flex-end", maxWidth: "90%" }}>
+                  {msg.pinnedArticles!.map(a => {
+                    return (
+                      <span key={a.id} style={{
+                        fontSize: "0.54rem", fontWeight: 600,
+                        color: dark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.5)",
+                        background: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)",
+                        border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, borderRadius: 999,
+                        padding: "0.1rem 0.38rem",
+                        maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>{a.title}</span>
+                    );
+                  })}
+                </div>
+              )}
+              <div style={{
+                maxWidth: "90%",
+                padding: msg.role === "user" ? "0.5rem 0.72rem" : "0.6rem 0.78rem",
+                // user + ref: nudge top-right (toward page border, chips above)
+                // user no ref: fully round
+                // assistant: nudge top-left
+                borderRadius: msg.role === "user"
+                  ? (hasRef ? "13px 3px 13px 13px" : "13px")
+                  : "3px 13px 13px 13px",
+                background: msg.role === "user"
+                  ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
+                  : dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
+                border: msg.role === "assistant"
+                  ? `1px solid ${dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`
+                  : "none",
+                fontSize: "0.73rem", lineHeight: 1.55,
+                color: msg.role === "user" ? "#fff" : dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)",
+                whiteSpace: "pre-wrap",
+              }}>
+                {msg.loading ? (
+                  <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                    {[0, 1, 2].map(i => (
+                      <span key={i} style={{
+                        width: 5, height: 5, borderRadius: "50%",
+                        background: "#3b9eff", display: "inline-block",
+                        animation: `dotBounce 1.2s ease-in-out ${i * 0.18}s infinite`,
+                      }} />
+                    ))}
+                  </span>
+                ) : msg.content}
               </div>
-            )}
-            <div style={{
-              maxWidth: "90%",
-              padding: msg.role === "user" ? "0.5rem 0.72rem" : "0.6rem 0.78rem",
-              borderRadius: msg.role === "user" ? "13px 13px 3px 13px" : "3px 13px 13px 13px",
-              background: msg.role === "user"
-                ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
-                : dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
-              border: msg.role === "assistant"
-                ? `1px solid ${dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`
-                : "none",
-              fontSize: "0.73rem", lineHeight: 1.55,
-              color: msg.role === "user" ? "#fff" : dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)",
-              whiteSpace: "pre-wrap",
-            }}>
-              {msg.loading ? (
-                <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                  {[0, 1, 2].map(i => (
-                    <span key={i} style={{
-                      width: 5, height: 5, borderRadius: "50%",
-                      background: "#3b9eff", display: "inline-block",
-                      animation: `dotBounce 1.2s ease-in-out ${i * 0.18}s infinite`,
-                    }} />
-                  ))}
-                </span>
-              ) : msg.content}
             </div>
-          </div>
-        ))}
+          );
+        })}
         <div ref={messagesEndRef} />
       </div>
 
@@ -513,31 +523,33 @@ function NewsChatPanel({
           }}>
             {pinnedArticles.map(a => {
               const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
-              const c = catColor(m, theme);
+              const neutralText = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.6)";
+              const neutralBorder = dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.12)";
+              const neutralThumb = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)";
               return (
                 <span key={a.id} style={{
                   display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                  fontSize: "0.6rem", fontWeight: 600, color: c,
+                  fontSize: "0.6rem", fontWeight: 600, color: neutralText,
                   background: dark ? "rgba(0,0,0,0.45)" : "rgba(255,255,255,0.92)",
-                  border: `1px solid ${c}55`, borderRadius: 7,
+                  border: `1px solid ${neutralBorder}`, borderRadius: 7,
                   padding: "0.15rem 0.35rem 0.15rem 0.15rem",
                   maxWidth: 200, backdropFilter: "blur(4px)", flexShrink: 0,
                 }}>
                   <span style={{
                     width: 28, height: 20, borderRadius: 4, overflow: "hidden",
                     flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    background: c + "25", position: "relative",
+                    background: neutralThumb, position: "relative",
                   }}>
                     {a.imageUrl ? (
                       <img src={a.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                         onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
                     ) : (
-                      <m.Icon size={10} color={c} />
+                      <m.Icon size={10} color={neutralText} />
                     )}
                   </span>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{a.title}</span>
                   <button onClick={() => onRemovePin(a.id)}
-                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: c, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: neutralText, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
                   ><X size={9} /></button>
                 </span>
               );
@@ -554,20 +566,25 @@ function NewsChatPanel({
           <textarea
             ref={inputRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => !isLoading && setInput(e.target.value)}
             onKeyDown={handleKey}
             placeholder={
-              pinnedArticles.length > 0
-                ? `Ask about ${pinnedArticles.length === 1 ? "this article" : `these ${pinnedArticles.length} articles`}…`
-                : "Ask about the news…"
+              isLoading
+                ? "Waiting for response…"
+                : pinnedArticles.length > 0
+                  ? `Ask about ${pinnedArticles.length === 1 ? "this article" : `these ${pinnedArticles.length} articles`}…`
+                  : "Ask about the news…"
             }
             rows={1}
+            disabled={isLoading}
             style={{
               flex: 1, background: "transparent", border: "none", outline: "none",
               resize: "none", fontSize: "0.75rem", lineHeight: 1.5,
-              color: dark ? "#fff" : "#000", fontFamily: "inherit",
+              color: dark ? (isLoading ? "rgba(255,255,255,0.3)" : "#fff") : (isLoading ? "rgba(0,0,0,0.3)" : "#000"),
+              fontFamily: "inherit",
               maxHeight: 80, overflowY: "auto", scrollbarWidth: "none",
               padding: 0, margin: 0, alignSelf: "center", minHeight: "1.125rem",
+              cursor: isLoading ? "not-allowed" : "text",
             }}
             onInput={e => {
               const el = e.target as HTMLTextAreaElement;
@@ -952,15 +969,15 @@ const NewsPage = () => {
       >
         {ALL_FILTERS.map(cat => {
           const meta = CATEGORY_META[cat], active = filter === cat;
-          const color = meta ? catColor(meta, theme) : (theme === "dark" ? "#3b9eff" : "#1a6fd4");
+          const dark = theme === "dark";
           return (
             <button key={cat} onClick={() => setFilter(cat)} style={{
               display: "inline-flex", alignItems: "center", gap: "0.25rem",
               fontSize: "0.68rem", fontWeight: 600, padding: "0.22rem 0.7rem",
               borderRadius: 999, cursor: "pointer", flexShrink: 0,
-              border: `1px solid ${active ? color + "99" : theme === "dark" ? "#333" : "#ccc"}`,
-              color: active ? color : theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.55)",
-              background: active ? color + (theme === "dark" ? "18" : "12") : "transparent",
+              border: `1px solid ${active ? (dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.3)") : (dark ? "#333" : "#ccc")}`,
+              color: active ? (dark ? "#fff" : "#000") : (dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)"),
+              background: active ? (dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.07)") : "transparent",
               transition: "all 0.12s",
             }}>
               {meta?.Icon && <meta.Icon size={9} />}{cat}
@@ -1048,6 +1065,7 @@ const NewsPage = () => {
               theme={theme}
               pinnedArticles={pinnedArticles}
               onRemovePin={handleRemovePin}
+              onClearPins={() => setPinnedArticles([])}
               onClose={() => setChatOpen(false)}
             />
           </div>
