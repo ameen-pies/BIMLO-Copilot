@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
   Radio, Cable, Scale, HardHat, Newspaper, Sun, Moon, Loader2,
-  RefreshCcw, X, Sparkles, MessageSquare,
+  RefreshCcw, X, MessageSquare,
 } from "lucide-react";
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -13,15 +13,21 @@ const PAGE_SIZE = 10;
 
 // ── Category config ─────────────────────────────────────────────────────────
 
-const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
-  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff" },
-  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399" },
-  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24" },
-  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa" },
-  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8" },
+const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; lightColor: string }> = {
+  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
+  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
+  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
+  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
+  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
 };
 
-const ALL_FILTERS = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
+// Returns the right color variant based on theme — darker on light bg for contrast
+function catColor(meta: typeof CATEGORY_META[string], theme: "light" | "dark") {
+  return theme === "dark" ? meta.color : meta.lightColor;
+}
+
+const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
+const ALL_FILTERS = CATEGORIES;
 
 const FALLBACK_GRADIENTS: Record<string, string> = {
   "5G":           "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
@@ -96,6 +102,7 @@ interface PinnedArticle {
   category: string;
   source: string;
   aiImpact?: string;
+  imageUrl?: string | null;
 }
 
 interface ChatMessage {
@@ -381,20 +388,13 @@ function NewsChatPanel({
 
   return (
     <div style={{
-      width: 350,
-      flexShrink: 0,
+      width: "100%",
+      flex: 1,
       display: "flex",
       flexDirection: "column",
-      height: "calc(100vh - 5rem)",
-      position: "sticky",
-      top: "2rem",
-      borderRadius: 18,
+      height: "100%",
       overflow: "hidden",
       background: dark ? "#0c0d18" : "#f0f1f8",
-      border: `1px solid ${dark ? "rgba(59,158,255,0.13)" : "rgba(59,158,255,0.2)"}`,
-      boxShadow: dark
-        ? "0 0 0 1px rgba(59,158,255,0.05), 0 32px 80px rgba(0,0,0,0.6)"
-        : "0 8px 40px rgba(0,0,0,0.1)",
     }}>
 
       {/* ── Panel header ──────────────────────────────────────────────── */}
@@ -415,7 +415,7 @@ function NewsChatPanel({
               boxShadow: "0 4px 12px rgba(29,108,246,0.35)",
               flexShrink: 0,
             }}>
-              <Sparkles size={14} color="#fff" />
+              <img src="/favicon.svg" alt="" style={{ width: 16, height: 16, objectFit: "contain", filter: "brightness(0) invert(1)" }} />
             </div>
             <div>
               <div style={{ fontSize: "0.8rem", fontWeight: 700, color: dark ? "#fff" : "#111", lineHeight: 1.2 }}>Ask Bimlo</div>
@@ -434,42 +434,7 @@ function NewsChatPanel({
           ><X size={12} /></button>
         </div>
 
-        {/* Pinned article chips */}
-        <div style={{ marginTop: "0.55rem", minHeight: 20 }}>
-          {pinnedArticles.length === 0 ? (
-            <span style={{ fontSize: "0.59rem", color: dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.3)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
-              <MessageSquare size={9} />
-              Tap <MessageSquare size={9} /> on a card to add context
-            </span>
-          ) : (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.28rem" }}>
-              {pinnedArticles.map(a => {
-                const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
-                return (
-                  <span
-                    key={a.id}
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: "0.22rem",
-                      fontSize: "0.58rem", fontWeight: 600,
-                      color: m.color,
-                      background: m.color + "18",
-                      border: `1px solid ${m.color}40`,
-                      borderRadius: 999,
-                      padding: "0.14rem 0.35rem 0.14rem 0.45rem",
-                      maxWidth: 148,
-                    }}
-                  >
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 110 }}>{a.title}</span>
-                    <button
-                      onClick={() => onRemovePin(a.id)}
-                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: m.color, display: "flex", lineHeight: 1, flexShrink: 0 }}
-                    ><X size={8} /></button>
-                  </span>
-                );
-              })}
-            </div>
-          )}
-        </div>
+
       </div>
 
       {/* ── Messages ──────────────────────────────────────────────────── */}
@@ -487,11 +452,12 @@ function NewsChatPanel({
               <div style={{ display: "flex", flexWrap: "wrap", gap: "0.22rem", justifyContent: "flex-end", maxWidth: "90%" }}>
                 {msg.pinnedArticles.map(a => {
                   const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
+                  const c = catColor(m, theme);
                   return (
                     <span key={a.id} style={{
                       fontSize: "0.54rem", fontWeight: 600,
-                      color: m.color, background: m.color + "15",
-                      border: `1px solid ${m.color}30`, borderRadius: 999,
+                      color: c, background: c + (dark ? "15" : "12"),
+                      border: `1px solid ${c}45`, borderRadius: 999,
                       padding: "0.1rem 0.38rem",
                       maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                     }}>{a.title}</span>
@@ -532,16 +498,58 @@ function NewsChatPanel({
 
       {/* ── Input ─────────────────────────────────────────────────────── */}
       <div style={{
-        padding: "0.6rem 0.7rem 0.7rem",
+        padding: "0.5rem 0.7rem 0.6rem",
         borderTop: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"}`,
         background: dark ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.6)",
         flexShrink: 0,
       }}>
+        {/* Pinned article chips with thumbnails — horizontal scroll */}
+        {pinnedArticles.length > 0 && (
+          <div className="pinned-chips-scroll" style={{
+            display: "flex", flexWrap: "nowrap", gap: "0.3rem", marginBottom: "0.4rem",
+            overflowX: "auto", paddingBottom: "4px",
+            scrollbarWidth: "thin",
+            scrollbarColor: dark ? "rgba(255,255,255,0.22) transparent" : "rgba(0,0,0,0.18) transparent",
+          }}>
+            {pinnedArticles.map(a => {
+              const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
+              const c = catColor(m, theme);
+              return (
+                <span key={a.id} style={{
+                  display: "inline-flex", alignItems: "center", gap: "0.3rem",
+                  fontSize: "0.6rem", fontWeight: 600, color: c,
+                  background: dark ? "rgba(0,0,0,0.45)" : "rgba(255,255,255,0.92)",
+                  border: `1px solid ${c}55`, borderRadius: 7,
+                  padding: "0.15rem 0.35rem 0.15rem 0.15rem",
+                  maxWidth: 200, backdropFilter: "blur(4px)", flexShrink: 0,
+                }}>
+                  <span style={{
+                    width: 28, height: 20, borderRadius: 4, overflow: "hidden",
+                    flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    background: c + "25", position: "relative",
+                  }}>
+                    {a.imageUrl ? (
+                      <img src={a.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                        onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                    ) : (
+                      <m.Icon size={10} color={c} />
+                    )}
+                  </span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{a.title}</span>
+                  <button onClick={() => onRemovePin(a.id)}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: c, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
+                  ><X size={9} /></button>
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div style={{
-          display: "flex", alignItems: "flex-end", gap: "0.45rem",
+          display: "flex", alignItems: "center", gap: "0.45rem",
           background: dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)",
           border: `1px solid ${dark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.09)"}`,
-          borderRadius: 12, padding: "0.48rem 0.48rem 0.48rem 0.7rem",
+          borderRadius: 12, padding: "0.45rem 0.45rem 0.45rem 0.7rem",
+          minHeight: 42,
         }}>
           <textarea
             ref={inputRef}
@@ -556,17 +564,18 @@ function NewsChatPanel({
             rows={1}
             style={{
               flex: 1, background: "transparent", border: "none", outline: "none",
-              resize: "none", fontSize: "0.73rem", lineHeight: 1.5,
+              resize: "none", fontSize: "0.75rem", lineHeight: 1.5,
               color: dark ? "#fff" : "#000", fontFamily: "inherit",
-              maxHeight: 76, overflowY: "auto", scrollbarWidth: "none",
+              maxHeight: 80, overflowY: "auto", scrollbarWidth: "none",
+              padding: 0, margin: 0, alignSelf: "center", minHeight: "1.125rem",
             }}
             onInput={e => {
               const el = e.target as HTMLTextAreaElement;
               el.style.height = "auto";
-              el.style.height = Math.min(el.scrollHeight, 76) + "px";
+              el.style.height = Math.min(el.scrollHeight, 80) + "px";
             }}
           />
-          {/* Ask Bimlo — icon-only gradient button */}
+          {/* Send button */}
           <button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
@@ -585,7 +594,7 @@ function NewsChatPanel({
           >
             {isLoading
               ? <Loader2 size={13} color="rgba(255,255,255,0.6)" style={{ animation: "spin 1s linear infinite" }} />
-              : <Sparkles size={13} color={input.trim() ? "#fff" : dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.3)"} />
+              : <img src="/favicon.svg" alt="" style={{ width: 13, height: 13, objectFit: "contain", filter: input.trim() ? "brightness(0) invert(1)" : dark ? "brightness(0) invert(0.35)" : "brightness(0) opacity(0.3)" }} />
             }
           </button>
         </div>
@@ -604,14 +613,40 @@ function NewsChatPanel({
 
 const NewsPage = () => {
   const navigate = useNavigate();
+  const navbarRef = useRef<HTMLDivElement>(null);
+  const [navbarHeight, setNavbarHeight] = useState(108);
+
+  useEffect(() => {
+    const el = navbarRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setNavbarHeight(el.offsetHeight));
+    ro.observe(el);
+    setNavbarHeight(el.offsetHeight);
+    return () => ro.disconnect();
+  }, []);
 
   const [theme, setTheme] = useState<"light" | "dark">(() =>
     (typeof window !== "undefined" && (localStorage.getItem("theme") as "light" | "dark")) || "dark"
   );
   const toggleTheme = () => {
     const t = theme === "light" ? "dark" : "light";
-    setTheme(t); localStorage.setItem("theme", t);
+    setTheme(t);
+    localStorage.setItem("theme", t);
+    if (t === "dark") {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
   };
+
+  // Sync on mount
+  useEffect(() => {
+    if (theme === "dark") {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+  }, []);
 
   const [filter, setFilter]               = useState<string>("All");
   const [allArticles, setAllArticles]     = useState<any[]>([]);
@@ -637,7 +672,7 @@ const NewsPage = () => {
     const id = item.id ?? item.articleUrl ?? item.title ?? String(Math.random());
     setPinnedArticles(prev => {
       if (prev.find(a => a.id === id)) return prev.filter(a => a.id !== id);
-      return [...prev.slice(-4), { id, title: item.title, category: item.category, source: item.source, aiImpact: item.aiImpact }];
+      return [...prev.slice(-4), { id, title: item.title, category: item.category, source: item.source, aiImpact: item.aiImpact, imageUrl: item.imageUrl ?? null }];
     });
     setChatOpen(true);
   }, []);
@@ -797,7 +832,6 @@ const NewsPage = () => {
     <div style={{
       minHeight: "100vh",
       background: theme === "dark" ? "#07080f" : "#f5f4fb",
-      padding: "2rem 2.5rem 3rem",
       transition: "background 0.15s ease",
       color: theme === "dark" ? "#ffffff" : "#000000",
     }}>
@@ -813,10 +847,32 @@ const NewsPage = () => {
           .news-grid { grid-template-columns: 1fr !important; grid-auto-rows: 200px !important; }
           .news-grid > * { grid-column: span 1 !important; grid-row: span 1 !important; }
         }
+        .pinned-chips-scroll::-webkit-scrollbar { height: 4px; }
+        .pinned-chips-scroll::-webkit-scrollbar-track { background: transparent; }
+        .pinned-chips-scroll::-webkit-scrollbar-thumb { background: ${theme === "dark" ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.18)"}; border-radius: 999px; }
+        .pinned-chips-scroll::-webkit-scrollbar-thumb:hover { background: ${theme === "dark" ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.28)"}; }
+        .filter-pills-scroll::-webkit-scrollbar { height: 3px; }
+        .filter-pills-scroll::-webkit-scrollbar-track { background: transparent; }
+        .filter-pills-scroll::-webkit-scrollbar-thumb { background: ${theme === "dark" ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)"}; border-radius: 999px; }
+        .filter-pills-scroll::-webkit-scrollbar-thumb:hover { background: ${theme === "dark" ? "rgba(255,255,255,0.32)" : "rgba(0,0,0,0.32)"}; }
+        html, body { scrollbar-width: thin; scrollbar-color: ${theme === "dark" ? "rgba(255,255,255,0.12) transparent" : "rgba(0,0,0,0.14) transparent"}; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${theme === "dark" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.14)"}; border-radius: 999px; }
+        ::-webkit-scrollbar-thumb:hover { background: ${theme === "dark" ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.24)"}; }
       `}</style>
 
+      {/* ── Sticky Navbar ─────────────────────────────────────────────── */}
+      <div ref={navbarRef} style={{
+        position: "sticky", top: 0, zIndex: 50,
+        background: theme === "dark" ? "rgba(7,8,15,0.92)" : "rgba(245,244,251,0.92)",
+        backdropFilter: "blur(12px)",
+        borderBottom: `1px solid ${theme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"}`,
+        padding: "0.9rem 2.5rem 0",
+      }}>
+
       {/* ── Header ────────────────────────────────────────────────────── */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.6rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.9rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
           <button onClick={() => navigate(-1)} style={{ display: "inline-flex", alignItems: "center", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", background: "none", border: "none", cursor: "pointer", padding: 0, opacity: 0.6 }}>
             <ArrowLeft size={15} />
@@ -852,7 +908,7 @@ const NewsPage = () => {
               boxShadow: chatOpen ? "0 4px 16px rgba(29,108,246,0.3)" : "none",
             }}
           >
-            <Sparkles size={13} />
+            <img src="/favicon.svg" alt="" style={{ width: 13, height: 13, objectFit: "contain", filter: chatOpen ? "brightness(0) invert(1)" : theme === "dark" ? "brightness(0) invert(0.6)" : "brightness(0) opacity(0.5)" }} />
             {chatOpen ? "Close" : "Ask Bimlo"}
             {pinnedArticles.length > 0 && !chatOpen && (
               <span style={{
@@ -866,42 +922,59 @@ const NewsPage = () => {
           <button onClick={handleRefresh} disabled={isRefreshing || fetchingMore} title="Refresh news" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: theme === "dark" ? "#94a3b8" : "#666", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
             <RefreshCw size={16} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
           </button>
-          <button onClick={toggleTheme} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: "pointer", transition: "all 0.15s", color: theme === "dark" ? "#fbbf24" : "#3b9eff" }} title="Toggle theme">
+          <button onClick={toggleTheme} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: "pointer", transition: "all 0.15s", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)" }} title="Toggle theme">
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
       </div>
 
-      {/* ── Banners ───────────────────────────────────────────────────── */}
+      {/* ── Banners inside navbar ─────────────────────────────────────── */}
       {newRunAvailable && (
-        <div onClick={resetAndReload} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.55rem 1rem", marginBottom: "1rem", borderRadius: 10, cursor: "pointer", background: theme === "dark" ? "#0d2a1f" : "#d1fae5", border: `1px solid ${theme === "dark" ? "#1a5c3a" : "#6ee7b7"}`, fontSize: "0.75rem", fontWeight: 600, color: theme === "dark" ? "#34d399" : "#065f46" }}>
+        <div onClick={resetAndReload} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", padding: "0.45rem 1rem", marginBottom: "0.6rem", borderRadius: 10, cursor: "pointer", background: theme === "dark" ? "#0d2a1f" : "#d1fae5", border: `1px solid ${theme === "dark" ? "#1a5c3a" : "#6ee7b7"}`, fontSize: "0.75rem", fontWeight: 600, color: theme === "dark" ? "#34d399" : "#065f46" }}>
           <RefreshCcw size={13} /> Fresh articles are ready — click to load them
         </div>
       )}
       {isRefreshing && (
-        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.68rem", fontWeight: 500, marginBottom: "0.8rem", color: theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.38)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.68rem", fontWeight: 500, marginBottom: "0.6rem", color: theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.38)" }}>
           <Loader2 size={11} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
           Running Industry Analyst Agent… this takes a few minutes
         </div>
       )}
 
       {/* ── Filter pills ─────────────────────────────────────────────── */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.38rem", marginBottom: "1.35rem" }}>
+      <div style={{
+        display: "flex", gap: "0.38rem", paddingBottom: "0.6rem",
+        overflowX: "auto", flexShrink: 0,
+        scrollbarWidth: "thin",
+        scrollbarColor: theme === "dark" ? "rgba(255,255,255,0.18) transparent" : "rgba(0,0,0,0.18) transparent",
+      }}
+        className="filter-pills-scroll"
+      >
         {ALL_FILTERS.map(cat => {
-          const meta = CATEGORY_META[cat], active = filter === cat, color = meta?.color ?? "#3b9eff";
+          const meta = CATEGORY_META[cat], active = filter === cat;
+          const color = meta ? catColor(meta, theme) : (theme === "dark" ? "#3b9eff" : "#1a6fd4");
           return (
-            <button key={cat} onClick={() => setFilter(cat)} style={{ display: "inline-flex", alignItems: "center", gap: "0.25rem", fontSize: "0.68rem", fontWeight: 600, padding: "0.22rem 0.7rem", borderRadius: 999, cursor: "pointer", border: `1px solid ${active ? color + "88" : theme === "dark" ? "#333" : "#ddd"}`, color: active ? color : theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", background: active ? color + "18" : "transparent", transition: "all 0.12s" }}>
+            <button key={cat} onClick={() => setFilter(cat)} style={{
+              display: "inline-flex", alignItems: "center", gap: "0.25rem",
+              fontSize: "0.68rem", fontWeight: 600, padding: "0.22rem 0.7rem",
+              borderRadius: 999, cursor: "pointer", flexShrink: 0,
+              border: `1px solid ${active ? color + "99" : theme === "dark" ? "#333" : "#ccc"}`,
+              color: active ? color : theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.55)",
+              background: active ? color + (theme === "dark" ? "18" : "12") : "transparent",
+              transition: "all 0.12s",
+            }}>
               {meta?.Icon && <meta.Icon size={9} />}{cat}
             </button>
           );
         })}
       </div>
+      </div>{/* end sticky navbar */}
 
       {/* ── Main layout: grid + chat panel ───────────────────────────── */}
-      <div style={{ display: "flex", gap: "1.2rem", alignItems: "flex-start" }}>
+      <div style={{ display: "flex", gap: "1.2rem", alignItems: "flex-start", padding: "1.5rem 2.5rem 3rem" }}>
 
         {/* Grid */}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, paddingRight: chatOpen ? 384 : 0, transition: "padding-right 0.28s cubic-bezier(0.4,0,0.2,1)" }}>
           {isInitialLoading ? (
             <div className="news-grid" style={gridStyle}>
               {SIZE_PATTERN.map((size, i) => <SkeletonCard key={i} theme={theme} size={size} />)}
@@ -950,25 +1023,35 @@ const NewsPage = () => {
           )}
         </div>
 
-        {/* Chat panel — slides in from right */}
-        <div style={{
-          width: chatOpen ? 350 : 0,
-          overflow: "hidden",
-          opacity: chatOpen ? 1 : 0,
-          transform: chatOpen ? "translateX(0)" : "translateX(20px)",
-          transition: "width 0.32s cubic-bezier(0.4,0,0.2,1), opacity 0.25s ease, transform 0.25s ease",
-          flexShrink: 0,
-          pointerEvents: chatOpen ? "auto" : "none",
-        }}>
-          {chatOpen && (
+        {/* Chat panel — fixed, slides in from right, below navbar */}
+        {chatOpen && (
+          <div style={{
+            position: "fixed",
+            top: navbarHeight + 12,
+            right: 12,
+            bottom: 12,
+            width: 360,
+            zIndex: 40,
+            display: "flex",
+            flexDirection: "column",
+            background: theme === "dark" ? "#0c0d18" : "#f0f1f8",
+            border: `1px solid ${theme === "dark" ? "rgba(59,158,255,0.15)" : "rgba(59,158,255,0.22)"}`,
+            borderRadius: 18,
+            boxShadow: theme === "dark"
+              ? "0 0 0 1px rgba(59,158,255,0.04), 0 24px 64px rgba(0,0,0,0.65)"
+              : "0 8px 40px rgba(0,0,0,0.13)",
+            overflow: "hidden",
+            animation: "slideInRight 0.28s cubic-bezier(0.4,0,0.2,1)",
+          }}>
+            <style>{`@keyframes slideInRight { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }`}</style>
             <NewsChatPanel
               theme={theme}
               pinnedArticles={pinnedArticles}
               onRemovePin={handleRemovePin}
               onClose={() => setChatOpen(false)}
             />
-          )}
-        </div>
+          </div>
+        )}
 
       </div>
     </div>

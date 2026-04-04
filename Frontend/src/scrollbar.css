@@ -1,34 +1,80 @@
 /* Custom Scrollbar Styles */
 
-/* For Webkit browsers (Chrome, Safari, Edge) */
+/* ── Webkit (Chrome, Safari, Edge) ─────────────────────────────────────── */
+
 .scrollbar-thin::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .scrollbar-thin::-webkit-scrollbar-track {
   background: transparent;
 }
 
+/* Light mode thumb */
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground) / 0.2);
-  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 999px;
 }
-
 .scrollbar-thin:hover::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted-foreground) / 0.4);
+  background: rgba(0, 0, 0, 0.28);
 }
-
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.5);
+  background: rgba(0, 0, 0, 0.35);
 }
 
-/* For Firefox */
+/* Dark mode — .dark on <html> */
+.dark .scrollbar-thin::-webkit-scrollbar-thumb,
+.dark.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+.dark .scrollbar-thin:hover::-webkit-scrollbar-thumb,
+.dark.scrollbar-thin:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+}
+.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover,
+.dark.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.30);
+}
+
+/* ── Global page scrollbar ──────────────────────────────────────────────── */
+
+html::-webkit-scrollbar { width: 6px; }
+html::-webkit-scrollbar-track { background: transparent; }
+html::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.15); border-radius: 999px; }
+html::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28); }
+
+html.dark::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); }
+html.dark::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.22); }
+
+/* ── Firefox ────────────────────────────────────────────────────────────── */
+
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+.scrollbar-thin:hover {
+  scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
 }
 
-.scrollbar-thin:hover {
-  scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+.dark .scrollbar-thin,
+.dark.scrollbar-thin {
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
+.dark .scrollbar-thin:hover,
+.dark.scrollbar-thin:hover {
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+html {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+html.dark {
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+/* ── Hide scrollbar utility (chip rows etc.) ────────────────────────────── */
+.chips-scroll::-webkit-scrollbar { display: none; }
+.chips-scroll { scrollbar-width: none; -ms-overflow-style: none; }
