@@ -4,6 +4,7 @@ import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
   Radio, Cable, Scale, HardHat, Newspaper, Sun, Moon, Loader2,
   RefreshCcw, X, MessageSquare, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw,
+  Box, Layers, BrainCircuit,
 } from "lucide-react";
 import TypewriterText from "@/components/TypewriterText";
 
@@ -15,11 +16,14 @@ const PAGE_SIZE = 10;
 // ── Category config ─────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; lightColor: string }> = {
-  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
-  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
-  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
-  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
-  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
+  "5G":             { label: "5G",             Icon: Radio,         color: "#60a5fa", lightColor: "#2563eb" },
+  "Fiber":          { label: "Fiber",          Icon: Cable,         color: "#93c5fd", lightColor: "#1d4ed8" },
+  "Regulation":     { label: "Regulation",     Icon: Scale,         color: "#bfdbfe", lightColor: "#1e40af" },
+  "Construction":   { label: "Construction",   Icon: HardHat,       color: "#7dd3fc", lightColor: "#0369a1" },
+  "General":        { label: "General",        Icon: Newspaper,     color: "#94a3b8", lightColor: "#475569" },
+  "BIM":            { label: "BIM",            Icon: Box,           color: "#38bdf8", lightColor: "#0284c7" },
+  "Digital Twin":   { label: "Digital Twin",   Icon: Layers,        color: "#818cf8", lightColor: "#4338ca" },
+  "AI Construction":{ label: "AI",             Icon: BrainCircuit,  color: "#a78bfa", lightColor: "#6d28d9" },
 };
 
 // Returns the right color variant based on theme — darker on light bg for contrast
@@ -27,15 +31,18 @@ function catColor(meta: typeof CATEGORY_META[string], theme: "light" | "dark") {
   return theme === "dark" ? meta.color : meta.lightColor;
 }
 
-const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
+const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "BIM", "Digital Twin", "AI Construction", "General"] as const;
 const ALL_FILTERS = CATEGORIES;
 
 const FALLBACK_GRADIENTS: Record<string, string> = {
-  "5G":           "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
-  "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
-  "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
-  "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
-  "General":      "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+  "5G":             "linear-gradient(135deg, #0f1a2e 0%, #1a3050 100%)",
+  "Fiber":          "linear-gradient(135deg, #0a1628 0%, #162540 100%)",
+  "Regulation":     "linear-gradient(135deg, #0d1e36 0%, #1a2e4a 100%)",
+  "Construction":   "linear-gradient(135deg, #0b1a2c 0%, #142540 100%)",
+  "General":        "linear-gradient(135deg, #111827 0%, #1f2937 100%)",
+  "BIM":            "linear-gradient(135deg, #0c1f2e 0%, #0f3a52 100%)",
+  "Digital Twin":   "linear-gradient(135deg, #0f0c2e 0%, #1a1552 100%)",
+  "AI Construction":"linear-gradient(135deg, #160c2e 0%, #2a1050 100%)",
 };
 
 // ── Card size variants ──────────────────────────────────────────────────────

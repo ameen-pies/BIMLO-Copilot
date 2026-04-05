@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp } from "lucide-react";
+import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
 import RotatingWords from "@/components/RotatingWords";
@@ -20,11 +20,14 @@ const fadeUp = {
 };
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; gradient: string }> = {
-  "5G":           { label: "5G",           Icon: Radio,     color: "#60a5fa", gradient: "linear-gradient(135deg,#0f1a2e,#1a3050)" },
-  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#93c5fd", gradient: "linear-gradient(135deg,#0a1628,#162540)" },
-  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#bfdbfe", gradient: "linear-gradient(135deg,#0d1e36,#1a2e4a)" },
-  "Construction": { label: "Construction", Icon: HardHat,   color: "#7dd3fc", gradient: "linear-gradient(135deg,#0b1a2c,#142540)" },
-  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8", gradient: "linear-gradient(135deg,#111827,#1f2937)" },
+  "5G":             { label: "5G",           Icon: Radio,        color: "#60a5fa", gradient: "linear-gradient(135deg,#0f1a2e,#1a3050)" },
+  "Fiber":          { label: "Fiber",        Icon: Cable,        color: "#93c5fd", gradient: "linear-gradient(135deg,#0a1628,#162540)" },
+  "Regulation":     { label: "Regulation",   Icon: Scale,        color: "#bfdbfe", gradient: "linear-gradient(135deg,#0d1e36,#1a2e4a)" },
+  "Construction":   { label: "Construction", Icon: HardHat,      color: "#7dd3fc", gradient: "linear-gradient(135deg,#0b1a2c,#142540)" },
+  "General":        { label: "General",      Icon: Newspaper,    color: "#94a3b8", gradient: "linear-gradient(135deg,#111827,#1f2937)" },
+  "BIM":            { label: "BIM",          Icon: Box,          color: "#38bdf8", gradient: "linear-gradient(135deg,#0c1f2e,#0f3a52)" },
+  "Digital Twin":   { label: "Digital Twin", Icon: Layers,       color: "#818cf8", gradient: "linear-gradient(135deg,#0f0c2e,#1a1552)" },
+  "AI Construction":{ label: "AI",           Icon: BrainCircuit, color: "#a78bfa", gradient: "linear-gradient(135deg,#160c2e,#2a1050)" },
 };
 
 function timeAgo(iso: string) {
@@ -150,6 +153,8 @@ const TrendingSection = () => {
           <div
             ref={trackRef}
             className="ticker-track"
+            onMouseEnter={() => { if (trackRef.current) trackRef.current.style.animationPlayState = "paused"; }}
+            onMouseLeave={() => { if (trackRef.current) trackRef.current.style.animationPlayState = "running"; }}
           >
             {[...articles, ...articles].map((a, i) => (
               <TickerCard key={`${a.id}-${i}`} article={a} />
@@ -179,8 +184,39 @@ const TrendingSection = () => {
   );
 };
 
-// ── Static styles injected once (outside component to avoid re-render cost) ───
-const STATIC_STYLES = `
+// ── Main page ────────────────────────────────────────────────────────────────
+const Index = () => {
+  const [showScrollArrow, setShowScrollArrow] = useState(true);
+  const [isDark, setIsDark] = useState(() =>
+    document.documentElement.classList.contains("dark")
+  );
+
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setIsDark(document.documentElement.classList.contains("dark"))
+    );
+    observer.observe(document.documentElement, { attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const h = () => setShowScrollArrow(window.scrollY < 100);
+    window.addEventListener("scroll", h);
+    return () => window.removeEventListener("scroll", h);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.style.scrollBehavior = "smooth";
+    document.documentElement.classList.add("scrollbar-thin");
+    return () => {
+      document.documentElement.style.scrollBehavior = "auto";
+      document.documentElement.classList.remove("scrollbar-thin");
+    };
+  }, []);
+
+  return (
+    <>
+      <style>{`
         @keyframes bgFadeIn    { from{opacity:0} to{opacity:1} }
         @keyframes liquidFadeIn{ from{opacity:0} to{opacity:0.5} }
         .animate-fade-in { animation: liquidFadeIn 1.2s ease-out 0.3s both; }
@@ -206,11 +242,13 @@ const STATIC_STYLES = `
           border-radius:999px; padding:0.25rem 0.75rem; width:fit-content;
         }
 
+        /* ── Ensure all page content sits above BackgroundManager ── */
         .content-above-bg {
           position: relative;
           z-index: 1;
         }
 
+        /* ── Trending section ── */
         .trending-section {
           padding: 72px 0 96px;
           overflow: hidden;
@@ -245,6 +283,7 @@ const STATIC_STYLES = `
           margin: 0;
         }
 
+        /* ticker */
         .ticker-wrap {
           -webkit-mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
           mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
@@ -261,13 +300,9 @@ const STATIC_STYLES = `
           padding: 12px 0 20px;
           animation: slideLeft 40s linear infinite;
           will-change: transform;
-          transition: animation-play-state 0.6s ease;
-        }
-        .ticker-track:hover,
-        .ticker-track.paused {
-          animation-play-state: paused;
         }
 
+        /* card */
         .ticker-card {
           flex-shrink: 0;
           width: 260px;
@@ -290,6 +325,7 @@ const STATIC_STYLES = `
           border-color: hsl(var(--primary)/0.35);
         }
 
+        /* image area */
         .ticker-card-img {
           position: relative;
           width: 100%;
@@ -323,6 +359,7 @@ const STATIC_STYLES = `
           line-height: 1;
         }
 
+        /* body */
         .ticker-card-body {
           padding: 12px 14px 14px;
           display: flex;
@@ -350,6 +387,7 @@ const STATIC_STYLES = `
         .ticker-card-source { font-size: 0.67rem; color: hsl(var(--muted-foreground)); font-weight: 500; }
         .ticker-card-time   { font-size: 0.64rem; color: hsl(var(--muted-foreground)); white-space: nowrap; }
 
+        /* skeleton */
         @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:.75} }
         .ticker-skeleton-row {
           display: flex;
@@ -378,41 +416,7 @@ const STATIC_STYLES = `
           justify-content: center;
           margin-top: 44px;
         }
-`;
-
-// ── Main page ────────────────────────────────────────────────────────────────
-const Index = () => {
-  const [showScrollArrow, setShowScrollArrow] = useState(true);
-  const [isDark, setIsDark] = useState(() =>
-    document.documentElement.classList.contains("dark")
-  );
-
-  useEffect(() => {
-    const observer = new MutationObserver(() =>
-      setIsDark(document.documentElement.classList.contains("dark"))
-    );
-    observer.observe(document.documentElement, { attributeFilter: ["class"] });
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const h = () => setShowScrollArrow(window.scrollY < 100);
-    window.addEventListener("scroll", h);
-    return () => window.removeEventListener("scroll", h);
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.style.scrollBehavior = "smooth";
-    document.documentElement.classList.add("scrollbar-thin");
-    return () => {
-      document.documentElement.style.scrollBehavior = "auto";
-      document.documentElement.classList.remove("scrollbar-thin");
-    };
-  }, []);
-
-  return (
-    <>
-      <style>{STATIC_STYLES}</style>
+      `}</style>
 
       <div
         className="min-h-screen bg-background overflow-x-hidden"

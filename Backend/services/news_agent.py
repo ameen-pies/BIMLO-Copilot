@@ -57,6 +57,13 @@ PAGE_0_QUERIES = [
     {"query": "broadband infrastructure build",      "category": "Construction"},
     {"query": "telecom carrier ISP news 2025",       "category": "General"},
     {"query": "telecom industry quarterly results",  "category": "General"},
+    # ── Bimlo core business ───────────────────────────────────────────────────
+    {"query": "BIM building information modeling 2025",        "category": "BIM"},
+    {"query": "scan to BIM digital twin construction",         "category": "BIM"},
+    {"query": "digital twin infrastructure 2025",              "category": "Digital Twin"},
+    {"query": "predictive maintenance digital twin AI",        "category": "Digital Twin"},
+    {"query": "artificial intelligence construction industry", "category": "AI Construction"},
+    {"query": "AI building infrastructure optimization 2025",  "category": "AI Construction"},
 ]
 
 # Each sub-list = one "infinite scroll page" of fresh queries
@@ -72,6 +79,12 @@ EXTENDED_QUERY_PAGES = [
         {"query": "data center power infrastructure",    "category": "Construction"},
         {"query": "Verizon AT&T T-Mobile news",          "category": "General"},
         {"query": "satellite internet Starlink LEO",     "category": "General"},
+        {"query": "BIM 4D 5D project planning 2025",     "category": "BIM"},
+        {"query": "Revit IFC BIM interoperability",      "category": "BIM"},
+        {"query": "digital twin smart city IoT",         "category": "Digital Twin"},
+        {"query": "industry 4.0 digital twin factory",  "category": "Digital Twin"},
+        {"query": "generative AI architecture design",   "category": "AI Construction"},
+        {"query": "AI structural engineering automation","category": "AI Construction"},
     ],
     [
         {"query": "5G standalone core network",          "category": "5G"},
@@ -84,6 +97,12 @@ EXTENDED_QUERY_PAGES = [
         {"query": "underground conduit fiber dig",       "category": "Construction"},
         {"query": "MVNO wholesale agreement 2025",       "category": "General"},
         {"query": "telecom workforce layoff hiring",     "category": "General"},
+        {"query": "BIM mandate government infrastructure","category": "BIM"},
+        {"query": "point cloud scan to BIM software",   "category": "BIM"},
+        {"query": "digital twin energy building performance","category": "Digital Twin"},
+        {"query": "real-time digital twin simulation 2025","category": "Digital Twin"},
+        {"query": "machine learning site planning construction","category": "AI Construction"},
+        {"query": "computer vision construction safety AI",  "category": "AI Construction"},
     ],
     [
         {"query": "C-band 5G spectrum deployment",       "category": "5G"},
@@ -96,6 +115,12 @@ EXTENDED_QUERY_PAGES = [
         {"query": "fiber aerial vs underground cost",    "category": "Construction"},
         {"query": "wholesale bandwidth pricing trend",   "category": "General"},
         {"query": "IoT connectivity smart city 2025",    "category": "General"},
+        {"query": "BIM digital construction twin CDE",   "category": "BIM"},
+        {"query": "BIM coordination clash detection MEP","category": "BIM"},
+        {"query": "digital twin infrastructure lifecycle","category": "Digital Twin"},
+        {"query": "AEC digital twin deployment case study","category": "Digital Twin"},
+        {"query": "AI predictive maintenance building 2025","category": "AI Construction"},
+        {"query": "robotics automation construction site 2025","category": "AI Construction"},
     ],
 ]
 
@@ -299,9 +324,12 @@ def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
 # ── Merged judge + enrich (one LLM call) ──────────────────────────────────────
 
 _JUDGE_ENRICH_SYSTEM = (
-    "You are a senior telecom & infrastructure industry analyst and news editor. "
+    "You are a senior industry analyst and news editor for BIMLO, a company specialising in "
+    "BIM engineering, telecom infrastructure, Digital Twin (DeepTwin), and AI applied to construction. "
     "Given a news article title, snippet, and category, do TWO things in one response:\n"
-    "1. Score its relevance 0.0-1.0 for a telecom/construction professional briefing.\n"
+    "1. Score its relevance 0.0-1.0 for a professional briefing covering: telecom (5G, fiber, towers), "
+    "BIM (Building Information Modeling, Scan-to-BIM, IFC, 4D/5D planning), Digital Twins (predictive maintenance, "
+    "smart buildings, simulation), AI in construction/infrastructure, and regulation/industry news.\n"
     "2. If score >= 0.28, write a polished 2-sentence summary and a 2-sentence analyst insight.\n\n"
     "Reply ONLY with this JSON, no markdown:\n"
     '{"score": 0.85, "raw_summary": "...", "ai_impact": "..."}\n'
