@@ -17,11 +17,14 @@ const PAGE_SIZE = 10;
 // ── Category config ─────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; lightColor: string }> = {
-  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
-  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
-  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
-  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
-  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
+  "5G":             { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
+  "Fiber":          { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
+  "Regulation":     { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
+  "Construction":   { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
+  "General":        { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
+  "BIM":            { label: "BIM",          Icon: Zap,       color: "#f472b6", lightColor: "#be185d" },
+  "Digital Twin":   { label: "Digital Twin", Icon: Sun,       color: "#22d3ee", lightColor: "#0e7490" },
+  "AI Construction":{ label: "AI",           Icon: Zap,       color: "#fb923c", lightColor: "#c2410c" },
 };
 
 // Returns the right color variant based on theme — darker on light bg for contrast
@@ -29,7 +32,7 @@ function catColor(meta: typeof CATEGORY_META[string], theme: "light" | "dark") {
   return theme === "dark" ? meta.color : meta.lightColor;
 }
 
-const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
+const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "General", "BIM", "Digital Twin", "AI Construction"] as const;
 const ALL_FILTERS = CATEGORIES;
 
 const FALLBACK_GRADIENTS: Record<string, string> = {
@@ -37,7 +40,10 @@ const FALLBACK_GRADIENTS: Record<string, string> = {
   "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
   "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
   "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
-  "General":      "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+  "General":        "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+  "BIM":            "linear-gradient(135deg, #2a0a1f 0%, #6d1a4a 100%)",
+  "Digital Twin":   "linear-gradient(135deg, #042a2e 0%, #0a5c6e 100%)",
+  "AI Construction":"linear-gradient(135deg, #2a1200 0%, #7a3500 100%)",
 };
 
 // ── Card size variants ──────────────────────────────────────────────────────
@@ -1055,6 +1061,16 @@ const NewsPage = () => {
                 textColor: "#fff",
                 links: [
                   { label: "Construction", active: filter === "Construction", onSelect: () => setFilter("Construction") },
+                ],
+              },
+              {
+                label: "Advanced",
+                bgColor: dark ? "#1a0a0a" : "#2d0f0f",
+                textColor: "#fff",
+                links: [
+                  { label: "BIM",          active: filter === "BIM",            onSelect: () => setFilter("BIM") },
+                  { label: "Digital Twin", active: filter === "Digital Twin",   onSelect: () => setFilter("Digital Twin") },
+                  { label: "AI",           active: filter === "AI Construction",onSelect: () => setFilter("AI Construction") },
                 ],
               },
             ]}

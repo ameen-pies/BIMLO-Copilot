@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, useState, useEffect } from 'react';
 import { gsap } from 'gsap';
-import { ArrowUpRight } from 'lucide-react';
 import './CardNav.css';
 
 interface NavLink {
@@ -59,56 +58,83 @@ const CardNav = ({
   const resolvedBtnBg     = buttonBgColor ?? (dark ? '#1a1a2e' : '#111');
   const resolvedBtnText   = buttonTextColor ?? '#fff';
 
-  const calculateWidth = () => {
+  // Measure the top bar's natural width without GSAP inline styles
+  const getCollapsedWidth = () => {
+    const navEl = navRef.current;
+    if (!navEl) return 140;
+    const topBar = navEl.querySelector('.card-nav-top') as HTMLElement | null;
+    if (!topBar) return 140;
+    const saved = navEl.style.width;
+    navEl.style.width = 'max-content';
+    const w = Math.ceil(topBar.getBoundingClientRect().width);
+    navEl.style.width = saved;
+    return w;
+  };
+
+  // Measure expanded width by temporarily letting nav shrink-wrap
+  const getExpandedWidth = () => {
     const navEl = navRef.current;
     if (!navEl) return 400;
     const contentEl = navEl.querySelector('.card-nav-content') as HTMLElement | null;
-    const topBar = navEl.querySelector('.card-nav-top') as HTMLElement | null;
-    const topW = topBar?.offsetWidth ?? 120;
-    if (contentEl) {
-      const prev = { vis: contentEl.style.visibility, pe: contentEl.style.pointerEvents, w: contentEl.style.width };
-      contentEl.style.visibility = 'visible';
-      contentEl.style.pointerEvents = 'auto';
-      contentEl.style.width = 'auto';
-      contentEl.offsetWidth;
-      const natural = contentEl.scrollWidth;
-      Object.assign(contentEl.style, { visibility: prev.vis, pointerEvents: prev.pe, width: prev.w });
-      return topW + natural + 8;
-    }
-    return 400;
+    if (!contentEl) return getCollapsedWidth() + 200;
+
+    const savedNavW   = navEl.style.width;
+    const savedNavOvf = navEl.style.overflow;
+    const savedVis    = contentEl.style.visibility;
+    const savedPe     = contentEl.style.pointerEvents;
+    const savedW      = contentEl.style.width;
+
+    navEl.style.width             = 'max-content';
+    navEl.style.overflow          = 'visible';
+    contentEl.style.visibility    = 'visible';
+    contentEl.style.pointerEvents = 'auto';
+    contentEl.style.width         = 'auto';
+    navEl.offsetWidth; // force reflow
+
+    const measured = Math.ceil(navEl.getBoundingClientRect().width);
+
+    navEl.style.width             = savedNavW;
+    navEl.style.overflow          = savedNavOvf;
+    contentEl.style.visibility    = savedVis;
+    contentEl.style.pointerEvents = savedPe;
+    contentEl.style.width         = savedW;
+
+    return measured;
   };
 
-  const createTimeline = () => {
+  const buildTimeline = (resetPositions = true) => {
     const navEl = navRef.current;
     if (!navEl) return null;
-    const topBar = navEl.querySelector('.card-nav-top') as HTMLElement | null;
-    const collapsedW = topBar?.offsetWidth ?? 120;
-    gsap.set(navEl, { width: collapsedW, overflow: 'hidden' });
-    gsap.set(cardsRef.current, { x: 30, opacity: 0 });
+    const collapsedW = getCollapsedWidth();
+    if (resetPositions) {
+      gsap.set(navEl, { width: collapsedW, overflow: 'hidden' });
+      gsap.set(cardsRef.current, { x: 30, opacity: 0 });
+    }
     const tl = gsap.timeline({ paused: true });
-    tl.to(navEl, { width: calculateWidth, duration: 0.4, ease });
-    tl.to(cardsRef.current, { x: 0, opacity: 1, duration: 0.35, ease, stagger: 0.07 }, '-=0.15');
+    tl.to(navEl, { width: () => getExpandedWidth(), duration: 0.4, ease });
+    tl.to(cardsRef.current, { x: 0, opacity: 1, duration: 0.3, ease, stagger: 0.05 }, '-=0.15');
     return tl;
   };
 
+  // Only rebuild timeline when collapsed — prevents jump when filterLabel changes while closing
   useLayoutEffect(() => {
-    const tl = createTimeline();
+    if (isExpanded) return;
+    const tl = buildTimeline();
     tlRef.current = tl;
-    return () => { tl?.kill(); tlRef.current = null; };
+    return () => { tl?.kill(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ease, items, theme]);
+  }, [ease, items, theme, isExpanded]);
 
   useLayoutEffect(() => {
     const handleResize = () => {
-      if (!tlRef.current) return;
       if (isExpanded) {
-        gsap.set(navRef.current, { width: calculateWidth() });
-        tlRef.current.kill();
-        const tl = createTimeline();
+        gsap.set(navRef.current, { width: getExpandedWidth() });
+        tlRef.current?.kill();
+        const tl = buildTimeline(false);
         if (tl) { tl.progress(1); tlRef.current = tl; }
       } else {
-        tlRef.current.kill();
-        const tl = createTimeline();
+        tlRef.current?.kill();
+        const tl = buildTimeline();
         if (tl) tlRef.current = tl;
       }
     };
@@ -117,7 +143,6 @@ const CardNav = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isExpanded]);
 
-  // close on outside click
   useEffect(() => {
     if (!isExpanded) return;
     const handler = (e: MouseEvent) => {
@@ -133,8 +158,7 @@ const CardNav = ({
 
   const toggleMenu = () => {
     if (!isExpanded) {
-      // Build fresh timeline every open — avoids stale state after reverse
-      const tl = createTimeline();
+      const tl = buildTimeline();
       if (!tl) return;
       tlRef.current?.kill();
       tlRef.current = tl;
@@ -148,14 +172,22 @@ const CardNav = ({
     }
   };
 
+  // Select a filter: call onSelect, then close — don't rebuild timeline
+  const handleLinkSelect = (onSelect: () => void) => {
+    onSelect();
+    setIsHamburgerOpen(false);
+    if (tlRef.current) {
+      tlRef.current.eventCallback('onReverseComplete', () => setIsExpanded(false));
+      tlRef.current.reverse();
+    }
+  };
+
   const setCardRef = (i: number) => (el: HTMLDivElement | null) => {
     if (el) cardsRef.current[i] = el;
   };
 
   return (
-    <div
-      className={`card-nav-container ${className}`}
-    >
+    <div className={`card-nav-container ${className}`}>
       <nav
         ref={navRef}
         className={`card-nav ${isExpanded ? 'open' : ''}`}
@@ -204,43 +236,31 @@ const CardNav = ({
           )}
         </div>
 
-        {/* Cards */}
+        {/* Filter links */}
         <div className="card-nav-content" aria-hidden={!isExpanded}>
-          {(items || []).slice(0, 4).map((item, idx) => (
+          {(items || []).map((item, idx) => (
             <div
               key={`${item.label}-${idx}`}
               className="nav-card"
               ref={setCardRef(idx)}
-              style={{ backgroundColor: item.bgColor, color: item.textColor }}
             >
-              <div className="nav-card-label">{item.label}</div>
-              <div className="nav-card-links">
-                {item.links?.map((lnk, i) => (
-                  <a
-                    key={`${lnk.label}-${i}`}
-                    className="nav-card-link"
-                    href={lnk.href ?? '#'}
-                    aria-label={lnk.ariaLabel}
-                    onClick={e => {
-                      if (lnk.onSelect) {
-                        e.preventDefault();
-                        lnk.onSelect();
-                        setIsHamburgerOpen(false);
-                        tlRef.current?.eventCallback('onReverseComplete', () => setIsExpanded(false));
-                        tlRef.current?.reverse();
-                      }
-                    }}
-                    style={{
-                      fontWeight: lnk.active ? 700 : undefined,
-                      textDecoration: lnk.active ? 'underline' : undefined,
-                      textUnderlineOffset: '3px',
-                    }}
-                  >
-                    <ArrowUpRight className="nav-card-link-icon" size={14} aria-hidden="true" />
-                    {lnk.label}
-                  </a>
-                ))}
-              </div>
+              {item.links?.map((lnk, i) => (
+                <a
+                  key={`${lnk.label}-${i}`}
+                  className={`nav-card-link${lnk.active ? ' nav-card-link--active' : ''}`}
+                  href={lnk.href ?? '#'}
+                  aria-label={lnk.ariaLabel}
+                  style={{ color: resolvedMenuColor }}
+                  onClick={e => {
+                    if (lnk.onSelect) {
+                      e.preventDefault();
+                      handleLinkSelect(lnk.onSelect);
+                    }
+                  }}
+                >
+                  {lnk.label}
+                </a>
+              ))}
             </div>
           ))}
         </div>
