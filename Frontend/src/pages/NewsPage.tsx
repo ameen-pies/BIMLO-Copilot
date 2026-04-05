@@ -3,8 +3,9 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
   Radio, Cable, Scale, HardHat, Newspaper, Sun, Moon, Loader2,
-  RefreshCcw, X, MessageSquare,
+  RefreshCcw, X, MessageSquare, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw,
 } from "lucide-react";
+import TypewriterText from "@/components/TypewriterText";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,8 @@ interface PinnedArticle {
   category: string;
   source: string;
   aiImpact?: string;
+  rawSummary?: string;
+  articleUrl?: string;
   imageUrl?: string | null;
 }
 
@@ -109,7 +112,9 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  rawAnswer?: string;
   loading?: boolean;
+  timestamp: Date;
   pinnedArticles?: PinnedArticle[];
 }
 
@@ -317,73 +322,96 @@ function NewsChatPanel({
       id: "welcome",
       role: "assistant",
       content: "Hey! I'm Bimlo. Tap the 💬 icon on any article to pin it here, then ask me anything — trends, impact, comparisons. What's on your mind?",
+      timestamp: new Date(),
     },
   ]);
-  const [input, setInput] = useState("");
-  const [sessionId] = useState(() => Math.random().toString(36).slice(2));
-  const [isLoading, setIsLoading] = useState(false);
+  const [input, setInput]                   = useState("");
+  const [sessionId]                         = useState(() => Math.random().toString(36).slice(2));
+  const [isLoading, setIsLoading]           = useState(false);
+  const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
+  const [copiedMsgId, setCopiedMsgId]       = useState<string | null>(null);
+  const [feedback, setFeedback]             = useState<Record<string, "like" | "dislike" | null>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef       = useRef<HTMLTextAreaElement>(null);
   const dark = theme === "dark";
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const buildPrompt = (userInput: string): string => {
-    if (pinnedArticles.length === 0) return userInput;
-    const ctx = pinnedArticles.map((a, i) =>
-      `[${i + 1}] "${a.title}" — ${a.category} · ${a.source}${a.aiImpact ? `\n    AI Impact: ${a.aiImpact}` : ""}`
-    ).join("\n");
-    return `You are Bimlo, a telecom industry intelligence expert. The user has pinned these articles for context:\n\n${ctx}\n\nUser: ${userInput}\n\nAnswer as Bimlo — concise, expert, reference the articles by number when relevant. No fluff.`;
-  };
-
-  const handleSend = useCallback(async () => {
-    const text = input.trim();
-    if (!text || isLoading) return;
-
-    const userMsg: ChatMessage = {
-      id: Date.now().toString(),
-      role: "user",
-      content: text,
-      pinnedArticles: pinnedArticles.length > 0 ? [...pinnedArticles] : undefined,
-    };
-    const loadingMsg: ChatMessage = {
-      id: Date.now().toString() + "-l",
-      role: "assistant",
-      content: "",
-      loading: true,
-    };
-
-    setMessages(prev => [...prev, userMsg, loadingMsg]);
-    setInput("");
-    onClearPins();
+  const sendQuery = useCallback(async (text: string, currentPinned: typeof pinnedArticles) => {
+    const loadingId   = Date.now().toString() + "-l";
+    const loadingMsg: ChatMessage = { id: loadingId, role: "assistant", content: "", loading: true, timestamp: new Date() };
+    setMessages(prev => [...prev, loadingMsg]);
     setIsLoading(true);
-
     try {
-      const res = await fetch(`${API_BASE}/query`, {
+      const res = await fetch(`${API_BASE}/api/news/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query: buildPrompt(text),
+          query: text,
           session_id: sessionId,
-          top_k: 3,
+          pinned_articles: currentPinned.map(a => ({
+            id:         a.id,
+            title:      a.title,
+            category:   a.category,
+            source:     a.source,
+            articleUrl: a.articleUrl  ?? "",
+            aiImpact:   a.aiImpact    ?? "",
+            rawSummary: a.rawSummary  ?? "",
+            imageUrl:   a.imageUrl    ?? null,
+          })),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const answer = data.answer ?? "Sorry, no response received.";
-      setMessages(prev => prev.map(m => m.loading ? { ...m, content: answer, loading: false } : m));
+      const data     = await res.json();
+      const answer   = data.answer ?? "Sorry, no response received.";
+      const assistantId = loadingId + "-done";
+      setMessages(prev => prev.map(m =>
+        m.id === loadingId
+          ? { ...m, id: assistantId, content: "", rawAnswer: answer, loading: false, timestamp: new Date() }
+          : m
+      ));
+      setTypingMessageId(assistantId);
     } catch {
-      setMessages(prev => prev.map(m => m.loading
-        ? { ...m, content: "Something went wrong. Please try again.", loading: false }
-        : m
+      setMessages(prev => prev.map(m =>
+        m.id === loadingId ? { ...m, content: "Something went wrong. Please try again.", loading: false } : m
       ));
     } finally {
       setIsLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, isLoading, pinnedArticles, sessionId]);
+  }, [sessionId]);
+
+  const handleSend = useCallback(async () => {
+    const text = input.trim();
+    if (!text || isLoading) return;
+    const currentPinned = [...pinnedArticles];
+    const userMsg: ChatMessage = {
+      id: Date.now().toString(),
+      role: "user",
+      content: text,
+      timestamp: new Date(),
+      pinnedArticles: currentPinned.length > 0 ? currentPinned : undefined,
+    };
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    onClearPins();
+    await sendQuery(text, currentPinned);
+  }, [input, isLoading, pinnedArticles, sendQuery, onClearPins]);
+
+  const handleRedo = useCallback(async (msgId: string) => {
+    if (isLoading) return;
+    // Find the user message that preceded this assistant message
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === msgId);
+      const userMsg = idx > 0 ? prev[idx - 1] : null;
+      if (!userMsg || userMsg.role !== "user") return prev;
+      // Remove the old assistant message
+      const trimmed = prev.filter((_, i) => i !== idx);
+      sendQuery(userMsg.content, userMsg.pinnedArticles ?? []);
+      return trimmed;
+    });
+  }, [isLoading, sendQuery]);
 
   const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!isLoading) handleSend(); }
@@ -498,8 +526,99 @@ function NewsChatPanel({
                       }} />
                     ))}
                   </span>
+                ) : msg.role === "assistant" && msg.id === typingMessageId && msg.rawAnswer ? (
+                  <TypewriterText
+                    text={msg.rawAnswer}
+                    speed={10}
+                    onComplete={() => {
+                      setTypingMessageId(null);
+                      setMessages(prev => prev.map(m =>
+                        m.id === msg.id ? { ...m, content: m.rawAnswer ?? m.content } : m
+                      ));
+                    }}
+                    render={(partial: string) => (
+                      <span style={{ whiteSpace: "pre-wrap" }}>{partial}</span>
+                    )}
+                  />
                 ) : msg.content}
               </div>
+
+              {/* ── Timestamp + action row ──────────────────────────── */}
+              {!msg.loading && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: "0.25rem",
+                  marginTop: "0.22rem",
+                  justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+                }}>
+                  <span style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.28)" }}>
+                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                  {msg.role === "assistant" && msg.id !== typingMessageId && (
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginLeft: "0.2rem" }}>
+                      {/* Copy */}
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(msg.rawAnswer ?? msg.content);
+                          setCopiedMsgId(msg.id);
+                          setTimeout(() => setCopiedMsgId(null), 1500);
+                        }}
+                        title="Copy response"
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: "0.2rem",
+                          padding: "0.18rem 0.38rem", borderRadius: 5, border: "none",
+                          fontSize: "0.58rem", fontWeight: 600, cursor: "pointer",
+                          background: copiedMsgId === msg.id
+                            ? (dark ? "rgba(59,158,255,0.18)" : "rgba(59,158,255,0.12)")
+                            : "transparent",
+                          color: copiedMsgId === msg.id
+                            ? "#3b9eff"
+                            : dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.28)",
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        {copiedMsgId === msg.id
+                          ? <><Check size={9} /><span>Copied</span></>
+                          : <><Copy size={9} /><span>Copy</span></>}
+                      </button>
+                      {/* Like */}
+                      <button
+                        onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
+                        title="Good response"
+                        style={{
+                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                          border: "none", cursor: "pointer", background: "transparent",
+                          color: feedback[msg.id] === "like" ? "#3b9eff" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                          transition: "color 0.15s",
+                        }}
+                      ><ThumbsUp size={9} /></button>
+                      {/* Dislike */}
+                      <button
+                        onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "dislike" ? null : "dislike" }))}
+                        title="Bad response"
+                        style={{
+                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                          border: "none", cursor: "pointer", background: "transparent",
+                          color: feedback[msg.id] === "dislike" ? "#ef4444" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                          transition: "color 0.15s",
+                        }}
+                      ><ThumbsDown size={9} /></button>
+                      {/* Redo */}
+                      <button
+                        onClick={() => handleRedo(msg.id)}
+                        disabled={isLoading}
+                        title="Regenerate"
+                        style={{
+                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                          border: "none", cursor: isLoading ? "not-allowed" : "pointer",
+                          background: "transparent", opacity: isLoading ? 0.3 : 1,
+                          color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                          transition: "color 0.15s",
+                        }}
+                      ><RotateCcw size={9} /></button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
@@ -689,7 +808,7 @@ const NewsPage = () => {
     const id = item.id ?? item.articleUrl ?? item.title ?? String(Math.random());
     setPinnedArticles(prev => {
       if (prev.find(a => a.id === id)) return prev.filter(a => a.id !== id);
-      return [...prev.slice(-4), { id, title: item.title, category: item.category, source: item.source, aiImpact: item.aiImpact, imageUrl: item.imageUrl ?? null }];
+      return [...prev.slice(-4), { id, title: item.title, category: item.category, source: item.source, aiImpact: item.aiImpact, rawSummary: item.raw_summary ?? item.rawSummary ?? "", articleUrl: item.article_url ?? item.articleUrl ?? "", imageUrl: item.imageUrl ?? null }];
     });
     setChatOpen(true);
   }, []);

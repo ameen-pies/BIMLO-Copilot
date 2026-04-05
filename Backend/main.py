@@ -43,6 +43,16 @@ except ImportError:
     _news_pipeline_available = False
     print("⚠️  news_pipeline not found — /api/news endpoints will return 503")
 
+# News chat agent — standalone, isolated from RAG engine
+try:
+    from news_chat_agent import router as news_chat_router
+    _news_chat_available = True
+    print("✅ news_chat_agent loaded — /api/news/chat ready")
+except ImportError:
+    news_chat_router     = None
+    _news_chat_available = False
+    print("⚠️  news_chat_agent not found — /api/news/chat will 503")
+
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
     version="3.0.0",
@@ -75,6 +85,8 @@ app.include_router(voice_router)
 app.include_router(voice_call_router)
 app.include_router(autocomplete_router)
 app.include_router(report_router)
+if _news_chat_available:
+    app.include_router(news_chat_router)
 
 DATA_DIR    = os.getenv("DATA_DIR", "/home/claude/bimlo-copilot/data")
 UPLOAD_DIR  = os.path.join(DATA_DIR, "uploads")

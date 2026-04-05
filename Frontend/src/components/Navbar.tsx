@@ -3,6 +3,15 @@ import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
 
+const scrollTo = (id: string, extraOffset = 0) => (e: React.MouseEvent) => {
+  e.preventDefault();
+  const el = document.getElementById(id);
+  if (el) {
+    const pos = el.getBoundingClientRect().top + window.pageYOffset - 64 + extraOffset;
+    window.scrollTo({ top: pos, behavior: 'smooth' });
+  }
+};
+
 const Navbar = () => {
   return (
     <nav className="fixed top-0 left-0 right-0 z-50" style={{
@@ -20,43 +29,17 @@ const Navbar = () => {
         </Link>
 
         <div className="hidden md:flex items-center gap-8">
-          <a 
-            href="#features" 
-            onClick={(e) => {
-              e.preventDefault();
-              const element = document.getElementById('features');
-              if (element) {
-                const navbarHeight = 64; // h-16 = 64px
-                const elementPosition = element.getBoundingClientRect().top + window.pageYOffset;
-                const offsetPosition = elementPosition - navbarHeight + 64; // Extra 110px padding
-                window.scrollTo({
-                  top: offsetPosition,
-                  behavior: 'smooth'
-                });
-              }
-            }}
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
+          <a href="#features" onClick={scrollTo('features', 64)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Features
           </a>
-          <a 
-            href="#how-it-works" 
-            onClick={(e) => {
-              e.preventDefault();
-              const element = document.getElementById('how-it-works');
-              if (element) {
-                const navbarHeight = 64; // h-16 = 64px
-                const elementPosition = element.getBoundingClientRect().top + window.pageYOffset;
-                const offsetPosition = elementPosition - navbarHeight - 160; // Extra 160px padding
-                window.scrollTo({
-                  top: offsetPosition,
-                  behavior: 'smooth'
-                });
-              }
-            }}
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
+          <a href="#how-it-works" onClick={scrollTo('how-it-works', -160)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             How it works
+          </a>
+          <a href="#trending" onClick={scrollTo('trending', -20)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            Trending
           </a>
           <a href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Documentation
