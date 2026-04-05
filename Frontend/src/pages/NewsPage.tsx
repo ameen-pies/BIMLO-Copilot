@@ -17,10 +17,10 @@ const PAGE_SIZE = 10;
 // ── Category config ─────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; lightColor: string }> = {
-  "5G":             { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
-  "Fiber":          { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
-  "Regulation":     { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
-  "Construction":   { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
+  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
+  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
+  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
+  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
   "General":        { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
   "BIM":            { label: "BIM",          Icon: Zap,       color: "#f472b6", lightColor: "#be185d" },
   "Digital Twin":   { label: "Digital Twin", Icon: Sun,       color: "#22d3ee", lightColor: "#0e7490" },
@@ -40,10 +40,10 @@ const FALLBACK_GRADIENTS: Record<string, string> = {
   "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
   "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
   "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
-  "General":        "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
-  "BIM":            "linear-gradient(135deg, #2a0a1f 0%, #6d1a4a 100%)",
-  "Digital Twin":   "linear-gradient(135deg, #042a2e 0%, #0a5c6e 100%)",
-  "AI Construction":"linear-gradient(135deg, #2a1200 0%, #7a3500 100%)",
+  "General":         "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
+  "BIM":             "linear-gradient(135deg, #2a0a1f 0%, #6d1a4a 100%)",
+  "Digital Twin":    "linear-gradient(135deg, #042a2e 0%, #0a5c6e 100%)",
+  "AI Construction": "linear-gradient(135deg, #2a1200 0%, #7a3500 100%)",
 };
 
 // ── Card size variants ──────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
         cursor: "default",
         opacity: revealed ? 1 : 0,
         transform: revealed ? "translateY(0) scale(1)" : "translateY(20px) scale(0.97)",
-        transition: "opacity 0.38s ease, transform 0.38s ease, box-shadow 0.22s ease",
+        transition: "opacity 0.38s ease, transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease",
         border: isPinned
           ? `1.5px solid ${theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.3)"}`
           : `1px solid ${theme === "dark" ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`,
@@ -171,19 +171,23 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
       }}
       onMouseEnter={e => {
         const el = e.currentTarget as HTMLElement;
-        el.style.transform = "scale(1.012)";
+        el.style.transform = "translateY(-4px) scale(1.025)";
         el.style.zIndex    = "10";
         el.style.boxShadow = isPinned
-          ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)"}, 0 16px 48px rgba(0,0,0,0.35)`
-          : "0 16px 48px rgba(0,0,0,0.35)";
+          ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)"}, 0 20px 56px rgba(0,0,0,0.45)`
+          : "0 20px 56px rgba(0,0,0,0.45)";
+        const img = el.querySelector("img[alt='']") as HTMLElement;
+        if (img) img.style.transform = "scale(1.1)";
         const ov = el.querySelector(".card-ov") as HTMLElement;
         if (ov) ov.style.background = "linear-gradient(to top,rgba(0,0,0,0.95) 0%,rgba(0,0,0,0.55) 50%,rgba(0,0,0,0.15) 100%)";
       }}
       onMouseLeave={e => {
         const el = e.currentTarget as HTMLElement;
-        el.style.transform = "scale(1)";
+        el.style.transform = "translateY(0) scale(1)";
         el.style.zIndex    = "1";
         el.style.boxShadow = isPinned ? `0 0 0 2px ${theme === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}` : "none";
+        const img = el.querySelector("img[alt='']") as HTMLElement;
+        if (img) img.style.transform = "scale(1)";
         const ov = el.querySelector(".card-ov") as HTMLElement;
         if (ov) ov.style.background = overlayGradient;
       }}
@@ -193,7 +197,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
         ? <img
             src={item.imageUrl} alt=""
             onError={() => setImgError(true)}
-            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", transition: "transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)", transformOrigin: "center center" }}
           />
         : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"] }} />
       }
@@ -1068,9 +1072,9 @@ const NewsPage = () => {
                 bgColor: dark ? "#1a0a0a" : "#2d0f0f",
                 textColor: "#fff",
                 links: [
-                  { label: "BIM",          active: filter === "BIM",            onSelect: () => setFilter("BIM") },
-                  { label: "Digital Twin", active: filter === "Digital Twin",   onSelect: () => setFilter("Digital Twin") },
-                  { label: "AI",           active: filter === "AI Construction",onSelect: () => setFilter("AI Construction") },
+                  { label: "BIM",          active: filter === "BIM",             onSelect: () => setFilter("BIM") },
+                  { label: "Digital Twin", active: filter === "Digital Twin",    onSelect: () => setFilter("Digital Twin") },
+                  { label: "AI",           active: filter === "AI Construction", onSelect: () => setFilter("AI Construction") },
                 ],
               },
             ]}
