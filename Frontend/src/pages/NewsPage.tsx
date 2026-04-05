@@ -4,9 +4,10 @@ import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
   Radio, Cable, Scale, HardHat, Newspaper, Sun, Moon, Loader2,
   RefreshCcw, X, MessageSquare, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw,
-  Box, Layers, BrainCircuit,
 } from "lucide-react";
 import TypewriterText from "@/components/TypewriterText";
+import CardNav from "@/components/CardNav";
+
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -16,14 +17,11 @@ const PAGE_SIZE = 10;
 // ── Category config ─────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; Icon: React.ElementType; color: string; lightColor: string }> = {
-  "5G":             { label: "5G",             Icon: Radio,         color: "#60a5fa", lightColor: "#2563eb" },
-  "Fiber":          { label: "Fiber",          Icon: Cable,         color: "#93c5fd", lightColor: "#1d4ed8" },
-  "Regulation":     { label: "Regulation",     Icon: Scale,         color: "#bfdbfe", lightColor: "#1e40af" },
-  "Construction":   { label: "Construction",   Icon: HardHat,       color: "#7dd3fc", lightColor: "#0369a1" },
-  "General":        { label: "General",        Icon: Newspaper,     color: "#94a3b8", lightColor: "#475569" },
-  "BIM":            { label: "BIM",            Icon: Box,           color: "#38bdf8", lightColor: "#0284c7" },
-  "Digital Twin":   { label: "Digital Twin",   Icon: Layers,        color: "#818cf8", lightColor: "#4338ca" },
-  "AI Construction":{ label: "AI",             Icon: BrainCircuit,  color: "#a78bfa", lightColor: "#6d28d9" },
+  "5G":           { label: "5G",           Icon: Radio,     color: "#3b9eff", lightColor: "#1a6fd4" },
+  "Fiber":        { label: "Fiber",        Icon: Cable,     color: "#34d399", lightColor: "#0d7a52" },
+  "Regulation":   { label: "Regulation",   Icon: Scale,     color: "#fbbf24", lightColor: "#92650a" },
+  "Construction": { label: "Construction", Icon: HardHat,   color: "#a78bfa", lightColor: "#5b34c4" },
+  "General":      { label: "General",      Icon: Newspaper, color: "#94a3b8", lightColor: "#475569" },
 };
 
 // Returns the right color variant based on theme — darker on light bg for contrast
@@ -31,18 +29,15 @@ function catColor(meta: typeof CATEGORY_META[string], theme: "light" | "dark") {
   return theme === "dark" ? meta.color : meta.lightColor;
 }
 
-const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "BIM", "Digital Twin", "AI Construction", "General"] as const;
+const CATEGORIES = ["All", "5G", "Fiber", "Regulation", "Construction", "General"] as const;
 const ALL_FILTERS = CATEGORIES;
 
 const FALLBACK_GRADIENTS: Record<string, string> = {
-  "5G":             "linear-gradient(135deg, #0f1a2e 0%, #1a3050 100%)",
-  "Fiber":          "linear-gradient(135deg, #0a1628 0%, #162540 100%)",
-  "Regulation":     "linear-gradient(135deg, #0d1e36 0%, #1a2e4a 100%)",
-  "Construction":   "linear-gradient(135deg, #0b1a2c 0%, #142540 100%)",
-  "General":        "linear-gradient(135deg, #111827 0%, #1f2937 100%)",
-  "BIM":            "linear-gradient(135deg, #0c1f2e 0%, #0f3a52 100%)",
-  "Digital Twin":   "linear-gradient(135deg, #0f0c2e 0%, #1a1552 100%)",
-  "AI Construction":"linear-gradient(135deg, #160c2e 0%, #2a1050 100%)",
+  "5G":           "linear-gradient(135deg, #0f2540 0%, #1a4a7a 100%)",
+  "Fiber":        "linear-gradient(135deg, #0d2a1f 0%, #1a5c3a 100%)",
+  "Regulation":   "linear-gradient(135deg, #2a1f06 0%, #5c440a 100%)",
+  "Construction": "linear-gradient(135deg, #1f0d2a 0%, #3d1a5c 100%)",
+  "General":      "linear-gradient(135deg, #1a1a2e 0%, #2d2d4e 100%)",
 };
 
 // ── Card size variants ──────────────────────────────────────────────────────
@@ -792,6 +787,7 @@ const NewsPage = () => {
   }, []);
 
   const [filter, setFilter]               = useState<string>("All");
+  const dark = theme === "dark";
   const [allArticles, setAllArticles]     = useState<any[]>([]);
   const [visibleCount, setVisibleCount]   = useState(PAGE_SIZE);
   const [revealedSet, setRevealedSet]     = useState<Set<number>>(new Set());
@@ -1027,8 +1023,46 @@ const NewsPage = () => {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "0.8rem" }}>
+          {/* Category filter — CardNav */}
+          <CardNav
+            filterMode
+            filterLabel={filter === "All" ? "All Categories" : filter}
+            theme={theme}
+            ease="power3.out"
+            items={[
+              {
+                label: "General",
+                bgColor: dark ? "#0a1628" : "#0f1f3d",
+                textColor: "#fff",
+                links: [
+                  { label: "All",        active: filter === "All",        onSelect: () => setFilter("All") },
+                  { label: "General",    active: filter === "General",    onSelect: () => setFilter("General") },
+                ],
+              },
+              {
+                label: "Telecom",
+                bgColor: dark ? "#0c1a2e" : "#122040",
+                textColor: "#fff",
+                links: [
+                  { label: "5G",         active: filter === "5G",         onSelect: () => setFilter("5G") },
+                  { label: "Fiber",      active: filter === "Fiber",      onSelect: () => setFilter("Fiber") },
+                  { label: "Regulation", active: filter === "Regulation", onSelect: () => setFilter("Regulation") },
+                ],
+              },
+              {
+                label: "Construction",
+                bgColor: dark ? "#10082a" : "#1a0f40",
+                textColor: "#fff",
+                links: [
+                  { label: "Construction", active: filter === "Construction", onSelect: () => setFilter("Construction") },
+                ],
+              },
+            ]}
+          />
+
+          {/* article count */}
           {!isInitialLoading && allArticles.length > 0 && (
-            <span style={{ fontSize: "0.65rem", color: theme === "dark" ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+            <span style={{ fontSize: "0.65rem", color: dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", gap: "0.3rem", flexShrink: 0 }}>
               {visible.length} / {filtered.length}
               {fetchingMore && <Loader2 size={10} style={{ animation: "spin 1s linear infinite", color: "#3b9eff" }} />}
             </span>
@@ -1084,33 +1118,6 @@ const NewsPage = () => {
         </div>
       )}
 
-      {/* ── Filter pills ─────────────────────────────────────────────── */}
-      <div style={{
-        display: "flex", gap: "0.38rem", paddingBottom: "0.6rem",
-        overflowX: "auto", flexShrink: 0,
-        scrollbarWidth: "thin",
-        scrollbarColor: theme === "dark" ? "rgba(255,255,255,0.18) transparent" : "rgba(0,0,0,0.18) transparent",
-      }}
-        className="filter-pills-scroll"
-      >
-        {ALL_FILTERS.map(cat => {
-          const meta = CATEGORY_META[cat], active = filter === cat;
-          const dark = theme === "dark";
-          return (
-            <button key={cat} onClick={() => setFilter(cat)} style={{
-              display: "inline-flex", alignItems: "center", gap: "0.25rem",
-              fontSize: "0.68rem", fontWeight: 600, padding: "0.22rem 0.7rem",
-              borderRadius: 999, cursor: "pointer", flexShrink: 0,
-              border: `1px solid ${active ? (dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.3)") : (dark ? "#333" : "#ccc")}`,
-              color: active ? (dark ? "#fff" : "#000") : (dark ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.45)"),
-              background: active ? (dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.07)") : "transparent",
-              transition: "all 0.12s",
-            }}>
-              {meta?.Icon && <meta.Icon size={9} />}{cat}
-            </button>
-          );
-        })}
-      </div>
       </div>{/* end sticky navbar */}
 
       {/* ── Main layout: grid + chat panel ───────────────────────────── */}
