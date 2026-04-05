@@ -2322,15 +2322,97 @@ const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSe
   );
 };
 
+// ── Welcome splash — shown when no messages yet ──────────────────────────────
+
+const GREETINGS: Record<"night" | "morning" | "afternoon" | "evening", string[]> = {
+  night: [
+    "Burning the midnight oil?",
+    "Still at it this late?",
+    "The night is young.",
+    "Couldn't sleep either?",
+    "Late night deep dive.",
+    "Quiet hours, sharp focus.",
+    "Night owl mode: on.",
+  ],
+  morning: [
+    "Good morning.",
+    "Rise and grind.",
+    "Early bird energy.",
+    "Morning, let's get to it.",
+    "Fresh start, fresh mind.",
+    "Coffee ready? Let's go.",
+    "New day, new answers.",
+    "Morning momentum.",
+  ],
+  afternoon: [
+    "Good afternoon.",
+    "Afternoon grind.",
+    "Halfway through the day.",
+    "Post-lunch clarity.",
+    "Keep the momentum going.",
+    "Afternoon deep dive.",
+    "Still got hours left.",
+    "Productive afternoon ahead.",
+  ],
+  evening: [
+    "Good evening.",
+    "Wrapping up the day?",
+    "Evening wind-down.",
+    "End of day, still curious.",
+    "Evening focus session.",
+    "One more thing to figure out.",
+    "Quiet evening, good thinking.",
+    "Sunset productivity.",
+  ],
+};
+
+function getGreeting(): string {
+  const h = new Date().getHours();
+  const bucket: keyof typeof GREETINGS =
+    h < 5 ? "night" : h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
+  const opts = GREETINGS[bucket];
+  return opts[Math.floor(Math.random() * opts.length)];
+}
+
+// Stable per-mount greeting so it doesn't re-roll on re-render
+const SPLASH_GREETING = getGreeting();
+
+const WelcomeSplash: React.FC<{ visible: boolean }> = ({ visible }) => (
+  <AnimatePresence>
+    {visible && (
+      <motion.div
+        key="welcome-splash"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0, transition: { duration: 0.2 } }}
+        transition={{ duration: 0.3 }}
+        className="absolute inset-0 flex flex-col items-center pointer-events-none select-none z-10"
+        style={{ justifyContent: "center", paddingBottom: "160px" }}
+      >
+        {/* Subtle glow */}
+        <div className="absolute inset-0 -z-10 flex items-center justify-center">
+          <div className="h-48 w-48 rounded-full bg-primary/6 blur-3xl" />
+        </div>
+
+        {/* Logo + text inline — no nested motion, no scale */}
+        <div className="flex items-center gap-4">
+          <Logo className="h-12 w-12 opacity-90" />
+          <div className="flex flex-col gap-0.5">
+            <h1 className="text-3xl font-semibold tracking-tight text-foreground/90 leading-tight">
+              {SPLASH_GREETING}
+            </h1>
+            <p className="text-sm text-muted-foreground/50 leading-relaxed">
+              Upload a document and ask me anything.
+            </p>
+          </div>
+        </div>
+      </motion.div>
+    )}
+  </AnimatePresence>
+);
+
 const Chat = () => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Hello! I'm your AI document assistant. Upload your documents and ask me anything — I'll find the relevant information and cite my sources.",
-      timestamp: new Date(),
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -3022,8 +3104,9 @@ const Chat = () => {
     return () => ro.disconnect();
   }, [suggestions, suggestionsLoading]);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive (skip on very first message to avoid jump)
   useEffect(() => {
+    if (messages.length <= 1) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
@@ -5167,7 +5250,8 @@ const Chat = () => {
             </motion.div>
           )}
         </AnimatePresence>
-        <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40">
+        <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40 relative">
+          <WelcomeSplash visible={messages.length === 0} />
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.map((msg) => (
               <motion.div
@@ -5847,7 +5931,11 @@ const Chat = () => {
         </AnimatePresence>
 
         {/* Input */}
-        <div ref={inputAreaRef} className="relative border-t border-border pt-3 pb-4 px-4 overflow-hidden shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm">
+        <div
+          ref={inputAreaRef}
+          className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messages.length > 0 ? "relative border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent"}`}
+          style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 80px))" } : {}}
+        >
           <div className="max-w-3xl mx-auto">
 
             {/* ── Contextual suggestion chips ── */}
