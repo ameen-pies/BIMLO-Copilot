@@ -19,27 +19,68 @@ import React, {
   useState, useEffect, useRef, useCallback,
 } from "react";
 
-// ── Hue → packed hex colour ───────────────────────────────────────────────────
-function hueToHex(h: number): number {
-  const s = 0.65, l = 0.55;
+// ── Colour helpers ────────────────────────────────────────────────────────────
+function hueToRgb(h: number, isDark: boolean): [number, number, number] {
+  // light mode: very dark + saturated so lines contrast against pale bg
+  const s = isDark ? 0.65 : 0.90;
+  const l = isDark ? 0.55 : 0.30;
   const a = s * Math.min(l, 1 - l);
   const f = (n: number) => {
     const k = (n + h / 30) % 12;
     return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
   };
-  const r = Math.round(f(0) * 255);
-  const g = Math.round(f(8) * 255);
-  const b = Math.round(f(4) * 255);
-  return (r << 16) | (g << 8) | b;
+  return [f(0), f(8), f(4)];
+}
+
+function rgbToHex(r: number, g: number, b: number): number {
+  return (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
+}
+
+function lerpRgb(
+  a: [number,number,number],
+  b: [number,number,number],
+  t: number
+): [number,number,number] {
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+}
+
+function targetRgb(orbHue: number, isDark: boolean): [number,number,number] {
+  // orbHue 0 = idle → indigo/blue; 360 = speaking → red
+  if (orbHue === 0)   return isDark ? [0.39,0.40,0.95] : [0.08,0.35,0.90]; // indigo / deep blue
+  if (orbHue === 360) return isDark ? [0.20,0.50,0.95] : [0.08,0.35,0.90]; // blue
+  return hueToRgb(orbHue, isDark);
 }
 
 // ── Vanta NET background with side-only mask ──────────────────────────────────
 const VantaBackground: React.FC<{ isDark: boolean; orbHue: number }> = ({ isDark, orbHue }) => {
-  const vantaRef  = useRef<HTMLDivElement>(null);
-  const effectRef = useRef<any>(null);
-  const readyRef  = useRef(false);
+  const vantaRef   = useRef<HTMLDivElement>(null);
+  const effectRef  = useRef<any>(null);
+  const readyRef   = useRef(false);
   const [visible, setVisible] = useState(false);
 
+  // current animated rgb (stored in ref so RAF doesn't stale-close)
+  const currentRgb = useRef<[number,number,number]>(targetRgb(orbHue, isDark));
+  const targetRef  = useRef<[number,number,number]>(targetRgb(orbHue, isDark));
+  const rafRef     = useRef<number>(0);
+
+  // smooth lerp loop
+  const startLerp = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    const tick = () => {
+      const cur = currentRgb.current;
+      const tgt = targetRef.current;
+      const next = lerpRgb(cur, tgt, 0.035) as [number,number,number];
+      const diff = Math.abs(next[0]-tgt[0]) + Math.abs(next[1]-tgt[1]) + Math.abs(next[2]-tgt[2]);
+      currentRgb.current = next;
+      if (effectRef.current) {
+        effectRef.current.setOptions({ color: rgbToHex(...next), lineColor: rgbToHex(...next) });
+      }
+      if (diff > 0.001) rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  // init Vanta once
   useEffect(() => {
     const loadScript = (src: string) =>
       new Promise<void>((resolve, reject) => {
@@ -56,13 +97,16 @@ const VantaBackground: React.FC<{ isDark: boolean; orbHue: number }> = ({ isDark
       await loadScript("https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.net.min.js");
       if (cancelled || !vantaRef.current || !(window as any).VANTA) return;
 
-      const netColor = orbHue === 0 ? (isDark ? 0x6366f1 : 0x3b82f6) : hueToHex(orbHue);
+      const initRgb = targetRgb(orbHue, isDark);
+      currentRgb.current = initRgb;
+      targetRef.current  = initRgb;
 
       effectRef.current = (window as any).VANTA.NET({
         el: vantaRef.current,
         mouseControls: true, touchControls: true, gyroControls: false,
         minHeight: 200, minWidth: 200, scale: 1.0, scaleMobile: 1.0,
-        color: netColor,
+        color: rgbToHex(...initRgb),
+        lineColor: rgbToHex(...initRgb),
         backgroundColor: isDark ? 0x07080f : 0xf5f4fb,
         points: 5.0, maxDistance: 24.0, spacing: 20.0,
       });
@@ -73,20 +117,21 @@ const VantaBackground: React.FC<{ isDark: boolean; orbHue: number }> = ({ isDark
     init().catch(console.error);
     return () => {
       cancelled = true;
+      cancelAnimationFrame(rafRef.current);
       if (effectRef.current) { effectRef.current.destroy(); effectRef.current = null; }
       readyRef.current = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Sync net color to orb hue (no rebuild)
+  // animate toward new target when orbHue or theme changes
   useEffect(() => {
-    if (!readyRef.current || !effectRef.current) return;
-    const netColor = orbHue === 0 ? (isDark ? 0x6366f1 : 0x3b82f6) : hueToHex(orbHue);
-    effectRef.current.setOptions({ color: netColor });
-  }, [orbHue, isDark]);
+    if (!readyRef.current) return;
+    targetRef.current = targetRgb(orbHue, isDark);
+    startLerp();
+  }, [orbHue, isDark, startLerp]);
 
-  // Fade bg on theme switch (no rebuild)
+  // instantly swap bg color on theme change
   useEffect(() => {
     if (!readyRef.current || !effectRef.current) return;
     effectRef.current.setOptions({ backgroundColor: isDark ? 0x07080f : 0xf5f4fb });
@@ -942,7 +987,7 @@ const CallPage: React.FC = () => {
 
   // hue shifts per state to drive the Orb color
   const orbHue =
-    callState === "speaking"    ? 220 :   // blue
+    callState === "speaking"    ? 360 :   // red (distinct from idle 0)
     callState === "thinking"    ? 40  :   // amber
     callState === "transcribing"? 40  :   // amber
     callState === "detecting"   ? 150 :   // teal
@@ -1011,49 +1056,6 @@ const CallPage: React.FC = () => {
           <ThemeToggle />
         </div>
 
-        {/* Voice picker */}
-        <div className="relative">
-          <button
-            onClick={() => setShowVoicePicker(v => !v)}
-            className="flex items-center gap-1 text-xs text-foreground/30 hover:text-foreground/60 transition-colors capitalize"
-          >
-            {selectedVoice}
-            <ChevronDown className="h-3 w-3" />
-          </button>
-          <AnimatePresence>
-            {showVoicePicker && (
-              <motion.div
-                initial={{ opacity: 0, y: -6, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -6, scale: 0.96 }}
-                transition={{ duration: 0.15 }}
-                className="absolute right-0 top-7 bg-background/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl z-50 overflow-hidden w-44"
-              >
-                {[
-                  { id: "hannah", label: "Hannah", hint: "Warm, natural" },
-                  { id: "diana",  label: "Diana",  hint: "Clear, professional" },
-                  { id: "autumn", label: "Autumn", hint: "Soft, calm" },
-                  { id: "austin", label: "Austin", hint: "Male, friendly" },
-                  { id: "daniel", label: "Daniel", hint: "Male, clear" },
-                  { id: "troy",   label: "Troy",   hint: "Male, deep" },
-                ].map(v => (
-                  <button
-                    key={v.id}
-                    onClick={() => { setSelectedVoice(v.id); setShowVoicePicker(false); }}
-                    className={`w-full text-left px-3.5 py-2.5 text-xs transition-colors ${
-                      selectedVoice === v.id
-                        ? "bg-blue-500/15 text-blue-400"
-                        : "text-foreground/50 hover:bg-foreground/5 hover:text-foreground/80"
-                    }`}
-                  >
-                    <span className="font-medium">{v.label}</span>
-                    <span className="ml-2 text-foreground/25">{v.hint}</span>
-                  </button>
-                ))}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
       </div>
 
       {/* ── Orb + status ── */}
@@ -1309,6 +1311,50 @@ const CallPage: React.FC = () => {
             ? "Tap to start · speak naturally"
             : "Tap to end call"}
         </p>
+
+        {/* ── Voice picker — bottom of page, never overlaps orb ── */}
+        <div className="relative flex flex-col items-center mt-5">
+          <button
+            onClick={() => setShowVoicePicker(v => !v)}
+            className="flex items-center gap-1.5 text-xs text-foreground/30 hover:text-foreground/60 transition-colors capitalize tracking-wide"
+          >
+            <span>Voice · {selectedVoice}</span>
+            <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showVoicePicker ? "rotate-180" : ""}`} />
+          </button>
+          <AnimatePresence>
+            {showVoicePicker && (
+              <motion.div
+                initial={{ opacity: 0, y: 6, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
+                className="absolute bottom-8 bg-background/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl z-50 overflow-hidden w-48"
+              >
+                {[
+                  { id: "hannah", label: "Hannah", hint: "Warm, natural" },
+                  { id: "diana",  label: "Diana",  hint: "Clear, professional" },
+                  { id: "autumn", label: "Autumn", hint: "Soft, calm" },
+                  { id: "austin", label: "Austin", hint: "Male, friendly" },
+                  { id: "daniel", label: "Daniel", hint: "Male, clear" },
+                  { id: "troy",   label: "Troy",   hint: "Male, deep" },
+                ].map(v => (
+                  <button
+                    key={v.id}
+                    onClick={() => { setSelectedVoice(v.id); setShowVoicePicker(false); }}
+                    className={`w-full text-left px-3.5 py-2.5 text-xs transition-colors ${
+                      selectedVoice === v.id
+                        ? "bg-blue-500/15 text-blue-400"
+                        : "text-foreground/50 hover:bg-foreground/5 hover:text-foreground/80"
+                    }`}
+                  >
+                    <span className="font-medium">{v.label}</span>
+                    <span className="ml-2 text-foreground/25">{v.hint}</span>
+                  </button>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </motion.div>
   );

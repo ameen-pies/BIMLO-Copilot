@@ -143,18 +143,7 @@ const CardNav = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isExpanded]);
 
-  useEffect(() => {
-    if (!isExpanded) return;
-    const handler = (e: MouseEvent) => {
-      if (navRef.current && !navRef.current.contains(e.target as Node)) {
-        setIsHamburgerOpen(false);
-        tlRef.current?.eventCallback('onReverseComplete', () => setIsExpanded(false));
-        tlRef.current?.reverse();
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [isExpanded]);
+
 
   const toggleMenu = () => {
     if (!isExpanded) {
@@ -172,14 +161,9 @@ const CardNav = ({
     }
   };
 
-  // Select a filter: call onSelect, then close — don't rebuild timeline
+  // Select a filter: call onSelect, stay open — close only via X
   const handleLinkSelect = (onSelect: () => void) => {
     onSelect();
-    setIsHamburgerOpen(false);
-    if (tlRef.current) {
-      tlRef.current.eventCallback('onReverseComplete', () => setIsExpanded(false));
-      tlRef.current.reverse();
-    }
   };
 
   const setCardRef = (i: number) => (el: HTMLDivElement | null) => {
