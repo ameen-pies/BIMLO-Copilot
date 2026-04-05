@@ -18,6 +18,96 @@
 import React, {
   useState, useEffect, useRef, useCallback,
 } from "react";
+
+// ── Hue → packed hex colour ───────────────────────────────────────────────────
+function hueToHex(h: number): number {
+  const s = 0.65, l = 0.55;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  const r = Math.round(f(0) * 255);
+  const g = Math.round(f(8) * 255);
+  const b = Math.round(f(4) * 255);
+  return (r << 16) | (g << 8) | b;
+}
+
+// ── Vanta NET background with side-only mask ──────────────────────────────────
+const VantaBackground: React.FC<{ isDark: boolean; orbHue: number }> = ({ isDark, orbHue }) => {
+  const vantaRef  = useRef<HTMLDivElement>(null);
+  const effectRef = useRef<any>(null);
+  const readyRef  = useRef(false);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const loadScript = (src: string) =>
+      new Promise<void>((resolve, reject) => {
+        if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+        const s = document.createElement("script");
+        s.src = src; s.onload = () => resolve(); s.onerror = reject;
+        document.head.appendChild(s);
+      });
+
+    let cancelled = false;
+
+    const init = async () => {
+      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js");
+      await loadScript("https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.net.min.js");
+      if (cancelled || !vantaRef.current || !(window as any).VANTA) return;
+
+      const netColor = orbHue === 0 ? (isDark ? 0x6366f1 : 0x3b82f6) : hueToHex(orbHue);
+
+      effectRef.current = (window as any).VANTA.NET({
+        el: vantaRef.current,
+        mouseControls: true, touchControls: true, gyroControls: false,
+        minHeight: 200, minWidth: 200, scale: 1.0, scaleMobile: 1.0,
+        color: netColor,
+        backgroundColor: isDark ? 0x07080f : 0xf5f4fb,
+        points: 5.0, maxDistance: 24.0, spacing: 20.0,
+      });
+      readyRef.current = true;
+      setVisible(true);
+    };
+
+    init().catch(console.error);
+    return () => {
+      cancelled = true;
+      if (effectRef.current) { effectRef.current.destroy(); effectRef.current = null; }
+      readyRef.current = false;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync net color to orb hue (no rebuild)
+  useEffect(() => {
+    if (!readyRef.current || !effectRef.current) return;
+    const netColor = orbHue === 0 ? (isDark ? 0x6366f1 : 0x3b82f6) : hueToHex(orbHue);
+    effectRef.current.setOptions({ color: netColor });
+  }, [orbHue, isDark]);
+
+  // Fade bg on theme switch (no rebuild)
+  useEffect(() => {
+    if (!readyRef.current || !effectRef.current) return;
+    effectRef.current.setOptions({ backgroundColor: isDark ? 0x07080f : 0xf5f4fb });
+  }, [isDark]);
+
+  return (
+    <div
+      ref={vantaRef}
+      style={{
+        position: "fixed", inset: 0, zIndex: 0,
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.8s ease",
+        WebkitMaskImage:
+          "linear-gradient(to right, black 0%, black 18%, transparent 38%, transparent 62%, black 82%, black 100%)",
+        maskImage:
+          "linear-gradient(to right, black 0%, black 18%, transparent 38%, transparent 62%, black 82%, black 100%)",
+        pointerEvents: "none",
+      }}
+    />
+  );
+};
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown, X } from "lucide-react";
@@ -877,7 +967,8 @@ const CallPage: React.FC = () => {
       transition={{ duration: 0.4, ease: "easeOut" }}
     >
 
-      {/* ── Floating lines background — memoized, never re-renders with CallPage state */}
+      {/* ── Vanta NET background — side-masked ── */}
+      <VantaBackground isDark={isDark} orbHue={orbHue} />
 
       {/* ── Silence warning banner ── */}
       <AnimatePresence>
