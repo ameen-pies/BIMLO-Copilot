@@ -196,6 +196,105 @@ def _enrich_node(state: PipelineState) -> PipelineState:
     return {**state, "enriched": enriched, "errors": errors}
 
 
+
+
+def _filter_node(state: PipelineState) -> PipelineState:
+    """
+    LLM-powered content filter — removes articles that are inappropriate,
+    off-topic, NSFW, or have nothing to do with telecom/construction/tech industry.
+    Falls back to a fast keyword blocklist if LLM is unavailable.
+    """
+    items = state["enriched"]
+    if not items:
+        return {**state, "enriched": []}
+
+    # ── Fast keyword pre-filter (catches obvious stuff instantly) ──────────────
+    BLOCKLIST = [
+        "porn", "pornhub", "onlyfans", "xxx", "nsfw", "nude", "nudity",
+        "escort", "sex tape", "leaked video", "adult film", "adult content",
+        "gambling", "casino", "betting odds", "sportsbook", "lottery jackpot",
+        "celebrity gossip", "divorce", "affair", "cheating scandal",
+        "crypto scam", "get rich quick", "make money fast", "lewd", "tabloid", "clickbait",
+        "political opinion", "election", "vote", "partisan", "congress", "senate", "white house", "president", "prime minister",
+        "drugs", "marijuana", "cannabis", "opioid", "heroin", "cocaine", "methamphetamine", "fentanyl",
+    ]
+
+    def _keyword_clean(art: dict) -> bool:
+        haystack = (
+            (art.get("title") or "") + " " +
+            (art.get("raw_summary") or "") + " " +
+            (art.get("source") or "") + " " +
+            (art.get("article_url") or "")
+        ).lower()
+        return not any(kw in haystack for kw in BLOCKLIST)
+
+    pre_filtered = [a for a in items if _keyword_clean(a)]
+    kw_removed   = len(items) - len(pre_filtered)
+    if kw_removed:
+        logger.info(f"   filter_node: keyword pre-filter removed {kw_removed} articles")
+
+    # ── LLM batch filter ───────────────────────────────────────────────────────
+    try:
+        from llm_client import call_llm, check_llm_available
+        available, provider = check_llm_available()
+    except ImportError:
+        available = False
+
+    if not available or not pre_filtered:
+        logger.info(f"   filter_node: LLM unavailable — keyword filter only, {len(pre_filtered)} articles kept")
+        return {**state, "enriched": pre_filtered}
+
+    # Batch articles into groups of 15 to save LLM calls
+    BATCH = 15
+    accepted = []
+
+    for batch_start in range(0, len(pre_filtered), BATCH):
+        batch = pre_filtered[batch_start: batch_start + BATCH]
+
+        lines = "\n".join(
+            f"{i+1}. [{a.get('category','')}] {a.get('title','')} | {a.get('source','')}"
+            for i, a in enumerate(batch)
+        )
+
+        prompt = (
+            "You are a strict content moderator for a professional telecom and construction industry news platform.\n"
+            "Review the articles below. For each, reply with only its number if it should be REJECTED.\n"
+            "Reject articles that are: NSFW/adult/sexual, gambling, celebrity gossip, "
+            "tabloid clickbait, crypto scams, political opinion pieces unrelated to telecom/construction, "
+            "or completely off-topic from: 5G, fiber, broadband, telecom regulation, construction, "
+            "BIM, digital twins, AI in construction/telecom.\n"
+            "If an article is borderline but industry-relevant, KEEP it.\n"
+            "Reply with ONLY a comma-separated list of rejected numbers, or 'none' if all are fine.\n\n"
+            f"Articles:\n{lines}"
+        )
+
+        try:
+            raw = call_llm(prompt=prompt, system_prompt="You are a content moderation assistant. Be strict but fair.", max_tokens=100, temperature=0.0)
+            raw = raw.strip().lower()
+
+            if raw == "none" or not raw:
+                rejected_indices = set()
+            else:
+                rejected_indices = set()
+                for part in re.split(r"[,\s]+", raw):
+                    part = part.strip().rstrip(".")
+                    if part.isdigit():
+                        rejected_indices.add(int(part) - 1)  # convert to 0-based
+
+            kept    = [a for i, a in enumerate(batch) if i not in rejected_indices]
+            removed = len(batch) - len(kept)
+            if removed:
+                logger.info(f"   filter_node: LLM rejected {removed} articles in batch starting at {batch_start}")
+            accepted.extend(kept)
+
+        except Exception as e:
+            logger.warning(f"   filter_node: LLM batch failed ({e}) — keeping batch as-is")
+            accepted.extend(batch)
+
+    total_removed = len(items) - len(accepted)
+    logger.info(f"   filter_node: {len(items)} → {len(accepted)} articles ({total_removed} total removed)")
+    return {**state, "enriched": accepted}
+
 def _dedup_node(state: PipelineState) -> PipelineState:
     """
     Three-layer dedup:
@@ -336,13 +435,15 @@ def _build_graph():
     g = StateGraph(PipelineState)
     g.add_node("search",   _search_node)
     g.add_node("enrich",   _enrich_node)
+    g.add_node("filter",   _filter_node)
     g.add_node("dedup",    _dedup_node)
     g.add_node("paginate", _paginate_node)
     g.add_node("persist",  _persist_node)
 
     g.set_entry_point("search")
     g.add_edge("search",   "enrich")
-    g.add_edge("enrich",   "dedup")
+    g.add_edge("enrich",   "filter")
+    g.add_edge("filter",   "dedup")
     g.add_edge("dedup",    "paginate")
     g.add_edge("paginate", "persist")
     from langgraph.graph import END
@@ -430,7 +531,7 @@ def _execute(force: bool = False) -> None:
         # Fallback: run nodes manually without LangGraph
         logger.warning("LangGraph unavailable — running pipeline manually")
         state = initial_state
-        for node_fn in [_search_node, _enrich_node, _dedup_node, _paginate_node, _persist_node]:
+        for node_fn in [_search_node, _enrich_node, _filter_node, _dedup_node, _paginate_node, _persist_node]:
             state = node_fn(state)
         return
 
