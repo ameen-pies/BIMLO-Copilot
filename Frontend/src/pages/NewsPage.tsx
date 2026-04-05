@@ -832,6 +832,7 @@ const NewsPage = () => {
 
   useEffect(() => {
     document.documentElement.classList.add("scrollbar-thin");
+    window.scrollTo(0, 0);
     return () => document.documentElement.classList.remove("scrollbar-thin");
   }, []);
 

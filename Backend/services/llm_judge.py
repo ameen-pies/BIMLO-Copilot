@@ -205,7 +205,7 @@ class LLMJudge:
         if conversation_history and len(conversation_history) > 0:
             history_section = f"\n\nRECENT CONVERSATION:\n" + "\n".join(conversation_history[-3:])
         
-        return f"""You are a response planner. Analyze the query and output a JSON plan.
+        return f"""You are a response planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, a company specialising in BIM engineering (3D–7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies, and DeepTwin AI digital twins. Users are professionals in BTP/construction and telecom. Analyze the query and output a JSON plan.
 
 QUERY: {user_query}
 {docs_section}
@@ -255,7 +255,7 @@ Respond ONLY with this JSON:
             ])
             docs_section = f"\n\nSOURCE DOCUMENTS:\n{docs_formatted}"
         
-        return f"""You are a response evaluator. Score this RAG response.
+        return f"""You are a response evaluator for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). Score this RAG response.
 
 QUERY: {user_query}
 PLAN: language={plan.target_language}, tone={plan.target_tone}, style={plan.response_style}

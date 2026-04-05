@@ -1003,7 +1003,10 @@ def _generate_report_content(
 
     # ── Step 0: Detect intent ─────────────────────────────────────────────────
     intent_system = (
-        "You are a report planner. Extract exactly what the user wants in their report. "
+        "You are a report planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, "
+        "a company specialising in BIM engineering (3D–7D digital models), Scan to BIM, BIM 4D construction planning, "
+        "telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins. "
+        "Extract exactly what the user wants in their report. "
         "Respond ONLY in valid JSON — no markdown fences, no preamble."
     )
     intent_prompt = (
@@ -1035,7 +1038,9 @@ def _generate_report_content(
 
     # ── Step 1: Plan sections ─────────────────────────────────────────────────
     plan_system = (
-        "You are an expert analyst. Plan a professional report structure. "
+        "You are an expert analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
+        "(BIM engineering, telecom infrastructure, DeepTwin AI). "
+        "Plan a professional report structure tailored to BTP/construction and telecom professionals. "
         "Every planned section MUST be answerable from the provided document excerpts. "
         "Do NOT plan sections that require information not in the documents. "
         "Respond ONLY in valid JSON — no markdown fences, no preamble."
@@ -1139,7 +1144,9 @@ def _generate_report_content(
 
     # ── Step 2: Generate each section ─────────────────────────────────────────
     section_system = (
-        f"You are a technical writer producing a {report_type} in {detected_language}. "
+        f"You are a technical writer for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
+        f"(BIM engineering, telecom infrastructure, DeepTwin AI). "
+        f"You are producing a {report_type} in {detected_language} for professionals in BTP/construction and telecom. "
         "CRITICAL RULE: Write ONLY what is directly supported by the provided document excerpts. "
         "If a fact is not in the excerpts, do NOT include it. "
         "Cite the source document name when you use specific data. "
@@ -1385,6 +1392,7 @@ def _generate_report_content(
     ) if source_docs else "your documents"
 
     summary_system = (
+        "You are Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
         "You are a sharp, friendly assistant delivering a report to its requester. "
         "You write like a knowledgeable colleague handing over a finished piece of work — "
         "direct, warm, specific. No corporate fluff, no hollow filler. "

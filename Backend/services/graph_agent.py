@@ -385,8 +385,9 @@ class GraphAgent:
             )
 
         system = (
-            "You are a data extraction specialist. Your job is to read document "
-            "text and extract structured numerical data for chart generation. "
+            "You are a data extraction specialist for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, "
+            "a company specialising in BIM engineering, telecom infrastructure, and DeepTwin AI. "
+            "Your job is to read document text and extract structured numerical data for chart generation. "
             "You return ONLY valid JSON — no markdown, no explanation, no backticks."
         )
 
@@ -707,7 +708,8 @@ DOCUMENTS:
         context = self._build_context(chunks, max_chars_per_chunk=1200)
 
         system = (
-            "You are a data analyst helping a user choose what to chart. "
+            "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
+            "You help users choose what to chart from their BIM, construction, or telecom documents. "
             "You return ONLY valid JSON — no markdown, no explanation, no backticks."
         )
 
@@ -793,8 +795,9 @@ DOCUMENTS:
         data_summary = "\n".join(data_lines)
 
         system = (
-            "You are a data analyst writing chart interpretations. "
-            "You give sharp, specific insights — not generic observations. "
+            "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
+            "(BIM engineering, telecom infrastructure, DeepTwin AI). "
+            "You give sharp, specific insights relevant to BTP/construction and telecom professionals — not generic observations. "
             "Respond in plain prose with no markdown, no bullet points."
         )
 
