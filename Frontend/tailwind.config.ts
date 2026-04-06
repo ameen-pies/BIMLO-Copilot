@@ -13,7 +13,7 @@ export default {
       },
     },
     fontFamily: {
-      heading: ['Josefin Sans', 'sans-serif'],
+      heading: ['Montserrat', 'sans-serif'],
       body: ['Inter', 'sans-serif'],
     },
     extend: {
