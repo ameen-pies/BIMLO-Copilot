@@ -13,7 +13,7 @@ export default {
       },
     },
     fontFamily: {
-      heading: ['Space Grotesk', 'sans-serif'],
+      heading: ['Josefin Sans', 'sans-serif'],
       body: ['Inter', 'sans-serif'],
     },
     extend: {
