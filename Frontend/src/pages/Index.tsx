@@ -468,16 +468,25 @@ const Index = () => {
                   animate={{ y: [0, 8, 0] }}
                   transition={{ y: { duration: 1.5, repeat: Infinity, ease: "easeInOut" } }}
                   className="cursor-pointer text-3xl text-primary"
-                  onClick={() => document.getElementById("features")?.scrollIntoView({ behavior: "smooth" })}
+                  onClick={() => {
+                    const el = document.getElementById("trending");
+                    if (el) {
+                      const pos = el.getBoundingClientRect().top + window.pageYOffset - 64.2;
+                      window.scrollTo({ top: pos, behavior: "smooth" });
+                    }
+                  }}
                 >↓</motion.div>
               </motion.div>
             </motion.div>
           </div>
         </section>
 
+        {/* Trending — live infinite ticker (2nd, right after hero) */}
+        <TrendingSection />
+
         {/* Features */}
         <section className="content-above-bg pt-0 pb-24 px-6 mt-8">
-          <div id="features" style={{ position: "relative", top: "-110px" }} />
+          <div id="features" style={{ position: "relative", top: "-70px" }} />
           <div className="container mx-auto">
             <div className="flex flex-col lg:flex-row items-center gap-16">
               <div className="flex-1">
@@ -554,7 +563,7 @@ const Index = () => {
 
         {/* How it works */}
         <section className="content-above-bg py-8 px-6 bg-secondary/50 backdrop-blur-xl mb-24 mt-16">
-          <div id="how-it-works" style={{ position: "relative", top: "400px" }} />
+          <div id="how-it-works" style={{ position: "relative", top: "-90px" }} />
           <div className="container mx-auto text-center">
             <motion.h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-6"
               initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={0}>
@@ -576,9 +585,6 @@ const Index = () => {
             </div>
           </div>
         </section>
-
-        {/* Trending — live infinite ticker */}
-        <TrendingSection />
 
         {/* Footer */}
         <footer className="content-above-bg py-12 px-6 border-t border-border">

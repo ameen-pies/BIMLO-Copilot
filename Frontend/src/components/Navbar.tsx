@@ -29,17 +29,17 @@ const Navbar = () => {
         </Link>
 
         <div className="hidden md:flex items-center gap-8">
-          <a href="#features" onClick={scrollTo('features', 64)}
+          <a href="#trending" onClick={scrollTo('trending', 0)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            Trending
+          </a>
+          <a href="#features" onClick={scrollTo('features', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Features
           </a>
-          <a href="#how-it-works" onClick={scrollTo('how-it-works', -160)}
+          <a href="#how-it-works" onClick={scrollTo('how-it-works', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             How it works
-          </a>
-          <a href="#trending" onClick={scrollTo('trending', -20)}
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            Trending
           </a>
           <a href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Documentation
