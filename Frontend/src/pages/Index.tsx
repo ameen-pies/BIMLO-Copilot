@@ -426,7 +426,7 @@ const Index = () => {
         <Navbar />
 
         {/* Hero */}
-        <section className="content-above-bg relative pt-40 pb-24 px-6 min-h-screen flex items-center overflow-hidden">
+        <section className="content-above-bg relative pt-40 pb-24 px-6 min-h-screen flex items-center overflow-visible">
           <div className="absolute top-20 left-1/4 w-[500px] h-[500px] rounded-full bg-primary/5 blur-3xl pointer-events-none" />
           <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] rounded-full bg-primary/8 blur-3xl pointer-events-none" />
           <div className="container mx-auto relative z-10 flex flex-col items-center text-center">
@@ -436,11 +436,11 @@ const Index = () => {
               </span>
             </motion.div>
             <motion.h1
-              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-tight max-w-4xl mb-6 flex flex-col items-center"
+              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-normal max-w-4xl -mb-4 flex flex-col items-center"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
               <span>Your intelligent partner</span>
-              <motion.span className="flex items-center justify-center gap-3" layout transition={{ duration: 0.3, ease: "easeInOut" }}>
+              <motion.span className="flex items-center justify-center gap-3 py-2 overflow-visible" layout transition={{ duration: 0.3, ease: "easeInOut" }}>
                 for <RotatingWords />
               </motion.span>
             </motion.h1>
