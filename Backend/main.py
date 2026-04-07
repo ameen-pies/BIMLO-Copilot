@@ -53,6 +53,15 @@ except ImportError:
     _news_chat_available = False
     print("⚠️  news_chat_agent not found — /api/news/chat will 503")
 
+try:
+    from cad_ifc_agent import router as cad_ifc_router
+    _cad_ifc_available = True
+    print("✅ cad_ifc_agent loaded — /api/cad/upload + /api/cad/query ready")
+except ImportError as _e:
+    cad_ifc_router     = None
+    _cad_ifc_available = False
+    print(f"⚠️  cad_ifc_agent not found — /api/cad endpoints will 503 ({_e})")
+
 app = FastAPI(
     title="BIMLO Copilot Télécom API",
     version="3.0.0",
@@ -87,6 +96,8 @@ app.include_router(autocomplete_router)
 app.include_router(report_router)
 if _news_chat_available:
     app.include_router(news_chat_router)
+if _cad_ifc_available:
+    app.include_router(cad_ifc_router)
 
 DATA_DIR    = os.getenv("DATA_DIR", "/home/claude/bimlo-copilot/data")
 UPLOAD_DIR  = os.path.join(DATA_DIR, "uploads")
@@ -851,6 +862,7 @@ async def health_check():
             "graph":        "LangGraph agentic RAG",
             "statistics":   stats,
             "active_sessions": len(_sessions),
+            "cad_ifc_agent": "available" if _cad_ifc_available else "unavailable",
         }
     except Exception as e:
         return {"status": "degraded", "timestamp": datetime.now().isoformat(), "error": str(e)}
@@ -876,6 +888,7 @@ async def startup_event():
         print("⚠️  Vector store stats unavailable")
     print(f"🔑 Groq API: {'✅ configured' if os.getenv('GROQ_API_KEY') else '⚠️  not configured'}")
     print(f"📰 News pipeline: {'✅ available' if _news_pipeline_available else '⚠️  not available'}")
+    print(f"🏗️  CAD/IFC agent: {'✅ available' if _cad_ifc_available else '⚠️  not available'}")
 
     # ── News pipeline scheduler (every 4 days) ────────────────────────────
     if _news_pipeline_available:

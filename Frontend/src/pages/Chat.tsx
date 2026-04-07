@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw, Phone } from "lucide-react";
+import { Send, FileText, X, User, ArrowLeft, Plus, Loader2, AlertCircle, ChevronDown, ChevronUp, ExternalLink, ScrollText, Eye, Square, ThumbsUp, ThumbsDown, RotateCcw, Pencil, Check, Copy, ImageIcon, Search, MessageSquare, Clock, SortAsc, FolderOpen, Trash2, Sparkles, Bell, BellOff, BookOpen, BarChart2, ChevronRight, RefreshCw, Phone, Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link, useNavigate } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
@@ -12,6 +12,7 @@ import api, { Document, Source } from "@/services/api";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import BorderGlow from "@/components/BorderGlow";
+import CadPanel from "@/components/CadPanel";
 
 interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
 
@@ -2433,6 +2434,7 @@ const Chat = () => {
   const [reportsPanelOpen, setReportsPanelOpen] = useState(false);
   const reportsPanelOpenRef = useRef(false);
   reportsPanelOpenRef.current = reportsPanelOpen;
+  const [cadPanelOpen, setCadPanelOpen] = useState(false);
   const [reports, setReports] = useState<ReportRecord[]>([]);
   const [activeReport, setActiveReport] = useState<ReportRecord | null>(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
@@ -4653,8 +4655,6 @@ const Chat = () => {
                     <Loader2 className="h-3 w-3 animate-spin ml-0.5" />
                   )}
                 </button>
-
-                {/* Dropdown panel */}
                 <div
                   className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-[9999] flex flex-col"
                   style={{
@@ -5210,6 +5210,18 @@ const Chat = () => {
                 </div>
             </div>
             {/* ── Call pill ── */}
+            {/* ── CAD / IFC button ── */}
+            <button onClick={() => setCadPanelOpen(v => !v)} title="CAD / IFC"
+              className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+                cadPanelOpen
+                  ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                  : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
+              }`}
+            >
+              <Building2 className="h-3.5 w-3.5 shrink-0" />
+              <span>CAD</span>
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -6267,6 +6279,20 @@ const Chat = () => {
           />
         )}
       </AnimatePresence>
+
+      {/* CAD / IFC Panel */}
+      <CadPanel
+        open={cadPanelOpen}
+        onClose={() => setCadPanelOpen(false)}
+        apiBase={getApiBase()}
+        sessionId={sessionId}
+        onAnswer={(answer) => setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: "assistant",
+          content: answer,
+          timestamp: new Date(),
+        }])}
+      />
 
       {/* ── Filename autocomplete — fixed portal, never clipped ── */}
       <AnimatePresence>
