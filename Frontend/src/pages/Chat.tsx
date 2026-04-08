@@ -608,7 +608,8 @@ interface ViewerState {
   highlightLines: string[] | null;
   highlightKey: number;
   blobUrl?: string;          // object URL for PDF/image local preview
-  mediaType?: "pdf" | "image" | "txt";  // what kind of viewer to show
+  mediaType?: "pdf" | "image" | "txt" | "cad";  // what kind of viewer to show
+  cadSummary?: Record<string, unknown>;           // parsed CAD/IFC summary from upload
 }
 
 interface DocumentViewerProps {
@@ -699,14 +700,155 @@ function renderDocumentContent(
 }
 
 // ---------------------------------------------------------------------------
-// PDF.js viewer with highlight support
+// Xeokit IFC/CAD 3D Viewer
 // ---------------------------------------------------------------------------
 
 declare global {
   interface Window {
     pdfjsLib: any;
+    XKT_VERSION?: string;
   }
 }
+
+interface XeokitViewerProps {
+  blobUrl: string;
+  filename: string;
+  pipeline: string; // 'ifc' | 'cad'
+}
+
+function loadXeokitScripts(): Promise<void> {
+  if ((window as any).__xeokitLoaded) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    // unpkg UMD — exposes Viewer, WebIFCLoaderPlugin etc. directly on window
+    const s = document.createElement("script");
+    s.src = "https://unpkg.com/@xeokit/xeokit-sdk@2.6.1/dist/xeokit-sdk.umd.min.js";
+    s.async = true;
+    s.onload = () => {
+      if (typeof (window as any).Viewer !== "function") {
+        reject(new Error("xeokit UMD loaded but window.Viewer not found"));
+        return;
+      }
+      (window as any).__xeokitLoaded = true;
+      resolve();
+    };
+    s.onerror = () => reject(new Error("Failed to load xeokit-sdk UMD"));
+    document.head.appendChild(s);
+  });
+}
+// web-ifc has no script-tag-safe browser bundle — xeokit's WebIFCLoaderPlugin
+// fetches the WASM itself at runtime via wasmPath; no extra <script> needed.
+
+function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewerRef = useRef<any>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [errMsg, setErrMsg] = useState("");
+
+  useEffect(() => {
+    let destroyed = false;
+
+    async function init() {
+      try {
+        setStatus("loading");
+
+        // 1. Load xeokit UMD (web-ifc WASM is fetched at runtime by the plugin)
+        await loadXeokitScripts();
+
+        if (destroyed) return;
+
+        // 2. UMD build exposes classes directly on window, not under window.xeokit
+        const Viewer             = (window as any).Viewer;
+        const WebIFCLoaderPlugin = (window as any).WebIFCLoaderPlugin;
+
+        if (!Viewer)             throw new Error("window.Viewer not found after xeokit load");
+        if (!WebIFCLoaderPlugin) throw new Error("window.WebIFCLoaderPlugin not found");
+        if (!canvasRef.current)  throw new Error("Canvas ref is null");
+
+        // 3. Create viewer
+        const viewer = new Viewer({
+          canvasElement: canvasRef.current,
+          transparent: true,
+          spinningEnabled: true,
+        });
+        viewerRef.current = viewer;
+
+        viewer.camera.eye  = [10, 10, 10];
+        viewer.camera.look = [0, 0, 0];
+        viewer.camera.up   = [0, 1, 0];
+
+        // 4. Load model based on type
+        const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+        const isIfc = ["ifc", "ifczip"].includes(ext);
+
+        if (isIfc) {
+          // wasmPath version must match the web-ifc script loaded above
+          const loader = new WebIFCLoaderPlugin(viewer, {
+            wasmPath: "https://unpkg.com/web-ifc@0.0.51/",
+          });
+          const model = loader.load({ id: "model", src: blobUrl, edges: true, performance: true });
+          model.on("loaded", () => {
+            if (destroyed) return;
+            viewer.cameraFlight.flyTo(model);
+            setStatus("ready");
+          });
+          model.on("error", (e: any) => {
+            if (!destroyed) { setErrMsg(typeof e === "string" ? e : (e?.message ?? "Model load error")); setStatus("error"); }
+          });
+        } else {
+          // DXF/STEP: no native xeokit parser
+          throw new Error(`.${ext} files cannot be rendered in 3D. Convert to IFC for the 3D viewer. AI analysis still works via chat.`);
+        }
+      } catch (e: any) {
+        if (!destroyed) { setErrMsg(e?.message ?? String(e)); setStatus("error"); }
+      }
+    }
+
+    init();
+
+    return () => {
+      destroyed = true;
+      if (viewerRef.current) {
+        try { viewerRef.current.destroy(); } catch {}
+        viewerRef.current = null;
+      }
+    };
+  }, [blobUrl, filename]);
+
+  // Mouse-wheel zoom and orbit handled natively by xeokit CameraControl
+  return (
+    <div className="relative w-full bg-black/80 rounded-lg overflow-hidden" style={{ height: 320 }}>
+      <canvas
+        ref={canvasRef}
+        className="w-full h-full block"
+        style={{ touchAction: "none" }}
+      />
+      {status === "loading" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60">
+          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+          <p className="text-xs text-white/70">Loading 3D model…</p>
+        </div>
+      )}
+      {status === "error" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 p-4 text-center">
+          <AlertCircle className="h-6 w-6 text-destructive" />
+          <p className="text-xs text-white/80">{errMsg || "3D viewer unavailable"}</p>
+          <p className="text-[10px] text-white/40">AI analysis still works via chat ↓</p>
+        </div>
+      )}
+      {status === "ready" && (
+        <div className="absolute bottom-2 right-2 flex gap-1">
+          <span className="text-[9px] text-white/30 bg-black/40 px-1.5 py-0.5 rounded">
+            drag · scroll · right-drag
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PDF.js viewer with highlight support
+// ---------------------------------------------------------------------------
 
 interface PdfViewerProps {
   blobUrl: string;
@@ -1285,7 +1427,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
     >
       {/* Header */}
       <div className="h-14 border-b border-border flex items-center gap-3 px-4 shrink-0">
-        {state.mediaType === 'image' ? <ImageIcon className="h-4 w-4 text-primary shrink-0" /> : <ScrollText className="h-4 w-4 text-primary shrink-0" />}
+        {state.mediaType === 'image' ? <ImageIcon className="h-4 w-4 text-primary shrink-0" /> : state.mediaType === 'cad' ? <FileText className="h-4 w-4 text-primary shrink-0" /> : <ScrollText className="h-4 w-4 text-primary shrink-0" />}
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-foreground truncate">{state.doc.filename}</p>
           <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{state.doc.doc_type}</p>
@@ -1320,7 +1462,166 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
         )}
 
         {!state.loading && !state.error && (
-          state.mediaType === 'image' ? (
+          state.mediaType === 'cad' ? (
+            <div className="p-4 space-y-4 overflow-y-auto h-full">
+              {/* ── Xeokit 3D Viewer (IFC only) ── */}
+              {state.blobUrl && state.cadSummary && (
+                (() => {
+                  const ps = state.cadSummary as any;
+                  const pl = (ps.pipeline ?? '').toLowerCase();
+                  const fn = (state.doc?.filename ?? ps.filename ?? 'model.ifc');
+                  const isIfc3D = pl === 'ifc';
+                  return isIfc3D ? (
+                    <XeokitViewer
+                      blobUrl={state.blobUrl}
+                      filename={fn}
+                      pipeline={pl}
+                    />
+                  ) : null;
+                })()
+              )}
+              {/* CAD/IFC Summary Panel */}
+              {state.cadSummary ? (() => {
+                const s = state.cadSummary as any;
+                const pipeline = (s.pipeline ?? 'cad').toUpperCase();
+                const isIfc = pipeline === 'IFC';
+                return (
+                  <div className="space-y-3">
+                    {/* Header badge */}
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30">
+                        {pipeline}
+                      </span>
+                      {s.schema && <span className="text-[10px] text-muted-foreground">Schema: {s.schema}</span>}
+                      {s.dimension && <span className="text-[10px] text-muted-foreground">{s.dimension}</span>}
+                    </div>
+
+                    {/* UX hint */}
+                    {s.ux_hint && (
+                      <div className="bg-primary/8 border border-primary/20 rounded-lg px-3 py-2">
+                        <p className="text-xs text-primary/80 leading-relaxed">{s.ux_hint}</p>
+                      </div>
+                    )}
+
+                    {/* Parse errors */}
+                    {s.parse_errors && s.parse_errors.length > 0 && (
+                      <div className="bg-destructive/8 border border-destructive/20 rounded-lg px-3 py-2">
+                        <p className="text-[10px] font-semibold text-destructive uppercase tracking-wide mb-1">Parse Warnings</p>
+                        {s.parse_errors.map((e: string, i: number) => (
+                          <p key={i} className="text-xs text-destructive/80">{e}</p>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Totals */}
+                    <div className="grid grid-cols-2 gap-2">
+                      {s.total_elements != null && (
+                        <div className="bg-muted/50 rounded-lg p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Elements</p>
+                          <p className="text-xl font-bold text-foreground">{s.total_elements.toLocaleString()}</p>
+                        </div>
+                      )}
+                      {s.total_entities != null && (
+                        <div className="bg-muted/50 rounded-lg p-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Entities</p>
+                          <p className="text-xl font-bold text-foreground">{s.total_entities.toLocaleString()}</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Storeys */}
+                    {isIfc && s.storeys && s.storeys.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Building Storeys</p>
+                        <div className="space-y-1">
+                          {s.storeys.map((st: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between bg-muted/40 rounded px-2 py-1.5 text-xs">
+                              <span className="text-foreground font-medium">{st.name ?? `Storey ${i+1}`}</span>
+                              {st.elevation != null && <span className="text-muted-foreground">{typeof st.elevation === 'number' ? st.elevation.toFixed(2) : st.elevation} m</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Element counts */}
+                    {s.element_counts && Object.keys(s.element_counts).length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Element Types</p>
+                        <div className="space-y-1">
+                          {Object.entries(s.element_counts as Record<string, number>)
+                            .sort(([,a],[,b]) => b - a)
+                            .map(([label, count]) => (
+                              <div key={label} className="flex items-center gap-2">
+                                <div className="flex-1 flex items-center justify-between bg-muted/40 rounded px-2 py-1 text-xs">
+                                  <span className="text-foreground capitalize">{label}</span>
+                                  <span className="text-primary font-semibold">{count}</span>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Entity counts (CAD) */}
+                    {s.entity_counts && Object.keys(s.entity_counts).length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Entity Types</p>
+                        <div className="space-y-1">
+                          {Object.entries(s.entity_counts as Record<string, number>)
+                            .sort(([,a],[,b]) => b - a)
+                            .slice(0, 15)
+                            .map(([label, count]) => (
+                              <div key={label} className="flex items-center justify-between bg-muted/40 rounded px-2 py-1 text-xs">
+                                <span className="text-foreground">{label}</span>
+                                <span className="text-primary font-semibold">{count}</span>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Layers (CAD/DXF) */}
+                    {s.layers && s.layers.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Layers ({s.layers.length})</p>
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                          {s.layers.map((layer: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between bg-muted/40 rounded px-2 py-1 text-xs">
+                              <span className="text-foreground font-mono">{layer.name ?? layer}</span>
+                              {layer.entity_count != null && <span className="text-muted-foreground">{layer.entity_count} entities</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Material inventory */}
+                    {s.material_inventory && Object.keys(s.material_inventory).length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Materials</p>
+                        <div className="space-y-1">
+                          {Object.entries(s.material_inventory as Record<string, number>)
+                            .sort(([,a],[,b]) => b - a)
+                            .map(([mat, count]) => (
+                              <div key={mat} className="flex items-center justify-between bg-muted/40 rounded px-2 py-1 text-xs">
+                                <span className="text-foreground">{mat}</span>
+                                <span className="text-primary font-semibold">{count}</span>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })() : (
+                <div className="flex flex-col items-center justify-center h-full gap-3 text-center px-6">
+                  <FileText className="h-10 w-10 text-muted-foreground/40" />
+                  <p className="text-sm text-muted-foreground">No summary available for this file.</p>
+                </div>
+              )}
+            </div>
+          ) : state.mediaType === 'image' ? (
             <div className="flex flex-col items-center justify-center h-full p-4 gap-4">
               <img
                 src={state.blobUrl}
@@ -2468,7 +2769,7 @@ const Chat = () => {
   const [openSourceKey, setOpenSourceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
-  const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" }>>(new Map());
+  const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" | "cad"; cadSummary?: Record<string, unknown> }>>(new Map());
   const bubbleHighlightRef = useRef<HTMLElement>(null);
   const bubbleScrollRef    = useRef<HTMLDivElement>(null);
   bubbleViewerRef.current  = bubbleViewer; // always-fresh mirror, no stale closure
@@ -2936,7 +3237,26 @@ const Chat = () => {
 
     const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
     const isPdfOrImage = ext === 'pdf' || IMAGE_EXTS.includes(`.${ext}`);
+    const isCadExt = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'].includes(`.${ext}`);
     setBubbleDoc(doc);
+
+    // ── CAD/IFC: use the locally cached blob + summary, never hit /content ──
+    if (isCadExt) {
+      const cached = blobUrlMapRef.current.get(doc.document_id);
+      setBubbleViewer({
+        doc,
+        content: null,
+        loading: false,
+        error: null,
+        highlightText,
+        highlightLines,
+        highlightKey: 0,
+        mediaType: 'cad',
+        blobUrl: cached?.url,
+        cadSummary: cached?.cadSummary,
+      });
+      return;
+    }
 
     if (isPdfOrImage) {
       const cached = blobUrlMapRef.current.get(doc.document_id);
@@ -2965,6 +3285,24 @@ const Chat = () => {
   const openDocumentViewer = async (doc: Document, highlightText: string | null = null, highlightLines: string[] | null = null) => {
     const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
     const isPdfOrImage = ext === 'pdf' || IMAGE_EXTS.includes(`.${ext}`);
+    const isCadExt = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'].includes(`.${ext}`);
+
+    if (isCadExt) {
+      const cached = blobUrlMapRef.current.get(doc.document_id);
+      setViewer({
+        doc,
+        content: null,
+        loading: false,
+        error: null,
+        highlightText,
+        highlightLines,
+        highlightKey: 0,
+        mediaType: 'cad',
+        cadSummary: cached?.cadSummary,
+        blobUrl: cached?.url,
+      });
+      return;
+    }
 
     if (isPdfOrImage) {
       // Show loading state immediately, then fetch blob in background
@@ -3659,16 +3997,17 @@ const Chat = () => {
   };
 
   const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
-  const CAD_EXTS = ['.ifc', '.dxf', '.dwg'];
+  const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'];
   const ALLOWED_EXTS = ['.pdf', '.docx', '.doc', '.txt', ...IMAGE_EXTS, ...CAD_EXTS];
 
   const _processUploadFile = async (file: File) => {
     const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
     const isImage = IMAGE_EXTS.includes(fileExt);
     const isPdf   = fileExt === '.pdf';
+    const isCad   = CAD_EXTS.includes(fileExt);
 
     if (!ALLOWED_EXTS.includes(fileExt)) {
-      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, DXF, DWG`, variant: "destructive" });
+      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, IFCZIP, DXF, DWG, STEP`, variant: "destructive" });
       return;
     }
     if (file.size > 50 * 1024 * 1024) {
@@ -3678,18 +4017,44 @@ const Chat = () => {
 
     setIsUploading(true);
     try {
-      const response = await api.uploadDocument(file);
-      const docId = response.document_id ?? response.id ?? response.filename;
+      if (isCad) {
+        // Route CAD/IFC/BIM files to the dedicated agent endpoint
+        const formData = new FormData();
+        formData.append("file", file);
+        const base = getApiBase();
+        const res = await fetch(`${base}/api/cad/upload`, { method: "POST", body: formData });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail ?? "CAD upload failed");
+        }
+        const cadResp = await res.json();
+        // Inject into documents state so it appears in the sidebar like any normal file
+        const cadDoc = {
+          document_id: cadResp.file_id,
+          filename: file.name,
+          doc_type: cadResp.pipeline ?? "cad",
+          chunk_count: cadResp.total_elements ?? cadResp.total_entities ?? 0,
+          created_at: cadResp.cached_at ?? new Date().toISOString(),
+        };
+        setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id)]);
+        const blobUrl = URL.createObjectURL(file);
+        blobUrlMapRef.current.set(cadResp.file_id, { url: blobUrl, type: "cad", cadSummary: cadResp });
+        (window as any).__lastCadFileId = cadResp.file_id;
+        toast({ title: "Uploaded", description: file.name });
+      } else {
+        const response = await api.uploadDocument(file);
+        const docId = response.document_id ?? response.id ?? response.filename;
 
-      // Store a local object URL so the viewer can open it instantly without re-downloading
-      const blobUrl = URL.createObjectURL(file);
-      blobUrlMapRef.current.set(docId, {
-        url: blobUrl,
-        type: isImage ? "image" : isPdf ? "pdf" : "txt",
-      });
+        // Store a local object URL so the viewer can open it instantly without re-downloading
+        const blobUrl = URL.createObjectURL(file);
+        blobUrlMapRef.current.set(docId, {
+          url: blobUrl,
+          type: isImage ? "image" : isPdf ? "pdf" : "txt",
+        });
 
-      toast({ title: "Uploaded", description: response.filename });
-      await loadDocuments();
+        toast({ title: "Uploaded", description: response.filename });
+        await loadDocuments();
+      }
     } catch (error) {
       toast({ title: "Upload failed", description: `${file.name}: ${serializeError(error)}`, variant: "destructive" });
     } finally {
@@ -4462,20 +4827,30 @@ const Chat = () => {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none"
+            transition={{ duration: 0.15 }}
+            className="absolute inset-0 z-50 bg-background/60 backdrop-blur-md flex items-center justify-center pointer-events-none"
           >
             <motion.div
-              initial={{ scale: 0.9 }}
-              animate={{ scale: 1 }}
-              exit={{ scale: 0.9 }}
-              className="border-2 border-dashed border-primary rounded-2xl p-12 bg-card/50"
+              initial={{ scale: 0.95, y: 8 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 8 }}
+              transition={{ type: "spring", stiffness: 400, damping: 30 }}
+              className="relative flex flex-col items-center gap-3 px-10 py-8 rounded-3xl bg-card/70 border border-primary/20 shadow-xl"
+              style={{ backdropFilter: "blur(12px)" }}
             >
-              <div className="text-center">
-                <FileText className="h-16 w-16 text-primary mx-auto mb-4" />
-                <h3 className="text-xl font-semibold text-foreground mb-2">Drop files here</h3>
-                <p className="text-sm text-muted-foreground">
-                  Upload PDF, DOCX, TXT, or images (PNG, JPG)
-                </p>
+              {/* animated ring */}
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: 8, ease: "linear" }}
+                className="absolute inset-0 rounded-3xl border border-primary/10"
+                style={{ background: "conic-gradient(from 0deg, transparent 80%, hsl(var(--primary)/0.15) 100%)" }}
+              />
+              <div className="relative flex items-center justify-center w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20">
+                <FileText className="h-5 w-5 text-primary" />
+              </div>
+              <div className="relative text-center">
+                <p className="text-sm font-medium text-foreground tracking-tight">Drop to upload</p>
+                <p className="text-xs text-muted-foreground/60 mt-0.5">PDF · DOCX · IFC · DXF · DWG · Images</p>
               </div>
             </motion.div>
           </motion.div>
@@ -5138,7 +5513,7 @@ const Chat = () => {
                         </div>
 
                         <div className="p-3 border-t border-border shrink-0">
-                          <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.ifc,.dxf,.dwg" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
+                          <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.ifc,.ifczip,.dxf,.dwg,.step,.stp" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
                           <button
                             onClick={() => fileInputRef.current?.click()}
                             disabled={isUploading}
@@ -5198,6 +5573,66 @@ const Chat = () => {
                                 highlightLines={bubbleViewer.highlightLines ?? null}
                                 highlightKey={bubbleViewer.highlightKey ?? 0}
                               />
+                            ) : bubbleViewer.mediaType === 'cad' ? (
+                              <div className="h-full overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
+                                {bubbleViewer.blobUrl && bubbleViewer.cadSummary && (() => {
+                                  const ps = bubbleViewer.cadSummary as any;
+                                  const pl = (ps.pipeline ?? '').toLowerCase();
+                                  const fn = bubbleDoc.filename;
+                                  return pl === 'ifc' ? (
+                                    <XeokitViewer blobUrl={bubbleViewer.blobUrl} filename={fn} pipeline={pl} />
+                                  ) : null;
+                                })()}
+                                {bubbleViewer.cadSummary && (() => {
+                                  const s = bubbleViewer.cadSummary as any;
+                                  const pipeline = (s.pipeline ?? 'cad').toUpperCase();
+                                  const isIfc = pipeline === 'IFC';
+                                  return (
+                                    <div className="space-y-2 text-xs">
+                                      <div className="flex items-center gap-2">
+                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30">{pipeline}</span>
+                                        {s.schema && <span className="text-muted-foreground">Schema: {s.schema}</span>}
+                                        {s.dimension && <span className="text-muted-foreground">{s.dimension}</span>}
+                                      </div>
+                                      {s.ux_hint && <p className="text-primary/80 bg-primary/8 border border-primary/20 rounded px-2 py-1.5 leading-relaxed">{s.ux_hint}</p>}
+                                      {s.total_elements != null && <div className="bg-muted/50 rounded p-2"><p className="text-[10px] text-muted-foreground uppercase tracking-wide">Elements</p><p className="text-lg font-bold">{s.total_elements.toLocaleString()}</p></div>}
+                                      {isIfc && s.storeys?.length > 0 && (
+                                        <div>
+                                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Storeys</p>
+                                          {s.storeys.map((st: any, i: number) => (
+                                            <div key={i} className="flex justify-between bg-muted/40 rounded px-2 py-1 mb-0.5">
+                                              <span className="font-medium">{st.name ?? `Storey ${i+1}`}</span>
+                                              {st.elevation != null && <span className="text-muted-foreground">{typeof st.elevation === 'number' ? st.elevation.toFixed(2) : st.elevation} m</span>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {s.element_counts && Object.keys(s.element_counts).length > 0 && (
+                                        <div>
+                                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Element Types</p>
+                                          {Object.entries(s.element_counts as Record<string,number>).sort(([,a],[,b])=>b-a).map(([label,count])=>(
+                                            <div key={label} className="flex justify-between bg-muted/40 rounded px-2 py-1 mb-0.5">
+                                              <span className="capitalize">{label}</span>
+                                              <span className="text-primary font-semibold">{count}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {s.layers?.length > 0 && (
+                                        <div>
+                                          <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Layers ({s.layers.length})</p>
+                                          {s.layers.slice(0,12).map((layer: any, i: number) => (
+                                            <div key={i} className="flex justify-between bg-muted/40 rounded px-2 py-1 mb-0.5 font-mono">
+                                              <span>{layer.name ?? layer}</span>
+                                              {layer.entity_count != null && <span className="text-muted-foreground">{layer.entity_count}</span>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
                             ) : bubbleViewer.content !== null ? (
                               <div ref={bubbleScrollRef} className="h-full overflow-y-auto p-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
                                 {renderDocumentContent(bubbleViewer.content, bubbleViewer.highlightText, bubbleHighlightRef, bubbleViewer.highlightKey ?? 0, bubbleViewer.highlightLines ?? null)}
@@ -6025,19 +6460,21 @@ const Chat = () => {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
-                      className="absolute inset-0 z-10 rounded-2xl bg-background/80 backdrop-blur-sm flex items-center justify-center pointer-events-none"
+                      transition={{ duration: 0.12 }}
+                      className="absolute inset-0 z-10 rounded-2xl bg-background/50 backdrop-blur-sm flex items-center justify-center pointer-events-none"
                     >
                       <motion.div
-                        initial={{ scale: 0.9 }}
-                        animate={{ scale: 1 }}
-                        exit={{ scale: 0.9 }}
-                        className="border-2 border-dashed border-primary rounded-2xl p-6 bg-card/50"
+                        initial={{ scale: 0.94, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0.94, opacity: 0 }}
+                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                        className="flex items-center gap-2.5 px-4 py-2 rounded-xl bg-card/80 border border-primary/15 shadow-sm"
                       >
-                        <div className="text-center">
-                          <FileText className="h-8 w-8 text-primary mx-auto mb-2" />
-                          <h3 className="text-sm font-semibold text-foreground mb-1">Drop files here</h3>
-                          <p className="text-xs text-muted-foreground">PDF · DOCX · TXT · PNG · JPG</p>
+                        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-primary/10">
+                          <FileText className="h-3.5 w-3.5 text-primary" />
                         </div>
+                        <span className="text-xs font-medium text-foreground/80">Drop file</span>
+                        <span className="text-[10px] text-muted-foreground/50 font-normal">PDF · IFC · DXF · IMG</span>
                       </motion.div>
                     </motion.div>
                   )}

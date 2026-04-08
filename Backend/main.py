@@ -685,6 +685,16 @@ async def delete_document(doc_id: str):
 async def get_document_content(doc_id: str):
     """Return the raw text content of a stored document for in-app viewing."""
     try:
+        # ── CAD/IFC files live in CadSharedContext, not the vector store ──
+        if _cad_ifc_available:
+            from cad_ifc_agent import CadSharedContext
+            cad_file = CadSharedContext.get_file(doc_id)
+            if cad_file:
+                # Return a JSON summary as readable text so the viewer renders something
+                import json as _json
+                summary_text = _json.dumps(cad_file, indent=2, default=str)
+                return {"document_id": doc_id, "filename": cad_file.get("filename", doc_id), "content": summary_text}
+
         docs = vector_store.list_documents()
         doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
         if not doc_meta:
@@ -745,6 +755,15 @@ async def get_document_content(doc_id: str):
 async def download_document(doc_id: str):
     """Return the original uploaded file as binary for in-app PDF/image viewer."""
     try:
+        # ── CAD/IFC files: not stored on disk via this route — return 404 with hint ──
+        if _cad_ifc_available:
+            from cad_ifc_agent import CadSharedContext
+            if CadSharedContext.get_file(doc_id):
+                raise HTTPException(
+                    status_code=404,
+                    detail="CAD/IFC files are streamed from the browser blob URL, not re-downloaded from the server."
+                )
+
         docs = vector_store.list_documents()
         doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
         if not doc_meta:
