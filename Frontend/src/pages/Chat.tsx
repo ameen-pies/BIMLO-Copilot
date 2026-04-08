@@ -611,6 +611,7 @@ interface ViewerState {
   blobUrl?: string;          // object URL for PDF/image local preview
   mediaType?: "pdf" | "image" | "txt" | "cad";  // what kind of viewer to show
   cadSummary?: Record<string, unknown>;           // parsed CAD/IFC summary from upload
+  ifcBlobUrl?: string;       // IFC blob URL for CAD→IFC 3D rendering
 }
 
 interface DocumentViewerProps {
@@ -1538,11 +1539,14 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
                   const ps = state.cadSummary as any;
                   const pl = (ps.pipeline ?? '').toLowerCase();
                   const fn = (state.doc?.filename ?? ps.filename ?? 'model.ifc');
-                  const showViewer = pl === 'ifc' || fn.toLowerCase().endsWith('.dxf');
+                  // For CAD files with a converted IFC, render 3D using the IFC blob
+                  const viewerBlobUrl = state.ifcBlobUrl ?? state.blobUrl;
+                  const viewerFilename = state.ifcBlobUrl ? (fn.replace(/\.(dxf|dwg|step|stp)$/i, '.ifc') || 'model.ifc') : fn;
+                  const showViewer = pl === 'ifc' || fn.toLowerCase().endsWith('.dxf') || !!state.ifcBlobUrl;
                   return showViewer ? (
                     <XeokitViewer
-                      blobUrl={state.blobUrl}
-                      filename={fn}
+                      blobUrl={viewerBlobUrl}
+                      filename={viewerFilename}
                       pipeline={pl}
                     />
                   ) : null;
@@ -2838,7 +2842,7 @@ const Chat = () => {
   const [openSourceKey, setOpenSourceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
-  const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" | "cad"; cadSummary?: Record<string, unknown> }>>(new Map());
+  const blobUrlMapRef = useRef<Map<string, { url: string; type: "pdf" | "image" | "txt" | "cad"; cadSummary?: Record<string, unknown>; ifcBlobUrl?: string }>>(new Map());
   const bubbleHighlightRef = useRef<HTMLElement>(null);
   const bubbleScrollRef    = useRef<HTMLDivElement>(null);
   bubbleViewerRef.current  = bubbleViewer; // always-fresh mirror, no stale closure
@@ -3323,6 +3327,7 @@ const Chat = () => {
         mediaType: 'cad',
         blobUrl: cached?.url,
         cadSummary: cached?.cadSummary,
+        ifcBlobUrl: cached?.ifcBlobUrl,
       });
       return;
     }
@@ -3369,6 +3374,7 @@ const Chat = () => {
         mediaType: 'cad',
         cadSummary: cached?.cadSummary,
         blobUrl: cached?.url,
+        ifcBlobUrl: cached?.ifcBlobUrl,
       });
       return;
     }
@@ -4108,7 +4114,18 @@ const Chat = () => {
         setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id)]);
         setPendingDocIds(prev => prev.includes(cadResp.file_id) ? prev : [...prev, cadResp.file_id]);
         const blobUrl = URL.createObjectURL(file);
-        blobUrlMapRef.current.set(cadResp.file_id, { url: blobUrl, type: "cad", cadSummary: cadResp });
+        const entry: { url: string; type: "cad"; cadSummary: Record<string, unknown>; ifcBlobUrl?: string } = { url: blobUrl, type: "cad", cadSummary: cadResp };
+        // If silent CAD→IFC conversion succeeded, fetch the IFC bytes for 3D rendering
+        if (cadResp.ifc_available) {
+          try {
+            const ifcRes = await fetch(`${base}/api/cad/files/${cadResp.file_id}/ifc`);
+            if (ifcRes.ok) {
+              const ifcBlob = await ifcRes.blob();
+              entry.ifcBlobUrl = URL.createObjectURL(new Blob([ifcBlob], { type: "application/x-step" }));
+            }
+          } catch { /* silent — 3D just won't show */ }
+        }
+        blobUrlMapRef.current.set(cadResp.file_id, entry);
         (window as any).__lastCadFileId = cadResp.file_id;
       } else {
         const response = await api.uploadDocument(file);
@@ -5641,12 +5658,15 @@ const Chat = () => {
                               />
                             ) : bubbleViewer.mediaType === 'cad' ? (
                               <div className="h-full overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-                                {bubbleViewer.blobUrl && bubbleViewer.cadSummary && (() => {
+                                {bubbleViewer.cadSummary && (bubbleViewer.blobUrl || bubbleViewer.ifcBlobUrl) && (() => {
                                   const ps = bubbleViewer.cadSummary as any;
                                   const pl = (ps.pipeline ?? '').toLowerCase();
                                   const fn = bubbleDoc.filename;
-                                  return pl === 'ifc' ? (
-                                    <XeokitViewer blobUrl={bubbleViewer.blobUrl} filename={fn} pipeline={pl} />
+                                  const viewerBlobUrl = bubbleViewer.ifcBlobUrl ?? bubbleViewer.blobUrl!;
+                                  const viewerFilename = bubbleViewer.ifcBlobUrl ? fn.replace(/\.(dxf|dwg|step|stp)$/i, '.ifc') || 'model.ifc' : fn;
+                                  const showViewer = pl === 'ifc' || !!bubbleViewer.ifcBlobUrl || fn.toLowerCase().endsWith('.dxf');
+                                  return showViewer ? (
+                                    <XeokitViewer blobUrl={viewerBlobUrl} filename={viewerFilename} pipeline={pl} />
                                   ) : null;
                                 })()}
                                 {bubbleViewer.cadSummary && (() => {

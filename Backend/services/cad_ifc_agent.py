@@ -61,7 +61,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
+
+# Internal CAD → IFC conversion pipeline (transparent to user)
+try:
+    from cad_to_ifc import convert_cad_to_ifc
+    _CAD_TO_IFC_AVAILABLE = True
+except ImportError:
+    _CAD_TO_IFC_AVAILABLE = False
+    logger.warning("[cad_ifc_agent] cad_to_ifc module not found — silent conversion disabled")
 
 logger = logging.getLogger("cad_ifc_agent")
 router = APIRouter()
@@ -853,6 +862,7 @@ class CadUploadResponse(BaseModel):
     material_inventory: Optional[dict] = None
     parse_errors:   List[str]       = []
     cached_at:      str             = ""
+    ifc_available:  bool            = False   # True if silent CAD→IFC conversion succeeded
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -883,11 +893,28 @@ async def cad_upload(file: UploadFile = File(...)):
     summary = _parse_file(filename, file_bytes)
     file_id = str(uuid.uuid4())
     summary["file_id"] = file_id
+
+    # ── Silent CAD → IFC conversion (internal, not exposed to user) ──────────
+    ifc_available = False
+    if pipeline == "cad" and _CAD_TO_IFC_AVAILABLE:
+        try:
+            ifc_bytes, conv_report = convert_cad_to_ifc(filename, file_bytes)
+            summary["_ifc_bytes"]           = ifc_bytes
+            summary["_ifc_conversion_report"] = conv_report
+            ifc_available = True
+            logger.info(
+                f"[cad_upload] silent IFC conversion OK | "
+                f"entities={conv_report.get('cleaned_entities')} | "
+                f"ifc_size={conv_report.get('ifc_size_bytes')} bytes"
+            )
+        except Exception as conv_err:
+            logger.warning(f"[cad_upload] silent IFC conversion failed: {conv_err}")
+
     CadSharedContext.cache_file(file_id, summary)
 
     logger.info(
         f"[cad_upload] done | file_id={file_id} | pipeline={pipeline} "
-        f"| ux={summary.get('ux_hint', '')}"
+        f"| ux={summary.get('ux_hint', '')} | ifc_available={ifc_available}"
     )
 
     return CadUploadResponse(
@@ -906,6 +933,7 @@ async def cad_upload(file: UploadFile = File(...)):
         material_inventory = summary.get("material_inventory"),
         parse_errors   = summary.get("parse_errors", []),
         cached_at      = summary.get("cached_at", ""),
+        ifc_available  = ifc_available,
     )
 
 
@@ -973,3 +1001,33 @@ async def cad_delete_file(file_id: str):
         raise HTTPException(404, f"file_id '{file_id}' not found.")
     CadSharedContext.delete_file(file_id)
     return {"status": "deleted", "file_id": file_id}
+
+
+@router.get("/api/cad/files/{file_id}/ifc")
+async def cad_download_ifc(file_id: str):
+    """
+    Download the silently-converted IFC file for a previously uploaded CAD file.
+    Only available when the source was a CAD file (.dxf / .dwg / .step).
+    Note: CAD files may contain some inaccuracies in the converted IFC.
+    """
+    summary = CadSharedContext.get_file(file_id)
+    if not summary:
+        raise HTTPException(404, f"file_id '{file_id}' not found.")
+
+    ifc_bytes = summary.get("_ifc_bytes")
+    if not ifc_bytes:
+        raise HTTPException(
+            404,
+            "No IFC conversion available for this file. "
+            "This may be because the source was already an IFC, "
+            "the conversion failed, or ifcopenshell is not installed."
+        )
+
+    original_name = Path(summary.get("filename", "export")).stem
+    download_name = f"{original_name}_converted.ifc"
+
+    return Response(
+        content=ifc_bytes,
+        media_type="application/x-step",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
