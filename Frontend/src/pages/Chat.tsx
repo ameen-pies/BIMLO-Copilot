@@ -31,6 +31,7 @@ interface Message {
   voiceWaveform?: number[]; // captured amplitude samples (0-1) during recording
   interrupted?: true;       // response was stopped mid-generation
   callCard?: { duration: number; startedAt: Date }; // voice call summary card
+  attachedDocIds?: string[];               // doc IDs staged at send time (shown in bubble)
   analytics?: Record<string, any> | null;  // chart_config or chart_error from graph_node
   reportId?: string | null;                // report card rendered below the response
   reportTitle?: string | null;             // title from SSE event — no fetch needed
@@ -792,9 +793,69 @@ function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
           model.on("error", (e: any) => {
             if (!destroyed) { setErrMsg(typeof e === "string" ? e : (e?.message ?? "Model load error")); setStatus("error"); }
           });
+        } else if (["dxf"].includes(ext)) {
+          // DXF: parse and draw 2D geometry on canvas using a lightweight approach
+          if (destroyed) return;
+          const resp = await fetch(blobUrl);
+          const text = await resp.text();
+          if (destroyed) return;
+
+          // Parse LINE entities from DXF text
+          const lines: {x1:number,y1:number,x2:number,y2:number}[] = [];
+          const entityRe = /^\s*0\s*\nLINE([\s\S]*?)(?=\n\s*0\s*\n)/gm;
+          const getVal = (block: string, code: number) => {
+            const m = new RegExp(`\n\s*${code}\s*\n\s*([\d.+\-eE]+)`).exec(block);
+            return m ? parseFloat(m[1]) : 0;
+          };
+          let em: RegExpExecArray | null;
+          while ((em = entityRe.exec(text)) !== null) {
+            lines.push({ x1: getVal(em[1], 10), y1: getVal(em[1], 20), x2: getVal(em[1], 11), y2: getVal(em[1], 21) });
+          }
+
+          if (destroyed) return;
+          const canvas = canvasRef.current!;
+          const ctx = canvas.getContext("2d")!;
+          canvas.width  = canvas.offsetWidth  || 600;
+          canvas.height = canvas.offsetHeight || 320;
+
+          if (lines.length === 0) {
+            ctx.fillStyle = "#1a1a2e";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#6b7280";
+            ctx.font = "13px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("DXF loaded — no LINE entities to preview", canvas.width/2, canvas.height/2);
+            ctx.fillText("AI analysis works via chat below", canvas.width/2, canvas.height/2 + 20);
+            setStatus("ready");
+            return;
+          }
+
+          // Fit-to-view
+          const minX = Math.min(...lines.map(l=>Math.min(l.x1,l.x2)));
+          const maxX = Math.max(...lines.map(l=>Math.max(l.x1,l.x2)));
+          const minY = Math.min(...lines.map(l=>Math.min(l.y1,l.y2)));
+          const maxY = Math.max(...lines.map(l=>Math.max(l.y1,l.y2)));
+          const pad = 24;
+          const scaleX = (canvas.width  - pad*2) / (maxX - minX || 1);
+          const scaleY = (canvas.height - pad*2) / (maxY - minY || 1);
+          const scale  = Math.min(scaleX, scaleY);
+          const tx = (x: number) => pad + (x - minX) * scale;
+          const ty = (y: number) => canvas.height - pad - (y - minY) * scale;
+
+          ctx.fillStyle = "#0f0f1a";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.strokeStyle = "#60a5fa";
+          ctx.lineWidth = 0.7;
+          ctx.globalAlpha = 0.8;
+          ctx.beginPath();
+          for (const l of lines) {
+            ctx.moveTo(tx(l.x1), ty(l.y1));
+            ctx.lineTo(tx(l.x2), ty(l.y2));
+          }
+          ctx.stroke();
+          if (!destroyed) setStatus("ready");
         } else {
-          // DXF/STEP: no native xeokit parser
-          throw new Error(`.${ext} files cannot be rendered in 3D. Convert to IFC for the 3D viewer. AI analysis still works via chat.`);
+          throw new Error(`.${ext} files: convert to IFC for 3D view, or DXF for 2D preview. AI analysis works via chat.`);
         }
       } catch (e: any) {
         if (!destroyed) { setErrMsg(e?.message ?? String(e)); setStatus("error"); }
@@ -812,9 +873,18 @@ function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
     };
   }, [blobUrl, filename]);
 
-  // Mouse-wheel zoom and orbit handled natively by xeokit CameraControl
+  // Block page scroll when pointer is inside the 3D canvas
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const block = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener("wheel", block, { passive: false });
+    return () => el.removeEventListener("wheel", block);
+  }, []);
+
   return (
-    <div className="relative w-full bg-black/80 rounded-lg overflow-hidden" style={{ height: 320 }}>
+    <div ref={containerRef} className="relative w-full bg-black/80 rounded-lg overflow-hidden" style={{ height: 320 }}>
       <canvas
         ref={canvasRef}
         className="w-full h-full block"
@@ -1468,8 +1538,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
                   const ps = state.cadSummary as any;
                   const pl = (ps.pipeline ?? '').toLowerCase();
                   const fn = (state.doc?.filename ?? ps.filename ?? 'model.ifc');
-                  const isIfc3D = pl === 'ifc';
-                  return isIfc3D ? (
+                  const showViewer = pl === 'ifc' || fn.toLowerCase().endsWith('.dxf');
+                  return showViewer ? (
                     <XeokitViewer
                       blobUrl={state.blobUrl}
                       filename={fn}
@@ -2714,6 +2784,7 @@ const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string>("default");
@@ -3995,7 +4066,7 @@ const Chat = () => {
   };
 
   const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
-  const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'];
+  const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp', '.rvt', '.nwd', '.nwc', '.dgn', '.skp', '.3dm', '.fbx', '.obj', '.stl', '.sat', '.iges', '.igs', '.prt', '.sldprt', '.catpart', '.3ds', '.dae', '.rfa', '.rte'];
   const ALLOWED_EXTS = ['.pdf', '.docx', '.doc', '.txt', ...IMAGE_EXTS, ...CAD_EXTS];
 
   const _processUploadFile = async (file: File) => {
@@ -4005,7 +4076,7 @@ const Chat = () => {
     const isCad   = CAD_EXTS.includes(fileExt);
 
     if (!ALLOWED_EXTS.includes(fileExt)) {
-      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, IFCZIP, DXF, DWG, STEP`, variant: "destructive" });
+      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, IFCZIP, DXF, DWG, STEP, RVT, NWD, NWC, DGN, SKP, FBX, OBJ, STL, IGES, and more CAD formats`, variant: "destructive" });
       return;
     }
     if (file.size > 50 * 1024 * 1024) {
@@ -4035,10 +4106,10 @@ const Chat = () => {
           created_at: cadResp.cached_at ?? new Date().toISOString(),
         };
         setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id)]);
+        setPendingDocIds(prev => prev.includes(cadResp.file_id) ? prev : [...prev, cadResp.file_id]);
         const blobUrl = URL.createObjectURL(file);
         blobUrlMapRef.current.set(cadResp.file_id, { url: blobUrl, type: "cad", cadSummary: cadResp });
         (window as any).__lastCadFileId = cadResp.file_id;
-        toast({ title: "Uploaded", description: file.name });
       } else {
         const response = await api.uploadDocument(file);
         const docId = response.document_id ?? response.id ?? response.filename;
@@ -4050,7 +4121,7 @@ const Chat = () => {
           type: isImage ? "image" : isPdf ? "pdf" : "txt",
         });
 
-        toast({ title: "Uploaded", description: response.filename });
+        setPendingDocIds(prev => prev.includes(docId) ? prev : [...prev, docId]);
         await loadDocuments();
       }
     } catch (error) {
@@ -4397,9 +4468,11 @@ const Chat = () => {
       role: "user",
       content: trimmedInput,
       timestamp: new Date(),
+      attachedDocIds: pendingDocIds.length > 0 ? [...pendingDocIds] : undefined,
     };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
+    setPendingDocIds([]);
     if (!notifyDismissed) setShowNotifyBanner(true);
 
     try {
@@ -4818,6 +4891,8 @@ const Chat = () => {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* Hidden file input — always mounted so fileInputRef is never null */}
+      <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.ifc,.ifczip,.dxf,.dwg,.step,.stp,.rvt,.nwd,.nwc,.dgn,.skp,.3dm,.fbx,.obj,.stl,.sat,.iges,.igs,.prt,.sldprt,.catpart,.3ds,.dae,.rfa,.rte" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
       {/* Drag Overlay */}
       <AnimatePresence>
         {isDragging && (
@@ -5505,7 +5580,6 @@ const Chat = () => {
                         </div>
 
                         <div className="p-3 border-t border-border shrink-0">
-                          <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.ifc,.ifczip,.dxf,.dwg,.step,.stp" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
                           <button
                             onClick={() => fileInputRef.current?.click()}
                             disabled={isUploading}
@@ -5685,7 +5759,7 @@ const Chat = () => {
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`flex items-start ${msg.role === "user" ? "justify-end gap-2" : "gap-3"}`}
+                className={`relative z-10 flex items-start ${msg.role === "user" ? "justify-end gap-2" : "gap-3"}`}
               >
                 {msg.role === "assistant" && (
                   <Logo className="h-8 w-8 shrink-0 mt-0.5" />
@@ -5788,8 +5862,49 @@ const Chat = () => {
                       }
                     />
                   ) : (
+                  <>
+                  {/* Attached docs — shown above the bubble for user messages */}
+                  {msg.role === "user" && msg.attachedDocIds && msg.attachedDocIds.length > 0 && (
+                    <div className="flex flex-wrap justify-end gap-1.5 mb-1">
+                      {msg.attachedDocIds.map(docId => {
+                        const doc = documents.find(d => d.document_id === docId);
+                        if (!doc) return null;
+                        const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+                        const isImg = ['png','jpg','jpeg','webp','gif'].includes(ext);
+                        const isIfc = ['ifc','ifczip'].includes(ext);
+                        const isCad = ['dwg','dxf','step','stp'].includes(ext);
+                        const isPdf = ext === 'pdf';
+                        const cached = blobUrlMapRef.current.get(doc.document_id);
+                        return (
+                          <button
+                            key={docId}
+                            onClick={() => openDocumentViewer(doc)}
+                            className="group flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                            title={doc.filename}
+                          >
+                            <div className="w-6 h-6 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
+                              {isImg && cached?.url ? (
+                                <img src={cached.url} alt="" className="w-full h-full object-cover" />
+                              ) : isIfc ? (
+                                <span className="text-[8px] font-bold text-primary">IFC</span>
+                              ) : isCad ? (
+                                <span className="text-[8px] font-bold text-orange-400">{ext.toUpperCase()}</span>
+                              ) : isPdf ? (
+                                <span className="text-[8px] font-bold text-red-400">PDF</span>
+                              ) : (
+                                <FileText className="h-3 w-3 text-muted-foreground/60" />
+                              )}
+                            </div>
+                            <span className="text-[10px] text-foreground/70 font-medium max-w-[80px] truncate group-hover:text-foreground transition-colors">
+                              {doc.filename.length > 14 ? doc.filename.slice(0, 12) + '…' + (ext ? '.' + ext : '') : doc.filename}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div
-                    className={`group/bubble relative px-4 rounded-2xl text-sm leading-relaxed ${
+                    className={`group/bubble relative z-10 px-4 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
                         ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit break-words min-w-0 max-w-full"
                         : msg.interrupted
@@ -5966,7 +6081,7 @@ const Chat = () => {
                       <span>{msg.content}</span>
                     )}
                   </div>
-                  )} {/* end voice ? ... : <div> */}
+                  </> )} {/* end voice ? ... : <> */}
 
                   {/* Timestamp + action bar — hidden for voice messages (timestamp is inside VoiceMessageBubble) */}
                   {!msg.voiceBlobUrl && (
@@ -6418,6 +6533,59 @@ const Chat = () => {
                         );
                       })}
                     </>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* ── Uploaded files tab strip ── */}
+            <AnimatePresence>
+              {pendingDocIds.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.18 }}
+                  className="flex items-center gap-1.5 flex-wrap mb-2"
+                >
+                  {pendingDocIds.slice(0, 8).map(docId => {
+                    const doc = documents.find(d => d.document_id === docId);
+                    if (!doc) return null;
+                    const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
+                    const isImg = ['png','jpg','jpeg','webp','gif'].includes(ext);
+                    const isIfc = ['ifc','ifczip'].includes(ext);
+                    const isCad = ['dwg','dxf','step','stp'].includes(ext);
+                    const isPdf = ext === 'pdf';
+                    const cached = blobUrlMapRef.current.get(doc.document_id);
+                    return (
+                      <button
+                        key={doc.document_id}
+                        onClick={() => openDocumentViewer(doc)}
+                        className="group flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                        title={doc.filename}
+                      >
+                        {/* mini preview */}
+                        <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
+                          {isImg && cached?.url ? (
+                            <img src={cached.url} alt="" className="w-full h-full object-cover" />
+                          ) : isIfc ? (
+                            <span className="text-[9px] font-bold text-primary">IFC</span>
+                          ) : isCad ? (
+                            <span className="text-[9px] font-bold text-orange-400">{ext.toUpperCase()}</span>
+                          ) : isPdf ? (
+                            <span className="text-[9px] font-bold text-red-400">PDF</span>
+                          ) : (
+                            <FileText className="h-3.5 w-3.5 text-muted-foreground/60" />
+                          )}
+                        </div>
+                        <span className="text-[11px] text-foreground/80 font-medium max-w-[80px] truncate group-hover:text-foreground transition-colors">
+                          {doc.filename.length > 12 ? doc.filename.slice(0, 10) + '…' + (ext ? '.' + ext : '') : doc.filename}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {pendingDocIds.length > 8 && (
+                    <span className="text-[10px] text-muted-foreground/50 px-1">+{pendingDocIds.length - 8} more</span>
                   )}
                 </motion.div>
               )}
