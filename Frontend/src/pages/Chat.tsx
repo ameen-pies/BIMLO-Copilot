@@ -5878,7 +5878,7 @@ const Chat = () => {
                         return (
                           <button
                             key={docId}
-                            onClick={() => openDocumentViewer(doc)}
+                            onClick={() => openBubbleDoc(doc)}
                             className="group flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
                             title={doc.filename}
                           >
@@ -6560,7 +6560,7 @@ const Chat = () => {
                     return (
                       <button
                         key={doc.document_id}
-                        onClick={() => openDocumentViewer(doc)}
+                        onClick={() => openBubbleDoc(doc)}
                         className="group flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
                         title={doc.filename}
                       >
