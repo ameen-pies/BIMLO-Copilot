@@ -716,27 +716,24 @@ interface XeokitViewerProps {
   pipeline: string; // 'ifc' | 'cad'
 }
 
-function loadXeokitScripts(): Promise<void> {
-  if ((window as any).__xeokitLoaded) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    // unpkg UMD — exposes Viewer, WebIFCLoaderPlugin etc. directly on window
-    const s = document.createElement("script");
-    s.src = "https://unpkg.com/@xeokit/xeokit-sdk@2.6.1/dist/xeokit-sdk.umd.min.js";
-    s.async = true;
-    s.onload = () => {
-      if (typeof (window as any).Viewer !== "function") {
-        reject(new Error("xeokit UMD loaded but window.Viewer not found"));
-        return;
-      }
-      (window as any).__xeokitLoaded = true;
-      resolve();
-    };
-    s.onerror = () => reject(new Error("Failed to load xeokit-sdk UMD"));
-    document.head.appendChild(s);
-  });
+// Cache the dynamic-import promise so we only load once
+let _xeokitPromise: Promise<{ Viewer: any; WebIFCLoaderPlugin: any; WebIFC: any }> | null = null;
+
+function loadXeokit(): Promise<{ Viewer: any; WebIFCLoaderPlugin: any; WebIFC: any }> {
+  if (_xeokitPromise) return _xeokitPromise;
+  _xeokitPromise = (async () => {
+    // Load both in parallel — xeokit ES module + web-ifc ES module
+    const [mod, WebIFC] = await Promise.all([
+      import(/* @vite-ignore */ "https://esm.sh/@xeokit/xeokit-sdk@2.6.1"),
+      import(/* @vite-ignore */ "https://cdn.jsdelivr.net/npm/web-ifc@0.0.51/web-ifc-api.js"),
+    ]);
+    if (!mod.Viewer)             throw new Error("xeokit: Viewer not exported");
+    if (!mod.WebIFCLoaderPlugin) throw new Error("xeokit: WebIFCLoaderPlugin not exported");
+    return { Viewer: mod.Viewer, WebIFCLoaderPlugin: mod.WebIFCLoaderPlugin, WebIFC };
+  })();
+  _xeokitPromise.catch(() => { _xeokitPromise = null; });
+  return _xeokitPromise;
 }
-// web-ifc has no script-tag-safe browser bundle — xeokit's WebIFCLoaderPlugin
-// fetches the WASM itself at runtime via wasmPath; no extra <script> needed.
 
 function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -751,24 +748,16 @@ function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
       try {
         setStatus("loading");
 
-        // 1. Load xeokit UMD (web-ifc WASM is fetched at runtime by the plugin)
-        await loadXeokitScripts();
+        // 1. Load xeokit via dynamic ES import (reliable, no UMD script-tag issues)
+        const { Viewer, WebIFCLoaderPlugin, WebIFC } = await loadXeokit();
 
         if (destroyed) return;
+        if (!canvasRef.current) throw new Error("Canvas ref is null");
 
-        // 2. UMD build exposes classes directly on window, not under window.xeokit
-        const Viewer             = (window as any).Viewer;
-        const WebIFCLoaderPlugin = (window as any).WebIFCLoaderPlugin;
-
-        if (!Viewer)             throw new Error("window.Viewer not found after xeokit load");
-        if (!WebIFCLoaderPlugin) throw new Error("window.WebIFCLoaderPlugin not found");
-        if (!canvasRef.current)  throw new Error("Canvas ref is null");
-
-        // 3. Create viewer
+        // 2. Create viewer
         const viewer = new Viewer({
           canvasElement: canvasRef.current,
           transparent: true,
-          spinningEnabled: true,
         });
         viewerRef.current = viewer;
 
@@ -776,14 +765,23 @@ function XeokitViewer({ blobUrl, filename, pipeline }: XeokitViewerProps) {
         viewer.camera.look = [0, 0, 0];
         viewer.camera.up   = [0, 1, 0];
 
-        // 4. Load model based on type
+        // 3. Load model based on type
         const ext = filename.split(".").pop()?.toLowerCase() ?? "";
         const isIfc = ["ifc", "ifczip"].includes(ext);
 
         if (isIfc) {
-          // wasmPath version must match the web-ifc script loaded above
+          // wasmPath: web-ifc WASM files fetched at runtime by the plugin
+          // web-ifc must be loaded as a side-effect import (it exposes a global via its own wasm init)
+          // WebIFC is the namespace module, IfcAPI must be instantiated + Init()d before passing in
+          const ifcAPI = new WebIFC.IfcAPI();
+          ifcAPI.SetWasmPath("https://cdn.jsdelivr.net/npm/web-ifc@0.0.51/");
+          await ifcAPI.Init();
+
+          if (destroyed) return;
+
           const loader = new WebIFCLoaderPlugin(viewer, {
-            wasmPath: "https://unpkg.com/web-ifc@0.0.51/",
+            WebIFC,
+            IfcAPI: ifcAPI,
           });
           const model = loader.load({ id: "model", src: blobUrl, edges: true, performance: true });
           model.on("loaded", () => {
@@ -4838,13 +4836,7 @@ const Chat = () => {
               className="relative flex flex-col items-center gap-3 px-10 py-8 rounded-3xl bg-card/70 border border-primary/20 shadow-xl"
               style={{ backdropFilter: "blur(12px)" }}
             >
-              {/* animated ring */}
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ repeat: Infinity, duration: 8, ease: "linear" }}
-                className="absolute inset-0 rounded-3xl border border-primary/10"
-                style={{ background: "conic-gradient(from 0deg, transparent 80%, hsl(var(--primary)/0.15) 100%)" }}
-              />
+
               <div className="relative flex items-center justify-center w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20">
                 <FileText className="h-5 w-5 text-primary" />
               </div>
