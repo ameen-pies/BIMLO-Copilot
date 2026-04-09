@@ -57,6 +57,13 @@ try:
     from cad_ifc_agent import router as cad_ifc_router
     _cad_ifc_available = True
     print("✅ cad_ifc_agent loaded — /api/cad/upload + /api/cad/query ready")
+
+    # Register this main module under its own name so cad_context_bridge can
+    # find append_turn / get_history via sys.modules["main"] at runtime.
+    import sys as _sys
+    if "main" not in _sys.modules:
+        _sys.modules["main"] = _sys.modules[__name__]
+
 except ImportError as _e:
     cad_ifc_router     = None
     _cad_ifc_available = False

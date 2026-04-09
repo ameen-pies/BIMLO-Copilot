@@ -7061,46 +7061,6 @@ const Chat = () => {
         >
           <div className="max-w-3xl mx-auto">
 
-            {/* Notification permission pill — sits above suggestion chips */}
-            <AnimatePresence>
-              {showNotifyBanner && (
-                <motion.div
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 6 }}
-                  transition={{ duration: 0.18 }}
-                  className="flex justify-center mb-2"
-                >
-                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
-                    <Bell className="h-3 w-3 text-primary shrink-0" />
-                    <span>Notify when done?</span>
-                    <button
-                      onClick={() => {
-                        Notification.requestPermission().then(p => {
-                          if (p === "granted") setNotifyEnabled(true);
-                        });
-                        setShowNotifyBanner(false);
-                        setNotifyDismissed(true);
-                      }}
-                      className="font-medium text-primary hover:text-primary/80 transition-colors"
-                    >
-                      Allow
-                    </button>
-                    <span className="text-border">·</span>
-                    <button
-                      onClick={() => {
-                        setShowNotifyBanner(false);
-                        setNotifyDismissed(true);
-                      }}
-                      className="hover:text-foreground transition-colors"
-                    >
-                      No thanks
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
             {/* ── Contextual suggestion chips ── */}
             <AnimatePresence>
               {(suggestions.length > 0 || suggestionsLoading) && !isLoading && (
@@ -7498,6 +7458,58 @@ const Chat = () => {
             state={viewer}
             onClose={() => setViewer(null)}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Notification permission pill — fixed above the input area, outside all layout divs */}
+      <AnimatePresence>
+        {showNotifyBanner && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.18 }}
+            style={{
+              position: "fixed",
+              bottom: notifyBottomOffset,
+              left: 0,
+              right: 0,
+              display: "flex",
+              justifyContent: "center",
+              zIndex: 50,
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{ pointerEvents: "auto" }}
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground"
+            >
+              <Bell className="h-3 w-3 text-primary shrink-0" />
+              <span>Notify when done?</span>
+              <button
+                onClick={() => {
+                  Notification.requestPermission().then(p => {
+                    if (p === "granted") setNotifyEnabled(true);
+                  });
+                  setShowNotifyBanner(false);
+                  setNotifyDismissed(true);
+                }}
+                className="font-medium text-primary hover:text-primary/80 transition-colors"
+              >
+                Allow
+              </button>
+              <span className="text-border">·</span>
+              <button
+                onClick={() => {
+                  setShowNotifyBanner(false);
+                  setNotifyDismissed(true);
+                }}
+                className="hover:text-foreground transition-colors"
+              >
+                No thanks
+              </button>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
