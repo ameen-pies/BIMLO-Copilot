@@ -103,6 +103,19 @@ function stripLinks(text: string): string {
 }
 
 /**
+ * Collapse "soft-broken" inline code tokens that the LLM outputs on separate lines.
+ * e.g.  "`Level 1`,\n`Level 2`,\n`Level 4`"  →  "`Level 1`, `Level 2`, `Level 4`"
+ * This prevents remark from treating each backtick item as a separate paragraph.
+ */
+function collapseInlineBreaks(text: string): string {
+  // Join lines where previous line ends with a backtick+comma and next starts with a backtick
+  return text
+    .replace(/(`)([,;]?\s*)\n(\s*`)/g, "$1$2 $3")
+    // Also collapse lines that are ONLY a comma/comma-space (orphan commas between code tokens)
+    .replace(/`,\s*\n\s*`/g, "`, `");
+}
+
+/**
  * Render inline bold/italic/code inside a plain string without wrapping in <p>.
  * Handles **bold**, *italic*, and `code` only.
  */
@@ -136,24 +149,411 @@ const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["components"] = 
   ul: ({ children }) => <ul className="list-disc list-inside my-2 space-y-1 block">{children}</ul>,
   ol: ({ children }) => <ol className="list-decimal list-inside my-2 space-y-1 block">{children}</ol>,
   li: ({ children }) => {
-    // Don't render empty list items — they show as stray bullet dots
+    // Flatten children: unwrap any wrapping <p> spans that remark injects inside
+    // list items — they cause inline `code` tokens to appear on their own line.
+    const flatChildren = React.Children.map(children, (child: any) => {
+      if (child?.props?.className === "inline leading-relaxed") return child.props.children;
+      return child;
+    });
     const text = typeof children === "string" ? children : Array.isArray(children) ? children.join("") : String(children ?? "");
     if (!text.trim()) return null;
-    return <li className="ml-2 leading-relaxed">{children}</li>;
+    return <li className="ml-2 leading-relaxed">{flatChildren ?? children}</li>;
   },
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
   h1: ({ children }) => <h1 className="text-base font-bold mb-2 mt-4 block">{children}</h1>,
   h2: ({ children }) => <h2 className="text-sm font-bold mb-1.5 mt-3 first:mt-0 block">{children}</h2>,
   h3: ({ children }) => <h3 className="text-sm font-semibold mb-1 mt-2 first:mt-0 block">{children}</h3>,
-  code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
-    inline ? (
-      <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
-    ) : (
-      <pre className="bg-muted rounded-lg p-3 text-xs font-mono overflow-x-auto my-3 whitespace-pre-wrap block">
-        <code>{children}</code>
-      </pre>
-    ),
+  code: ({ inline, node, children }: { inline?: boolean; node?: any; children?: React.ReactNode }) => {
+    const codeStr = String(children ?? "");
+    const isInline = inline === true || (inline === undefined && !codeStr.includes("\n"));
+    if (isInline) {
+      return <code className="bg-primary/10 px-1.5 py-0.5 rounded text-[11px] font-mono text-primary whitespace-nowrap border border-primary/15">{children}</code>;
+    }
+    const codeText = codeStr.replace(/\n$/, "");
+    const classList: string[] = node?.properties?.className ?? [];
+    const langClass = classList.find((c: string) => c.startsWith("language-")) ?? "";
+    const lang = langClass.replace("language-", "");
+
+    // ── Language → { label, accentColor, fileExt } ──────────────────────
+    // accentColor: vivid enough to read on BOTH dark AND light backgrounds.
+    // All chosen to be AA-contrast compliant against both #0f172a and #ffffff.
+    const LANG_META: Record<string, { label: string; accent: string; ext: string }> = {
+      python:     { label: "Python",     accent: "#2563eb", ext: "py"   },
+      py:         { label: "Python",     accent: "#2563eb", ext: "py"   },
+      javascript: { label: "JavaScript", accent: "#b45309", ext: "js"   },
+      js:         { label: "JavaScript", accent: "#b45309", ext: "js"   },
+      typescript: { label: "TypeScript", accent: "#4338ca", ext: "ts"   },
+      ts:         { label: "TypeScript", accent: "#4338ca", ext: "ts"   },
+      tsx:        { label: "TSX",        accent: "#0e7490", ext: "tsx"  },
+      jsx:        { label: "JSX",        accent: "#047857", ext: "jsx"  },
+      bash:       { label: "Bash",       accent: "#15803d", ext: "sh"   },
+      sh:         { label: "Shell",      accent: "#15803d", ext: "sh"   },
+      json:       { label: "JSON",       accent: "#c2410c", ext: "json" },
+      css:        { label: "CSS",        accent: "#be185d", ext: "css"  },
+      html:       { label: "HTML",       accent: "#b91c1c", ext: "html" },
+      sql:        { label: "SQL",        accent: "#6d28d9", ext: "sql"  },
+      yaml:       { label: "YAML",       accent: "#0f766e", ext: "yaml" },
+      yml:        { label: "YAML",       accent: "#0f766e", ext: "yml"  },
+      rust:       { label: "Rust",       accent: "#c2410c", ext: "rs"   },
+      go:         { label: "Go",         accent: "#0369a1", ext: "go"   },
+      java:       { label: "Java",       accent: "#b91c1c", ext: "java" },
+      cpp:        { label: "C++",        accent: "#4338ca", ext: "cpp"  },
+      c:          { label: "C",          accent: "#4338ca", ext: "c"    },
+      csharp:     { label: "C#",         accent: "#6d28d9", ext: "cs"   },
+      cs:         { label: "C#",         accent: "#6d28d9", ext: "cs"   },
+      php:        { label: "PHP",        accent: "#6d28d9", ext: "php"  },
+      ruby:       { label: "Ruby",       accent: "#b91c1c", ext: "rb"   },
+      swift:      { label: "Swift",      accent: "#c2410c", ext: "swift"},
+      kotlin:     { label: "Kotlin",     accent: "#6d28d9", ext: "kt"   },
+      r:          { label: "R",          accent: "#1d4ed8", ext: "r"    },
+      markdown:   { label: "Markdown",   accent: "#374151", ext: "md"   },
+      md:         { label: "Markdown",   accent: "#374151", ext: "md"   },
+      xml:        { label: "XML",        accent: "#c2410c", ext: "xml"  },
+      ifc:        { label: "IFC",        accent: "#15803d", ext: "ifc"  },
+      text:       { label: "Text",       accent: "#374151", ext: "txt"  },
+      txt:        { label: "Text",       accent: "#374151", ext: "txt"  },
+    };
+    const meta = LANG_META[lang.toLowerCase()] ?? { label: lang || "Code", accent: "#374151", ext: lang || "txt" };
+
+    // ── Smart filename inference ───────────────────────────────────────────
+    // Scan the first ~20 lines for def/class/function/const declarations
+    // and use the first match as the base filename.
+    const inferFilename = (): string => {
+      const lines = codeText.split("\n").slice(0, 20);
+      // Patterns: Python def/class, JS/TS function/const/class, Rust fn/struct, Go func, Java/C# class
+      const patterns = [
+        /^(?:export\s+)?(?:async\s+)?(?:function\s+)([\w$]+)/,      // function foo
+        /^(?:export\s+)?(?:default\s+)?class\s+([\w$]+)/,            // class Foo
+        /^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=/,           // const foo =
+        /^def\s+([\w]+)/,                                             // Python def
+        /^class\s+([\w]+)/,                                           // Python class
+        /^(?:pub\s+)?fn\s+([\w]+)/,                                   // Rust fn
+        /^func\s+([\w]+)/,                                            // Go func
+        /^(?:public\s+|private\s+|protected\s+)?(?:static\s+)?(?:class|interface|enum)\s+([\w]+)/, // Java/C#
+        /^(?:sub|function)\s+([\w]+)/i,                               // VB/general
+      ];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        for (const pat of patterns) {
+          const m = trimmed.match(pat);
+          if (m && m[1]) {
+            // Convert CamelCase → snake_case for py, keep as-is for others
+            const name = meta.ext === "py"
+              ? m[1].replace(/([A-Z])/g, (c, i) => (i > 0 ? "_" : "") + c.toLowerCase())
+              : m[1];
+            return `${name}.${meta.ext}`;
+          }
+        }
+      }
+      return `snippet.${meta.ext}`;
+    };
+    const downloadFilename = inferFilename();
+
+    // ── Token colours — dual pairs: [darkModeHex, lightModeHex] ──────────
+    // We detect dark mode once per render using matchMedia.
+    // All colours chosen for AA contrast on their respective backgrounds.
+    const isDark = typeof window !== "undefined"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+        || document.documentElement.classList.contains("dark")
+      : true;
+
+    const C = {
+      base:     isDark ? "#cbd5e1" : "#1e293b",   // default code text
+      comment:  isDark ? "#64748b" : "#6b7280",   // comments (muted, italic)
+      string:   isDark ? "#10b981" : "#047857",   // strings (green family)
+      number:   isDark ? "#f97316" : "#b45309",   // numbers (amber family)
+      kw_ctrl:  isDark ? "#c084fc" : "#7c3aed",   // control flow (purple)
+      kw_decl:  isDark ? "#60a5fa" : "#1d4ed8",   // declarations (blue)
+      kw_lit:   isDark ? "#f97316" : "#b45309",   // literals (amber)
+      type:     isDark ? "#34d399" : "#047857",   // types (teal)
+      builtin:  isDark ? "#fbbf24" : "#b45309",   // builtins (amber)
+      classname:isDark ? "#34d399" : "#0f766e",   // class names (teal)
+      dunder:   isDark ? "#94a3b8" : "#64748b",   // __dunder__ (slate)
+      operator: isDark ? "#f87171" : "#b91c1c",   // operators (red)
+      bracket:  isDark ? "#94a3b8" : "#475569",   // brackets (slate)
+      punct:    isDark ? "#64748b" : "#6b7280",   // punctuation (muted)
+      decorator:isDark ? "#c084fc" : "#7c3aed",   // decorators (purple)
+    };
+
+    // ── Token-based syntax highlighter ────────────────────────────────────
+    function tokenize(code: string, language: string): React.ReactNode[] {
+      const l = language.toLowerCase();
+
+      const isLineComment = (s: string) =>
+        (["python","py","r"].includes(l) && s.startsWith("#")) ||
+        (["javascript","js","typescript","ts","tsx","jsx","java","cpp","c","csharp","cs","go","rust","swift","kotlin","php"].includes(l) && s.startsWith("//")) ||
+        (["sql"].includes(l) && s.startsWith("--")) ||
+        (["bash","sh"].includes(l) && s.startsWith("#"));
+
+      const lines = code.split("\n");
+      const result: React.ReactNode[] = [];
+      let inBlockComment = false;
+      let inDocstring = false;
+      let docstringChar = "";
+
+      lines.forEach((line, li) => {
+        if (li > 0) result.push("\n");
+
+        const cs = (color: string, content: string, key: string, italic = false) => (
+          <span key={key} style={{ color, ...(italic ? { fontStyle: "italic" } : {}) }}>{content}</span>
+        );
+
+        // Block comment /* */ languages
+        if (["javascript","js","typescript","ts","tsx","jsx","java","cpp","c","csharp","cs","go","rust","swift","kotlin","php","css"].includes(l)) {
+          if (inBlockComment) {
+            const endIdx = line.indexOf("*/");
+            if (endIdx !== -1) {
+              result.push(cs(C.comment, line.slice(0, endIdx + 2), `bc-${li}`, true));
+              inBlockComment = false;
+              const rest = line.slice(endIdx + 2);
+              if (rest.trim()) result.push(...tokenizeLine(rest, l, li));
+            } else {
+              result.push(cs(C.comment, line, `bc-${li}`, true));
+            }
+            return;
+          }
+          const bcStart = line.indexOf("/*");
+          if (bcStart !== -1 && !line.slice(0, bcStart).includes('"') && !line.slice(0, bcStart).includes("'")) {
+            const bcEnd = line.indexOf("*/", bcStart + 2);
+            if (bcEnd !== -1) {
+              if (bcStart > 0) result.push(...tokenizeLine(line.slice(0, bcStart), l, li));
+              result.push(cs(C.comment, line.slice(bcStart, bcEnd + 2), `bc2-${li}`, true));
+              const rest = line.slice(bcEnd + 2);
+              if (rest.trim()) result.push(...tokenizeLine(rest, l, li));
+              return;
+            } else {
+              if (bcStart > 0) result.push(...tokenizeLine(line.slice(0, bcStart), l, li));
+              result.push(cs(C.comment, line.slice(bcStart), `bc3-${li}`, true));
+              inBlockComment = true;
+              return;
+            }
+          }
+        }
+
+        // Python docstrings
+        if (["python","py"].includes(l)) {
+          if (inDocstring) {
+            const endIdx = line.indexOf(docstringChar);
+            if (endIdx !== -1) {
+              result.push(cs(C.comment, line.slice(0, endIdx + 3), `ds-${li}`, true));
+              inDocstring = false;
+              const rest = line.slice(endIdx + 3);
+              if (rest.trim()) result.push(...tokenizeLine(rest, l, li));
+            } else {
+              result.push(cs(C.comment, line, `ds-${li}`, true));
+            }
+            return;
+          }
+          for (const q of ['"""', "'''"]) {
+            const startIdx = line.indexOf(q);
+            if (startIdx !== -1) {
+              const endIdx = line.indexOf(q, startIdx + 3);
+              if (endIdx !== -1) {
+                if (startIdx > 0) result.push(...tokenizeLine(line.slice(0, startIdx), l, li));
+                result.push(cs(C.comment, line.slice(startIdx, endIdx + 3), `ds2-${li}`, true));
+                const rest = line.slice(endIdx + 3);
+                if (rest.trim()) result.push(...tokenizeLine(rest, l, li));
+              } else {
+                if (startIdx > 0) result.push(...tokenizeLine(line.slice(0, startIdx), l, li));
+                result.push(cs(C.comment, line.slice(startIdx), `ds3-${li}`, true));
+                inDocstring = true;
+                docstringChar = q;
+              }
+              return;
+            }
+          }
+        }
+
+        // Full-line comment
+        const trimmed = line.trimStart();
+        if (isLineComment(trimmed)) {
+          result.push(cs(C.comment, line, `cm-${li}`, true));
+          return;
+        }
+
+        // Inline comment detection
+        let commentStart = -1;
+        if (["python","py","r","bash","sh"].includes(l)) {
+          let inStr = false; let strChar = "";
+          for (let ci = 0; ci < line.length; ci++) {
+            const ch = line[ci];
+            if (!inStr && (ch === '"' || ch === "'")) { inStr = true; strChar = ch; }
+            else if (inStr && ch === strChar && line[ci-1] !== "\\") { inStr = false; }
+            else if (!inStr && ch === "#") { commentStart = ci; break; }
+          }
+        } else if (["javascript","js","typescript","ts","tsx","jsx","java","cpp","c","csharp","cs","go","rust","swift","kotlin","php"].includes(l)) {
+          let inStr = false; let strChar = "";
+          for (let ci = 0; ci < line.length - 1; ci++) {
+            const ch = line[ci]; const ch2 = line[ci+1];
+            if (!inStr && (ch === '"' || ch === "'" || ch === "`")) { inStr = true; strChar = ch; }
+            else if (inStr && ch === strChar && line[ci-1] !== "\\") { inStr = false; }
+            else if (!inStr && ch === "/" && ch2 === "/") { commentStart = ci; break; }
+          }
+        } else if (l === "sql") {
+          const idx = line.indexOf("--");
+          if (idx !== -1) commentStart = idx;
+        }
+
+        if (commentStart !== -1) {
+          result.push(...tokenizeLine(line.slice(0, commentStart), l, li));
+          result.push(cs(C.comment, line.slice(commentStart), `icm-${li}`, true));
+        } else {
+          result.push(...tokenizeLine(line, l, li));
+        }
+      });
+
+      return result;
+    }
+
+    function tokenizeLine(line: string, _l: string, li: number): React.ReactNode[] {
+      const TOKEN_RE = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+\.?\d*([eE][+-]?\d+)?\b)|([\w$]+)|(=>|->|::|[=!<>]=|&&|\|\||[+\-*/%&|^~<>!?:@,;.[\](){}])/g;
+      const result: React.ReactNode[] = [];
+      let lastIdx = 0;
+      let m: RegExpExecArray | null;
+      TOKEN_RE.lastIndex = 0;
+
+      const controlWords = new Set(["if","else","elif","for","while","do","switch","case","break","continue","return","yield","pass","try","except","finally","catch","throw","raise","with","async","await","in","of","is","not","and","or","new","delete","typeof","instanceof","void","import","export","from","as","default","match","goto","using","include","require"]);
+      const typeWords    = new Set(["int","str","float","bool","list","dict","tuple","set","bytes","any","Any","Optional","Union","List","Dict","Tuple","Set","Type","Callable","string","number","boolean","object","array","void","never","unknown","bigint","symbol","char","double","long","short","byte","uint","i32","i64","u32","u64","f32","f64","usize","isize","Vec","HashMap","Option","Result","Box","Arc","Rc","String","integer","real"]);
+      const builtinWords = new Set(["print","len","range","type","isinstance","hasattr","getattr","setattr","enumerate","zip","map","filter","sorted","reversed","sum","min","max","abs","round","open","input","repr","super","property","staticmethod","classmethod","console","Math","JSON","Object","Array","Promise","Error","Date","RegExp","Symbol","Buffer","process","setTimeout","setInterval","clearTimeout","clearInterval","fetch","document","window","navigator"]);
+      const declWords    = new Set(["class","def","fn","func","fun","pub","priv","mod","use","type","struct","impl","trait","interface","enum","abstract","override","extends","implements","let","const","var","declare","namespace","module","package","where","self","this","super"]);
+      const literalWords = new Set(["None","True","False","null","undefined","true","false","NaN","Infinity"]);
+
+      const col = (color: string, content: string, key: string, bold = false) => (
+        <span key={key} style={{ color, ...(bold ? { fontWeight: 600 } : {}) }}>{content}</span>
+      );
+
+      while ((m = TOKEN_RE.exec(line)) !== null) {
+        if (m.index > lastIdx) result.push(<span key={`t-${li}-${lastIdx}`} style={{ color: C.base }}>{line.slice(lastIdx, m.index)}</span>);
+        lastIdx = m.index + m[0].length;
+        const [full, strTok, numTok, , wordTok, opTok] = m;
+
+        if (strTok !== undefined) {
+          result.push(col(C.string, full, `s-${li}-${m.index}`));
+        } else if (numTok !== undefined) {
+          result.push(col(C.number, full, `n-${li}-${m.index}`));
+        } else if (wordTok !== undefined) {
+          if (controlWords.has(wordTok))       result.push(col(C.kw_ctrl,  full, `kc-${li}-${m.index}`, true));
+          else if (declWords.has(wordTok))     result.push(col(C.kw_decl,  full, `kd-${li}-${m.index}`, true));
+          else if (literalWords.has(wordTok))  result.push(col(C.kw_lit,   full, `kl-${li}-${m.index}`));
+          else if (typeWords.has(wordTok))     result.push(col(C.type,     full, `kt-${li}-${m.index}`));
+          else if (builtinWords.has(wordTok))  result.push(col(C.builtin,  full, `kb-${li}-${m.index}`));
+          else if (/^[A-Z]/.test(wordTok))    result.push(col(C.classname, full, `cls-${li}-${m.index}`));
+          else if (/^_/.test(wordTok))         result.push(col(C.dunder,   full, `dun-${li}-${m.index}`));
+          else                                 result.push(<span key={`id-${li}-${m.index}`} style={{ color: C.base }}>{full}</span>);
+        } else if (opTok !== undefined) {
+          if (full === "@") {
+            result.push(col(C.decorator, full, `at-${li}-${m.index}`));
+          } else if (["=>","->","::","=","==","!=","<","<=",">",">=","&&","||","!","+","-","*","/","%","&","|","^","~","?"].includes(full)) {
+            result.push(col(C.operator, full, `op-${li}-${m.index}`));
+          } else if (["(",")","{","}","[","]"].includes(full)) {
+            result.push(col(C.bracket, full, `br-${li}-${m.index}`));
+          } else {
+            result.push(col(C.punct, full, `pu-${li}-${m.index}`));
+          }
+        }
+      }
+      if (lastIdx < line.length) result.push(<span key={`tail-${li}-${lastIdx}`} style={{ color: C.base }}>{line.slice(lastIdx)}</span>);
+      return result;
+    }
+
+    const HIGHLIGHTED_LANGS = new Set([
+      "python","py","javascript","js","typescript","ts","tsx","jsx",
+      "bash","sh","sql","css","json","html","xml","rust","go","java",
+      "cpp","c","csharp","cs","php","ruby","swift","kotlin","r","yaml","yml",
+    ]);
+    const shouldHighlight = HIGHLIGHTED_LANGS.has(lang.toLowerCase());
+
+    const [copied, setCopied] = React.useState(false);
+    const handleCopy = () => {
+      navigator.clipboard.writeText(codeText).catch(() => {});
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    };
+    const handleDownload = () => {
+      const blob = new Blob([codeText], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = downloadFilename;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // Distinct bg colours for header vs body — works in both modes
+    const headerBg = isDark ? "rgba(15,23,42,0.85)" : "rgba(241,245,249,1)";
+    const bodyBg   = isDark ? "rgba(2,6,23,0.92)"   : "rgba(248,250,252,1)";
+    const borderCol= isDark ? "rgba(51,65,85,0.6)"  : "rgba(203,213,225,0.8)";
+
+    return (
+      <div className="relative my-3 rounded-xl overflow-hidden shadow-md" style={{ border: `1px solid ${borderCol}` }}>
+        {/* Header bar */}
+        <div className="flex items-center justify-between px-3 py-2" style={{ background: headerBg, borderBottom: `1px solid ${borderCol}` }}>
+          <div className="flex items-center gap-2">
+            {/* Language accent dot */}
+            <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: meta.accent }} />
+            {/* Language label */}
+            <span className="text-[11px] font-semibold font-mono tracking-wide" style={{ color: meta.accent }}>
+              {meta.label}
+            </span>
+            {/* Inferred filename — dim, separated by a divider */}
+            <span style={{ color: isDark ? "#475569" : "#94a3b8" }} className="text-[10px] select-none">·</span>
+            <span className="text-[10px] font-mono" style={{ color: isDark ? "#64748b" : "#94a3b8" }}>{downloadFilename}</span>
+          </div>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={handleDownload}
+              title={`Download ${downloadFilename}`}
+              className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md transition-colors font-mono"
+              style={{ color: isDark ? "#64748b" : "#94a3b8" }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = isDark ? "#e2e8f0" : "#1e293b"; (e.currentTarget as HTMLElement).style.background = isDark ? "rgba(51,65,85,0.5)" : "rgba(203,213,225,0.5)"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = isDark ? "#64748b" : "#94a3b8"; (e.currentTarget as HTMLElement).style.background = ""; }}
+            >
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                <path d="M6 1v7M3 5l3 3 3-3M1 10h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Download
+            </button>
+            <button
+              onClick={handleCopy}
+              title="Copy code"
+              className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md transition-colors font-mono"
+              style={{
+                color: copied ? meta.accent : isDark ? "#64748b" : "#94a3b8",
+                background: copied ? `${meta.accent}20` : undefined,
+              }}
+              onMouseEnter={e => { if (!copied) { (e.currentTarget as HTMLElement).style.color = isDark ? "#e2e8f0" : "#1e293b"; (e.currentTarget as HTMLElement).style.background = isDark ? "rgba(51,65,85,0.5)" : "rgba(203,213,225,0.5)"; }}}
+              onMouseLeave={e => { if (!copied) { (e.currentTarget as HTMLElement).style.color = isDark ? "#64748b" : "#94a3b8"; (e.currentTarget as HTMLElement).style.background = ""; }}}
+            >
+              {copied ? (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                    <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                    <rect x="4" y="4" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5"/>
+                    <path d="M8 4V2a1 1 0 00-1-1H2a1 1 0 00-1 1v5a1 1 0 001 1h2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                  Copy
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+        {/* Code body — distinct from header AND from surrounding chat bg */}
+        <pre className="p-4 text-[12px] font-mono overflow-x-auto whitespace-pre leading-[1.7] m-0"
+          style={{ background: bodyBg }}>
+          <code style={{ color: C.base }}>
+            {shouldHighlight ? tokenize(codeText, lang) : codeText}
+          </code>
+        </pre>
+      </div>
+    );
+  },
   blockquote: ({ children }) => (
     <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground my-2 block">
       {children}
@@ -195,7 +595,7 @@ const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["components"] = 
  * - A blank line between paragraphs gets a small spacer div.
  */
 function renderTextSegment(raw: string, segKey: number): React.ReactNode {
-  const cleaned = stripLinks(raw);
+  const cleaned = collapseInlineBreaks(stripLinks(raw));
   const paragraphs = cleaned.split(/\n\n+/);
 
   return (
@@ -450,7 +850,7 @@ function renderContent(
 
   // No sources — plain markdown render
   if (!hasSources) {
-    const cleanText = text.replace(/\s*\[\d+\](?!\()/g, '').replace(/  +/g, ' ').trim();
+    const cleanText = collapseInlineBreaks(text.replace(/\s*\[\d+\](?!\()/g, '').replace(/  +/g, ' ').trim());
     return (
       <div className="leading-relaxed">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
@@ -4058,10 +4458,28 @@ const Chat = () => {
             em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
             hr: () => <hr className="border-border my-4" />,
             blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground my-2 text-xs">{children}</blockquote>,
-            code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
-              inline
-                ? <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono">{children}</code>
-                : <pre className="bg-muted rounded-lg p-3 text-xs font-mono overflow-x-auto my-3 whitespace-pre-wrap"><code>{children}</code></pre>,
+            code: ({ inline, node, children }: { inline?: boolean; node?: any; children?: React.ReactNode }) => {
+              const codeStr = String(children ?? "");
+              const isInline = inline === true || (inline === undefined && !codeStr.includes("\n"));
+              if (isInline) return <code className="bg-muted px-1 py-0.5 rounded text-xs font-mono text-primary/90 whitespace-nowrap">{children}</code>;
+              const codeText = codeStr.replace(/\n$/, "");
+              const classList: string[] = node?.properties?.className ?? [];
+              const lang = (classList.find((c: string) => c.startsWith("language-")) ?? "").replace("language-", "");
+              const handleCopy = () => { navigator.clipboard.writeText(codeText).catch(() => {}); const btn = document.activeElement as HTMLElement; if (btn) { const orig = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = orig; }, 1500); } };
+              const handleDownload = () => { const blob = new Blob([codeText], { type: "text/plain" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `code.${lang || "txt"}`; a.click(); URL.revokeObjectURL(url); };
+              return (
+                <div className="relative my-3 rounded-lg overflow-hidden border border-border/50">
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-muted/80 border-b border-border/40">
+                    <span className="text-[10px] text-muted-foreground font-mono uppercase tracking-wide">{lang || "code"}</span>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={handleDownload} className="text-[10px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-muted transition-colors">↓ Download</button>
+                      <button onClick={handleCopy} className="text-[10px] text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-muted transition-colors">Copy</button>
+                    </div>
+                  </div>
+                  <pre className="bg-muted/40 p-3 text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed m-0"><code>{codeText}</code></pre>
+                </div>
+              );
+            },
             table: ({ children }) => <div className="overflow-x-auto my-3"><table className="text-xs border-collapse w-full">{children}</table></div>,
             th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-left text-xs">{children}</th>,
             td: ({ children }) => <td className="border border-border px-2 py-1 text-xs">{children}</td>,
@@ -4507,7 +4925,7 @@ const Chat = () => {
   }, [sessionId, documents]);
 
   // ── CAD/IFC dedicated query runner ─────────────────────────────────────────
-  // Calls /api/cad/query with the pre-parsed file_id instead of the generic RAG stream.
+  // Calls /api/cad/query SSE stream — real status events from the backend.
   const runCadQuery = useCallback(async (query: string, fileId: string): Promise<Message | null> => {
     setThinkingSteps([]);
     setThinkingExpanded(true);
@@ -4536,22 +4954,47 @@ const Chat = () => {
         throw new Error((body as any).detail ?? `HTTP ${res.status}`);
       }
 
-      const data = await res.json();
-      // Persist session so follow-up questions keep context
-      if (data.session_id) {
-        setSessionId(data.session_id);
-        sessionIdRef.current = data.session_id;
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let resultMsg: Message | null = null;
+      const accumulatedSteps: ThinkingStep[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "status") {
+              const step: ThinkingStep = { node: event.node, icon: event.icon, message: event.message, ts: Date.now() };
+              accumulatedSteps.push(step);
+              setThinkingSteps(prev => [...prev, step]);
+            } else if (event.type === "result") {
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              resultMsg = {
+                id:        Date.now().toString(),
+                role:      "assistant",
+                content:   event.answer,
+                rawAnswer: event.answer,
+                sources:   [],
+                confidence: event.judge_score ?? 1.0,
+                timestamp: new Date(),
+              };
+            } else if (event.type === "error") {
+              throw new Error(event.message);
+            }
+          } catch { /* malformed SSE line */ }
+        }
       }
 
-      const resultMsg: Message = {
-        id:         Date.now().toString(),
-        role:       "assistant",
-        content:    data.answer,
-        rawAnswer:  data.answer,
-        sources:    [],
-        confidence: data.judge_score != null ? data.judge_score / 10 : 1.0,
-        timestamp:  new Date(),
-      };
+      if (resultMsg) resultMsg = { ...resultMsg, thinkingSteps: accumulatedSteps };
+      setThinkingSteps([]);
       return resultMsg;
     } catch (error) {
       setThinkingSteps([]);
@@ -4559,7 +5002,6 @@ const Chat = () => {
       throw error;
     } finally {
       setIsLoading(false);
-      setThinkingSteps([]);
     }
   }, [sessionId]);
 
@@ -4587,9 +5029,24 @@ const Chat = () => {
     try {
       // ── Route: CAD/IFC agent if a CAD file is the active context ──────────
       // Priority 1: a CAD doc explicitly attached to this message (pendingDocIds)
-      // Priority 2: the last uploaded CAD file (window.__lastCadFileId set on upload)
+      // Priority 2: user mentions the file by name or uses 3D/BIM keywords → use last uploaded CAD file
       const CAD_DOC_TYPES = new Set(["ifc", "cad", "dxf", "dwg", "step", "stp"]);
+
+      const CAD_INTENT_KEYWORDS = [
+        /\b(ifc|dxf|dwg|step|stp|bim|3d model|3d file|building model|ifc file|cad file)\b/i,
+        /\b(wall|slab|beam|column|storey|floor|level|door|window|railing|roof|stair|footing|material|element)\b/i,
+        /\b(how many|count|total|list|breakdown|summary|analyze|analyse|show me|tell me about).{0,30}\b(element|component|building|structure|model|file)\b/i,
+      ];
+      const cadKeywordMatch = CAD_INTENT_KEYWORDS.some(re => re.test(trimmedInput));
+
+      const cadDocFilenames = documents
+        .filter(d => CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase()))
+        .map(d => d.filename?.replace(/\.[^.]+$/, "").toLowerCase())
+        .filter(Boolean);
+      const mentionsFilename = cadDocFilenames.some(fn => fn && trimmedInput.toLowerCase().includes(fn));
+
       const activeCadFileId: string | null = (() => {
+        // Priority 1: explicitly attached CAD doc
         const attachedCad = documents.find(
           d =>
             userMsg.attachedDocIds?.includes(d.document_id) &&
@@ -4597,12 +5054,13 @@ const Chat = () => {
         );
         if (attachedCad) return attachedCad.document_id;
 
+        // Priority 2: BIM keyword or filename mention → route to last uploaded CAD file
         const lastId = (window as any).__lastCadFileId as string | undefined;
-        if (lastId) {
-          const doc = documents.find(d => d.document_id === lastId);
-          if (doc && CAD_DOC_TYPES.has((doc.doc_type ?? "").toLowerCase())) {
-            return lastId;
-          }
+        if (lastId && (cadKeywordMatch || mentionsFilename)) {
+          const hasCachedDoc = documents.some(
+            d => d.document_id === lastId && CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
+          );
+          if (hasCachedDoc) return lastId;
         }
         return null;
       })();
@@ -6393,10 +6851,26 @@ const Chat = () => {
                                   {source.source_number}
                                 </span>
                                 <span className="flex-1 min-w-0">
-                                  <span className="flex items-center gap-1.5">
+                                  <span className="flex items-center gap-1.5 flex-wrap">
                                     <span className="text-[12px] font-semibold text-foreground truncate">
                                       {sections[0]?.title || source.filename}
                                     </span>
+                                    {/* Filename badge — blue, inline, shown when title differs from filename */}
+                                    {sections[0]?.title && sections[0].title !== source.filename && (
+                                      <span
+                                        title={source.filename}
+                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
+                                        style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
+                                        data-open-doc
+                                        onClick={(e) => { e.stopPropagation(); openDocumentAtExcerpt(source.filename, docExcerpt); }}
+                                      >
+                                        <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                                          <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                                          <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                                        </svg>
+                                        {source.filename}
+                                      </span>
+                                    )}
                                     {hasImages && (
                                       <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
                                         <ImageIcon className="h-2.5 w-2.5" />
@@ -6417,7 +6891,6 @@ const Chat = () => {
                                       }}
                                     />
                                   </span>
-                                  <span className="text-[10px] text-muted-foreground truncate block">{source.filename}</span>
                                 </span>
                                 <span className="text-[10px] text-muted-foreground shrink-0 flex items-center gap-1">
                                   <Eye className="h-3 w-3" />

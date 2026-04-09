@@ -894,27 +894,50 @@ Now generate for: "{q}" """
 
     def router(self, state: AgentState) -> AgentState:
         """
-        LLM-powered router - intelligently decides whether query needs documents.
-        
-        NO hardcoded keywords - the LLM decides based on query intent.
+        Two-stage LLM router:
+          Stage 1 — intent_classifier: deep intent analysis with chain-of-thought.
+          Stage 2 — router LLM: final decision, informed by the classifier's hint.
+
+        NO hardcoded keywords in either stage — both use the LLM.
         """
-        # Skip LLM classification when force_route was set by the caller
+        # Skip classification when force_route was set by the caller
         if state.get("route"):
             print(f"⚡ router: force_route={state['route']} — skipping classification")
             return state
 
         query = state["query"]
         history = state.get("conversation_history", [])
-        
+        route_log = state.get("_route_log", [])
+
         print(f"📍 Route → ", end="")
-        
+
         if not self.llm.enabled:
-            # Fallback to simple routing if LLM unavailable
             return self._fallback_router(state)
-        
-        # Summarise the last assistant answer (if any) so the router can detect
-        # follow-up intent ("make it shorter", "translate that") without being
-        # confused by the full conversation — we only need the last exchange.
+
+        # ── Stage 1: Intent classifier (separate LLM call, chain-of-thought) ──
+        try:
+            from intent_classifier import classify_intent
+            intent = classify_intent(query, history, route_log)
+            intent_hint = (
+                f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
+                f"  primary_intent: {intent.primary_intent}\n"
+                f"  operation: {intent.operation}\n"
+                f"  output_format: {intent.output_format}\n"
+                f"  is_followup: {intent.is_followup} ({intent.followup_type})\n"
+                f"  language_intent: '{intent.language_intent}'\n"
+                f"  ambiguity_score: {intent.ambiguity_score:.2f}\n"
+                f"  suggested_route: {intent.suggested_route}\n"
+                f"  reasoning: {intent.reasoning}"
+            )
+            # If classifier is very confident, trust it directly and skip the second LLM call
+            if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
+                print(f"{intent.suggested_route} (intent classifier, conf={intent.confidence:.2f})")
+                return {**state, "route": intent.suggested_route, "_intent": intent.to_dict()}
+        except Exception as e:
+            print(f"[intent_classifier error: {e}] ", end="")
+            intent_hint = ""
+
+        # ── Stage 2: Router LLM (final arbiter, informed by classifier hint) ──
         last_assistant = next(
             (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
         )
@@ -927,9 +950,6 @@ Now generate for: "{q}" """
                         break
                 break
 
-        # Build session route history so the model can see the full intent chain,
-        # not just the immediately previous turn (which may itself be a direct/conversational hop)
-        route_log = state.get("_route_log", [])
         prior_context = ""
         if last_assistant or route_log:
             route_history = ""
@@ -943,55 +963,58 @@ Now generate for: "{q}" """
                 f"\nLAST ASSISTANT REPLY: {last_assistant[:300]}"
             )
 
-        routing_prompt = f"""You are a query router. Pick exactly one route for the CURRENT QUERY.
+        routing_prompt = f"""You are a query router for Bimlo Copilot. Pick exactly ONE route for the CURRENT QUERY.
 
 ROUTES:
-- direct: purely conversational — greetings, small talk, memory recall ("what did you just do", "what was that", "can you repeat"), edits/modifications to a previous answer ("make it shorter", "translate that", "change the tone"). No document lookup needed.
+- direct: purely conversational — greetings, small talk, memory recall ("what did you just do", "can you repeat"), edits/modifications to a previous answer ("make it shorter", "translate that", "change the tone"). No document lookup needed.
 - rag: the user wants to read, understand, or extract content from documents — summaries, explanations, specific facts, questions answered from docs.
-- iterative_rag: like rag, but comparing/contrasting across multiple different documents.
-- transform: the user wants document content in a completely different form — full translation, total rewrite/reformat of the entire document.
+- iterative_rag: like rag, but comparing/contrasting across multiple different documents. Signals: "compare", "vs", "difference between", "across documents".
+- transform: the user wants document content in a completely different form — full translation of an entire document, total rewrite/reformat. The ENTIRE document is the output.
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
-- graph: the user wants a chart, graph, or visual plot of data extracted from the documents — bar chart, line chart, pie chart, scatter plot, histogram, trend over time, comparison chart, etc. This applies regardless of language — detect the INTENT to visualize data even when the query is in French, Arabic, Spanish, German, Italian, Portuguese, or any other language. Examples: EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser/tracer; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik/visualisieren; IT: grafico/diagramma; PT: gráfico/visualizar.
-- report: the user explicitly asks to generate, create, make, write, or produce a report, document, PDF, or structured written output — e.g. "make a report on X", "generate a report about X", "create a report for file Y", "do a report on Z", "rapport sur X" (French). Must be an explicit request for a standalone written deliverable, NOT just a question or summary request.
-- define: the user is asking what a specific term, concept, acronym, or niche phrase MEANS — typically triggered by "what is X?", "what does X mean?", "explain X", "define X", where X is a word or short phrase that likely appears in the documents. The answer should explain the concept in depth using the document context, not just summarise what the document says about it.
+- graph: the user wants a chart, graph, or visual plot of data extracted from the documents. Detect this intent in ANY language. EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik; IT: grafico; PT: gráfico.
+- report: the user explicitly asks to PRODUCE a standalone written report/PDF/document — "make a report on X", "generate a report", "rapport sur X". Must be an explicit creation request, NOT a summary or question.
+- define: the user asks the MEANING of a specific technical term, acronym, or concept — "what is X?", "define X", "what does X mean?", "explain X" where X is a single term. Answer using document context.
 
-CRITICAL RULES — read these first:
-1. Questions about the CONVERSATION or the AI's own actions → ALWAYS direct. Examples: "what did you just do?", "what did you say?", "summarize what you told me", "what route did you use?", "explain what you just did".
-2. Questions referencing "you", "your answer", "what you said/did" → direct.
-3. Short follow-up that only makes sense from the last reply context → direct.
-4. Use define (not rag) when the question is clearly asking for the meaning or explanation of a single term or concept — not a document summary or fact extraction.
-5. When in doubt between direct and rag: if the question is about the AI or the conversation → direct. If it's about document content → rag.
-6. Questions about diagrams, schematics, wiring, rack layouts, floor plans, or figures → rag (the document processor has already described these visually, so standard RAG retrieval will find them).
+CRITICAL RULES:
+1. Any query about what the AI just said/did, referencing "you", "your answer", "what you said" → ALWAYS direct.
+2. Short follow-up only meaningful from last reply context → direct.
+3. "define" over "rag": if the question is clearly about the MEANING of a single term → define.
+4. When in doubt between direct and rag: AI/conversation topic → direct; document content → rag.
+5. Diagrams, schematics, wiring, rack layouts, floor plans → rag (processor already described them visually).
+6. TRUST the intent pre-analysis below — it is the result of a deep chain-of-thought analysis. Override it only when you see a clear contradiction.
 {prior_context}
+{intent_hint}
 
 CURRENT QUERY: {query}
 
 Reply with ONE word only — the route name."""
 
         try:
-            # Router gets NO history messages — only the routing prompt.
-            # Passing history here biases the model toward "direct" because it
-            # sees the prior conversational turns and thinks the whole session is casual.
             route = self.llm.chat(
                 [{"role": "user", "content": routing_prompt}],
                 temperature=0.0,
-                max_tokens=50,
+                max_tokens=10,
             ).strip().lower()
 
-            # Validate — rag checked BEFORE transform so ambiguous responses default safely
             valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph", "report"]
             if route not in valid_routes:
-                # Extract route if LLM added extra text
                 for valid in valid_routes:
                     if valid in route:
                         route = valid
                         break
                 else:
-                    route = "rag"  # Safe fallback
-            
+                    # Fall back to classifier suggestion rather than blindly defaulting to rag
+                    try:
+                        route = intent.suggested_route  # type: ignore[name-defined]
+                    except Exception:
+                        route = "rag"
+
             print(route)
-            return {**state, "route": route}
-            
+            try:
+                return {**state, "route": route, "_intent": intent.to_dict()}  # type: ignore[name-defined]
+            except Exception:
+                return {**state, "route": route}
+
         except Exception as e:
             print(f"routing_error, using fallback → ", end="")
             return self._fallback_router(state)

@@ -60,8 +60,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import asyncio
+import queue
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 # Internal CAD → IFC conversion pipeline (transparent to user)
@@ -776,6 +779,18 @@ _SYSTEM_PROMPT = """\
 You are Bimlo, the AI BIM & CAD analyst of BIMLO TECHNOLOGIE — specialists in BIM engineering (3D–7D), Scan to BIM, 4D construction planning, telecom infrastructure studies, and DeepTwin AI digital twins.
 You are analysing a structural or CAD file. You have access to the parsed file data below.
 Answer questions factually using the data provided. Cite element counts, materials, levels, layers exactly as given. If data is missing or limited, say so clearly. Be concise and expert. Today: {today}.
+
+FORMATTING RULES — follow these strictly:
+- Always start with a **one-sentence summary** of what the file contains or what you found.
+- Then use bullet points (`- `) to list specific breakdown details: element types with counts, storeys, materials, warnings.
+- Wrap every filename in backticks, e.g. `TallBuilding.ifc`.
+- Wrap every IFC element type or technical name in backticks, e.g. `wall`, `slab`, `Basic Wall:Outside wall`.
+- Wrap every storey/level name in backticks, e.g. `Level 1`, `Level 4`.
+- Each bullet = one fact. Keep bullets short and precise.
+- End with a `⚠️` bullet for data quality issues (missing materials, unknown classes, parse errors) if any exist.
+- Use **bold** for key numbers (e.g. **92 elements**, **5 storeys**).
+- If the question is simple (yes/no, single fact), answer in 1–2 sentences only — no bullets needed.
+- Do NOT write walls of prose. Structure is required.
 """
 
 def _call_llm_with_judge(
@@ -978,11 +993,14 @@ async def cad_upload(file: UploadFile = File(...)):
     )
 
 
-@router.post("/api/cad/query", response_model=CadQueryResponse)
+@router.post("/api/cad/query")
 async def cad_query(req: CadQueryRequest):
     """
     Ask a question about a previously uploaded CAD/IFC file.
-    Uses per-session conversation history (isolated from main RAG sessions).
+    Streams Server-Sent Events with real status updates as each step executes:
+      { "type": "status", "node": "...", "icon": "...", "message": "..." }
+      { "type": "result", "answer": "...", "session_id": "...", ... }
+      { "type": "error",  "message": "..." }
     """
     summary = CadSharedContext.get_file(req.file_id)
     if not summary:
@@ -990,42 +1008,110 @@ async def cad_query(req: CadQueryRequest):
 
     sid     = req.session_id or str(uuid.uuid4())
     history = CadSharedContext.get_history(sid)
-
-    # Attach current file summary to session context
     CadSharedContext.set_summary(sid, summary)
 
-    context = _build_context_block(summary)
+    q: queue.Queue = queue.Queue()
+    DONE = object()
 
-    system_prompt = _SYSTEM_PROMPT.format(
-        today=datetime.utcnow().strftime("%B %d, %Y")
-    ) + f"\n\n{context}"
+    def emit(node: str, icon: str, message: str):
+        q.put({"type": "status", "node": node, "icon": icon, "message": message})
 
-    user_msg = req.query
+    def run():
+        try:
+            # ── Step 1: file lookup ────────────────────────────────────────
+            fname    = summary.get("filename", "file")
+            pipeline = summary.get("pipeline", "unknown").upper()
+            n_elem   = summary.get("total_elements") or summary.get("total_entities") or 0
+            emit("file_lookup", "📂", f"Loaded `{fname}` — {n_elem} elements via {pipeline} pipeline")
 
-    logger.info(
-        f"[cad_query] sid={sid} | file_id={req.file_id} | "
-        f"pipeline={summary.get('pipeline')} | q={req.query[:80]!r}"
-    )
+            # ── Step 2: context build ──────────────────────────────────────
+            emit("context_build", "🔍", "Extracting element structure, materials & storeys")
+            context = _build_context_block(summary)
 
-    answer, judge_score, judge_comment = _call_llm_with_judge(
-        system_prompt=system_prompt,
-        history=history,
-        user_msg=user_msg,
-        context=context,
-        question=req.query,
-    )
+            system_prompt = _SYSTEM_PROMPT.format(
+                today=datetime.utcnow().strftime("%B %d, %Y")
+            ) + f"\n\n{context}"
 
-    CadSharedContext.append_turn(sid, "user",      req.query)
-    CadSharedContext.append_turn(sid, "assistant", answer)
+            # ── Step 3: element summary ────────────────────────────────────
+            counts  = summary.get("element_counts") or summary.get("entity_counts") or {}
+            top3    = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_str = ", ".join(f"{cnt} {lbl}" for lbl, cnt in top3) if top3 else "no typed elements"
+            emit("element_scan", "🏗️", f"Top elements: {top_str}")
 
-    return CadQueryResponse(
-        answer        = answer,
-        session_id    = sid,
-        file_id       = req.file_id,
-        judge_score   = judge_score,
-        judge_comment = judge_comment,
-        pipeline      = summary.get("pipeline", "unknown"),
-        ux_hint       = summary.get("ux_hint", ""),
+            # ── Step 4: storey / layer context ─────────────────────────────
+            storeys = summary.get("storeys", [])
+            layers  = summary.get("layers", [])
+            if storeys:
+                snames = [s.get("name", "?") for s in storeys]
+                emit("spatial_context", "📐", f"Spatial context: {len(storeys)} storeys — {', '.join(snames[:4])}")
+            elif layers:
+                emit("spatial_context", "📐", f"Layer context: {len(layers)} CAD layers detected")
+
+            # ── Step 5: material scan ──────────────────────────────────────
+            mats = summary.get("material_inventory", {})
+            if mats:
+                top_mat = sorted(mats.items(), key=lambda x: x[1], reverse=True)[0]
+                emit("material_scan", "🧱", f"Materials found — most used: `{top_mat[0]}` ({top_mat[1]} elements)")
+            else:
+                emit("material_scan", "🧱", "Material data sparse or missing in this file")
+
+            # ── Step 6: LLM reasoning ──────────────────────────────────────
+            emit("llm_reason", "🧠", f"Reasoning over {pipeline} data to answer your question")
+
+            answer, judge_score, judge_comment = _call_llm_with_judge(
+                system_prompt=system_prompt,
+                history=history,
+                user_msg=req.query,
+                context=context,
+                question=req.query,
+            )
+
+            # ── Step 7: judge verdict ──────────────────────────────────────
+            score_pct = round(judge_score * 100)
+            verdict   = "✅" if judge_score >= 0.7 else "⚠️"
+            emit("llm_judge", verdict, f"Answer quality: {score_pct}%{' — ' + judge_comment if judge_comment else ''}")
+
+            CadSharedContext.append_turn(sid, "user",      req.query)
+            CadSharedContext.append_turn(sid, "assistant", answer)
+
+            q.put({
+                "type":          "result",
+                "answer":        answer,
+                "session_id":    sid,
+                "file_id":       req.file_id,
+                "judge_score":   judge_score,
+                "judge_comment": judge_comment,
+                "pipeline":      summary.get("pipeline", "unknown"),
+                "ux_hint":       summary.get("ux_hint", ""),
+            })
+        except Exception as e:
+            logger.error(f"[cad_query] error: {e}")
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            q.put(DONE)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    async def event_generator():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                item = await loop.run_in_executor(None, lambda: q.get(timeout=300))
+            except Exception:
+                break
+            if item is DONE:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 
