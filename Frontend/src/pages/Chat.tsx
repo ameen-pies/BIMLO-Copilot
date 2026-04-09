@@ -5071,6 +5071,7 @@ const Chat = () => {
       };
       setMessages(prev => [...prev, userMsg, assistantMsg]);
       setInput("");
+      if (!notifyDismissed) setShowNotifyBanner(true);
       // Typewriter effect — same as every other assistant reply
       setTypingMessageId(assistId);
       return;
