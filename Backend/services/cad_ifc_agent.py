@@ -621,10 +621,13 @@ def _parse_file(filename: str, file_bytes: bytes) -> dict:
 def _build_context_block(summary: dict) -> str:
     """Convert parsed summary into a rich LLM context string."""
     pipeline = summary.get("pipeline", "unknown")
+    context_pipeline = summary.get("context_pipeline", pipeline)
     filename = summary.get("filename", "file")
     lines = [f"═══ FILE ANALYSIS: {filename} ═══", f"Pipeline: {pipeline.upper()}"]
+    if context_pipeline == "ifc" and pipeline == "cad":
+        lines.append("(Context derived from auto-converted IFC)")
 
-    if pipeline == "ifc":
+    if context_pipeline == "ifc":
         lines += [
             f"IFC Schema: {summary.get('schema', 'unknown')}",
             f"Total elements: {summary.get('total_elements', 0)}",
@@ -668,7 +671,7 @@ def _build_context_block(summary: dict) -> str:
                     if el.get("level"):    parts.append(f"level={el['level']}")
                     lines.append("  " + " | ".join(parts))
 
-    elif pipeline == "cad":
+    elif context_pipeline == "cad":
         fmt = summary.get("format", "CAD")
         dim = summary.get("dimension", "unknown")
         lines += [
@@ -906,6 +909,24 @@ async def cad_upload(file: UploadFile = File(...)):
             if converted_entities > 0:
                 summary["_ifc_bytes"] = ifc_bytes
                 ifc_available = True
+                # Re-parse the converted IFC to get rich context (elements, storeys, materials)
+                try:
+                    ifc_summary = _parse_ifc(ifc_bytes, ".ifc")
+                    # Merge IFC context into summary, preserving CAD identity fields
+                    for key in ("element_counts", "total_elements", "storeys",
+                                "material_inventory", "elements_sample", "embed_strings",
+                                "unknown_classes", "missing_props_count", "schema"):
+                        if key in ifc_summary:
+                            summary[key] = ifc_summary[key]
+                    # Keep pipeline as "cad" so upload response is correct, but tag context source
+                    summary["context_pipeline"] = "ifc"
+                    logger.info(f"[cad_upload] IFC context merged | elements={ifc_summary.get('total_elements', 0)}")
+                except Exception as ifc_parse_err:
+                    logger.warning(f"[cad_upload] IFC context merge failed: {ifc_parse_err}")
+                if summary.get("error") or summary.get("parse_errors"):
+                    summary["ux_hint"] = (
+                        "Preview ready from converted IFC. Native CAD parsing failed for this file."
+                    )
                 logger.info(
                     f"[cad_upload] silent IFC conversion OK | "
                     f"entities={converted_entities} | "

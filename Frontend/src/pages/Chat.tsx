@@ -4106,6 +4106,7 @@ const Chat = () => {
     const isImage = IMAGE_EXTS.includes(fileExt);
     const isPdf   = fileExt === '.pdf';
     const isCad   = CAD_EXTS.includes(fileExt);
+    const tempDocId = `uploading:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 
     if (!ALLOWED_EXTS.includes(fileExt)) {
       toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, IFCZIP, DXF, DWG, STEP, RVT, NWD, NWC, DGN, SKP, FBX, OBJ, STL, IGES, and more CAD formats`, variant: "destructive" });
@@ -4117,6 +4118,12 @@ const Chat = () => {
     }
 
     setIsUploading(true);
+    setDocuments(prev => [{
+      document_id: tempDocId,
+      filename: file.name,
+      doc_type: "uploading",
+      timestamp: new Date().toISOString(),
+    }, ...prev]);
     try {
       if (isCad) {
         // Route CAD/IFC/BIM files to the dedicated agent endpoint
@@ -4137,7 +4144,7 @@ const Chat = () => {
           chunk_count: cadResp.total_elements ?? cadResp.total_entities ?? 0,
           created_at: cadResp.cached_at ?? new Date().toISOString(),
         };
-        setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id)]);
+        setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id && d.document_id !== tempDocId)]);
         setPendingDocIds(prev => prev.includes(cadResp.file_id) ? prev : [...prev, cadResp.file_id]);
         const blobUrl = URL.createObjectURL(file);
         const entry: { url: string; type: "cad"; cadSummary: Record<string, unknown>; ifcBlobUrl?: string } = { url: blobUrl, type: "cad", cadSummary: cadResp };
@@ -4166,8 +4173,10 @@ const Chat = () => {
 
         setPendingDocIds(prev => prev.includes(docId) ? prev : [...prev, docId]);
         await loadDocuments();
+        setDocuments(prev => prev.filter(d => d.document_id !== tempDocId));
       }
     } catch (error) {
+      setDocuments(prev => prev.filter(d => d.document_id !== tempDocId));
       toast({ title: "Upload failed", description: `${file.name}: ${serializeError(error)}`, variant: "destructive" });
     } finally {
       setIsUploading(false);
@@ -4497,6 +4506,63 @@ const Chat = () => {
     }
   }, [sessionId, documents]);
 
+  // ── CAD/IFC dedicated query runner ─────────────────────────────────────────
+  // Calls /api/cad/query with the pre-parsed file_id instead of the generic RAG stream.
+  const runCadQuery = useCallback(async (query: string, fileId: string): Promise<Message | null> => {
+    setThinkingSteps([]);
+    setThinkingExpanded(true);
+    setIsLoading(true);
+
+    try {
+      const base =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+
+      abortControllerRef.current = new AbortController();
+
+      const res = await fetch(`${base}/api/cad/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_id:    fileId,
+          query,
+          session_id: sessionIdRef.current ?? undefined,
+        }),
+        signal: abortControllerRef.current.signal,
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as any).detail ?? `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      // Persist session so follow-up questions keep context
+      if (data.session_id) {
+        setSessionId(data.session_id);
+        sessionIdRef.current = data.session_id;
+      }
+
+      const resultMsg: Message = {
+        id:         Date.now().toString(),
+        role:       "assistant",
+        content:    data.answer,
+        rawAnswer:  data.answer,
+        sources:    [],
+        confidence: data.judge_score != null ? data.judge_score / 10 : 1.0,
+        timestamp:  new Date(),
+      };
+      return resultMsg;
+    } catch (error) {
+      setThinkingSteps([]);
+      if (error instanceof Error && error.name === "AbortError") return null;
+      throw error;
+    } finally {
+      setIsLoading(false);
+      setThinkingSteps([]);
+    }
+  }, [sessionId]);
+
   const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
@@ -4519,8 +4585,31 @@ const Chat = () => {
     if (!notifyDismissed) setShowNotifyBanner(true);
 
     try {
-      // ── RAG path (router decides: rag / report / graph / analytics / etc.) ──
-      const assistantMsg = await runStreamingQuery(trimmedInput);
+      // ── Route: CAD/IFC agent if a CAD file is the active context ──────────
+      // Priority 1: a CAD doc explicitly attached to this message (pendingDocIds)
+      // Priority 2: the last uploaded CAD file (window.__lastCadFileId set on upload)
+      const CAD_DOC_TYPES = new Set(["ifc", "cad", "dxf", "dwg", "step", "stp"]);
+      const activeCadFileId: string | null = (() => {
+        const attachedCad = documents.find(
+          d =>
+            userMsg.attachedDocIds?.includes(d.document_id) &&
+            CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
+        );
+        if (attachedCad) return attachedCad.document_id;
+
+        const lastId = (window as any).__lastCadFileId as string | undefined;
+        if (lastId) {
+          const doc = documents.find(d => d.document_id === lastId);
+          if (doc && CAD_DOC_TYPES.has((doc.doc_type ?? "").toLowerCase())) {
+            return lastId;
+          }
+        }
+        return null;
+      })();
+
+      const assistantMsg = activeCadFileId
+        ? await runCadQuery(trimmedInput, activeCadFileId)
+        : await runStreamingQuery(trimmedInput);
       if (!assistantMsg) return;
       let updatedMessages: Message[] = [];
       setMessages(prev => {
@@ -5593,28 +5682,31 @@ const Chat = () => {
                               {documents.map(doc => {
                                 const ext = doc.filename.split('.').pop()?.toLowerCase() ?? '';
                                 const isImg = IMAGE_EXTS.includes(`.${ext}`);
+                                const isUploadingDoc = doc.doc_type === "uploading";
                                 return (
                                   <div
                                     key={doc.document_id}
-                                    className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-muted/60 cursor-pointer transition-colors"
-                                    onClick={() => openBubbleDoc(doc)}
+                                    className={`group flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors ${isUploadingDoc ? 'opacity-80 cursor-default' : 'hover:bg-muted/60 cursor-pointer'}`}
+                                    onClick={() => { if (!isUploadingDoc) openBubbleDoc(doc); }}
                                   >
                                     <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                                      {isImg ? <ImageIcon className="h-3.5 w-3.5 text-primary" /> : <FileText className="h-3.5 w-3.5 text-primary" />}
+                                      {isUploadingDoc ? <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" /> : isImg ? <ImageIcon className="h-3.5 w-3.5 text-primary" /> : <FileText className="h-3.5 w-3.5 text-primary" />}
                                     </div>
                                     <div className="flex-1 min-w-0">
                                       <p className="text-xs font-medium text-foreground truncate">{doc.filename}</p>
-                                      <p className="text-[10px] text-muted-foreground capitalize">{doc.doc_type}</p>
+                                      <p className="text-[10px] text-muted-foreground capitalize">{isUploadingDoc ? 'uploading...' : doc.doc_type}</p>
                                     </div>
-                                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                                      <Eye className="h-3 w-3 text-muted-foreground/50" />
-                                      <button
-                                        onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
-                                        className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
-                                      >
-                                        <X className="h-3 w-3" />
-                                      </button>
-                                    </div>
+                                    {!isUploadingDoc && (
+                                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                                        <Eye className="h-3 w-3 text-muted-foreground/50" />
+                                        <button
+                                          onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
+                                          className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
+                                        >
+                                          <X className="h-3 w-3" />
+                                        </button>
+                                      </div>
+                                    )}
                                   </div>
                                 );
                               })}
@@ -6596,7 +6688,7 @@ const Chat = () => {
 
             {/* ── Uploaded files tab strip ── */}
             <AnimatePresence>
-              {pendingDocIds.length > 0 && (
+              {(pendingDocIds.length > 0 || isUploading) && (
                 <motion.div
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -6604,6 +6696,21 @@ const Chat = () => {
                   transition={{ duration: 0.18 }}
                   className="flex items-center gap-1.5 flex-wrap mb-2"
                 >
+                  {/* Loading cards for in-progress uploads */}
+                  {documents.filter(d => d.doc_type === "uploading").map(doc => (
+                    <div
+                      key={doc.document_id}
+                      className="flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-primary/30 text-left shadow-sm opacity-80"
+                      title={doc.filename}
+                    >
+                      <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
+                        <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
+                      </div>
+                      <span className="text-[11px] text-muted-foreground font-medium max-w-[80px] truncate">
+                        {doc.filename.length > 12 ? doc.filename.slice(0, 10) + '…' + (doc.filename.split('.').pop() ? '.' + doc.filename.split('.').pop() : '') : doc.filename}
+                      </span>
+                    </div>
+                  ))}
                   {pendingDocIds.slice(0, 8).map(docId => {
                     const doc = documents.find(d => d.document_id === docId);
                     if (!doc) return null;
