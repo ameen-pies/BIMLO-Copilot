@@ -3293,7 +3293,8 @@ const Chat = () => {
   const { toast } = useToast();
   const navigate = useNavigate();
 
-  // ── Call-ended event — injects a call card into the chat ──────────────────
+  // ── Nav confirmation state ────────────────────────────────────────────────
+  const [navConfirm, setNavConfirm] = useState<{ path: string; label: string; icon: string; msgId: string } | null>(null);
   useEffect(() => {
     const handler = (e: CustomEvent) => {
       const { duration, startedAt, convId } = e.detail as {
@@ -5009,10 +5010,62 @@ const Chat = () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
 
+    // ── Nav intent detection — intercept before any API call ─────────────
+    const _nav = (() => {
+      const q = trimmedInput.toLowerCase();
+      const pages = [
+        {
+          path: "/",
+          label: "Home",
+          icon: "🏠",
+          signals: ["home", "index", "main page", "accueil", "dashboard", "landing",
+                    "go home", "back home", "take me home", "start page"],
+        },
+        {
+          path: "/call",
+          label: "Voice Call",
+          icon: "📞",
+          signals: ["call", "voice", "phone", "appel", "vocal", "call page",
+                    "voice page", "start a call", "make a call", "go to call"],
+        },
+        {
+          path: "/news",
+          label: "News",
+          icon: "📰",
+          signals: ["news", "actualités", "actualite", "articles", "feed",
+                    "news page", "go to news", "show news", "latest news"],
+        },
+      ];
+      const navVerbs = ["go to", "take me to", "open", "navigate to", "show me",
+                        "redirect", "switch to", "head to", "bring me to", "launch",
+                        "emmène", "ouvre", "aller", "accède", "va"];
+      const hasVerb = navVerbs.some(v => q.includes(v));
+      for (const page of pages) {
+        const hit = page.signals.some(s => q.includes(s));
+        if (hit && (hasVerb || q.split(" ").length <= 5)) return page;
+      }
+      return null;
+    })();
+
+    if (_nav) {
+      const msgId = Date.now().toString();
+      const userMsg: Message = {
+        id: msgId,
+        role: "user",
+        content: trimmedInput,
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, userMsg]);
+      setInput("");
+      setNavConfirm({ path: _nav.path, label: _nav.label, icon: _nav.icon, msgId });
+      return;
+    }
+
     ensureAudio();
     setOpenSourceKey(null);
     setSuggestions([]);
     setShowSilenceWarning(false);
+    setNavConfirm(null);
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -7049,6 +7102,64 @@ const Chat = () => {
               </motion.div>
             )}
 
+            {/* ── Nav confirmation card ── */}
+            <AnimatePresence>
+              {navConfirm && (
+                <motion.div
+                  key="nav-confirm"
+                  initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 6, scale: 0.97 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  className="flex gap-3 items-start"
+                >
+                  <Logo className="h-8 w-8 shrink-0 mt-0.5" />
+                  <div className="max-w-[80%] space-y-2">
+                    <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
+                      <p className="text-sm text-foreground leading-relaxed">
+                        Sure! Take you to{" "}
+                        <span className="font-semibold text-primary">
+                          {navConfirm.icon} {navConfirm.label}
+                        </span>
+                        ?
+                      </p>
+                      <div className="flex items-center gap-2 mt-3">
+                        <button
+                          onClick={() => {
+                            const path = navConfirm.path;
+                            setNavConfirm(null);
+                            navigate(path);
+                          }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:opacity-90 transition-opacity"
+                        >
+                          <Check className="h-3 w-3" />
+                          Yes, let's go
+                        </button>
+                        <button
+                          onClick={() => {
+                            setMessages(prev => [
+                              ...prev,
+                              {
+                                id: Date.now().toString(),
+                                role: "assistant",
+                                content: "No worries, staying right here! Anything else I can help with?",
+                                timestamp: new Date(),
+                              },
+                            ]);
+                            setNavConfirm(null);
+                          }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted text-muted-foreground text-xs font-medium hover:bg-muted/80 hover:text-foreground transition-colors"
+                        >
+                          <X className="h-3 w-3" />
+                          Stay here
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -7060,6 +7171,46 @@ const Chat = () => {
           style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 80px))" } : {}}
         >
           <div className="max-w-3xl mx-auto">
+
+            {/* Notification permission pill — sits above suggestion chips */}
+            <AnimatePresence>
+              {showNotifyBanner && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  transition={{ duration: 0.18 }}
+                  className="flex justify-center mb-2"
+                >
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
+                    <Bell className="h-3 w-3 text-primary shrink-0" />
+                    <span>Notify when done?</span>
+                    <button
+                      onClick={() => {
+                        Notification.requestPermission().then(p => {
+                          if (p === "granted") setNotifyEnabled(true);
+                        });
+                        setShowNotifyBanner(false);
+                        setNotifyDismissed(true);
+                      }}
+                      className="font-medium text-primary hover:text-primary/80 transition-colors"
+                    >
+                      Allow
+                    </button>
+                    <span className="text-border">·</span>
+                    <button
+                      onClick={() => {
+                        setShowNotifyBanner(false);
+                        setNotifyDismissed(true);
+                      }}
+                      className="hover:text-foreground transition-colors"
+                    >
+                      No thanks
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* ── Contextual suggestion chips ── */}
             <AnimatePresence>
@@ -7458,58 +7609,6 @@ const Chat = () => {
             state={viewer}
             onClose={() => setViewer(null)}
           />
-        )}
-      </AnimatePresence>
-
-      {/* Notification permission pill — fixed above the input area, outside all layout divs */}
-      <AnimatePresence>
-        {showNotifyBanner && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.18 }}
-            style={{
-              position: "fixed",
-              bottom: notifyBottomOffset,
-              left: 0,
-              right: 0,
-              display: "flex",
-              justifyContent: "center",
-              zIndex: 50,
-              pointerEvents: "none",
-            }}
-          >
-            <div
-              style={{ pointerEvents: "auto" }}
-              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground"
-            >
-              <Bell className="h-3 w-3 text-primary shrink-0" />
-              <span>Notify when done?</span>
-              <button
-                onClick={() => {
-                  Notification.requestPermission().then(p => {
-                    if (p === "granted") setNotifyEnabled(true);
-                  });
-                  setShowNotifyBanner(false);
-                  setNotifyDismissed(true);
-                }}
-                className="font-medium text-primary hover:text-primary/80 transition-colors"
-              >
-                Allow
-              </button>
-              <span className="text-border">·</span>
-              <button
-                onClick={() => {
-                  setShowNotifyBanner(false);
-                  setNotifyDismissed(true);
-                }}
-                className="hover:text-foreground transition-colors"
-              >
-                No thanks
-              </button>
-            </div>
-          </motion.div>
         )}
       </AnimatePresence>
 

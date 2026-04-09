@@ -78,14 +78,6 @@ except ImportError:
 logger = logging.getLogger("cad_ifc_agent")
 router = APIRouter()
 
-# ── Context bridge — wires CAD turns into the shared session memory ──────────
-try:
-    from cad_context_bridge import sync_cad_turn_to_main as _sync_to_main
-    _BRIDGE_AVAILABLE = True
-except ImportError:
-    _BRIDGE_AVAILABLE = False
-    logger.warning("[cad_ifc_agent] cad_context_bridge not found — CAD turns won't sync to main session")
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SHARED CONTEXT  (mirrors report_agent.SharedContext)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1075,24 +1067,11 @@ async def cad_query(req: CadQueryRequest):
             )
 
             # ── Step 7: judge verdict ──────────────────────────────────────
-            score_pct = round(judge_score * 100)
-            verdict   = "✅" if judge_score >= 0.7 else "⚠️"
-            emit("llm_judge", verdict, f"Answer quality: {score_pct}%{' — ' + judge_comment if judge_comment else ''}")
+            verdict = "✅" if judge_score >= 0.7 else "⚠️"
+            emit("llm_judge", verdict, "Answer ready")
 
             CadSharedContext.append_turn(sid, "user",      req.query)
             CadSharedContext.append_turn(sid, "assistant", answer)
-
-            # ── Step 8: sync to main session memory ───────────────────────
-            # Push this turn + IFC/CAD summary into main.py _sessions and
-            # SharedContext so the RAG engine, report agent, and intent
-            # classifier all know what the CAD agent just said.
-            if _BRIDGE_AVAILABLE:
-                _sync_to_main(
-                    session_id       = sid,
-                    user_query       = req.query,
-                    assistant_answer = answer,
-                    file_summary     = {**summary, "file_id": req.file_id},
-                )
 
             q.put({
                 "type":          "result",

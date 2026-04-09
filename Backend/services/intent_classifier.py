@@ -255,6 +255,17 @@ def _heuristic_classify(
     """
     q = query.lower().strip()
 
+    # Code generation — always direct, before anything else
+    _code_verbs = ["write", "make", "give me", "create", "generate", "build",
+                   "code", "implement", "show me", "do", "écris", "fais", "crée"]
+    _code_nouns = ["code", "function", "script", "algorithm", "algo", "program",
+                   "snippet", "class", "method", "implementation", "solution",
+                   "fonction", "algorithme", "programme", "classe", "méthode",
+                   "كود", "دالة", "خوارزمية", "برنامج"]
+    if (any(q.startswith(v) or f" {v} " in q for v in _code_verbs) and
+            any(n in q for n in _code_nouns)):
+        return _make_heuristic(query, "direct", "converse", "generate", "code", 0.92)
+
     # Chart / graph
     graph_signals = [
         "chart", "graph", "plot", "visuali", "graphique", "diagramme",

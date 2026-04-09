@@ -911,6 +911,23 @@ Now generate for: "{q}" """
 
         print(f"📍 Route → ", end="")
 
+        # ── Pre-router: code generation guard ────────────────────────────────
+        # Catches "write/make/give me code/function/script/algorithm for X"
+        # before any LLM call — these have zero ambiguity and were being
+        # misrouted to `report` because the router had no code concept.
+        _q = query.lower().strip()
+        _CODE_VERBS   = ["write", "make", "give me", "create", "generate", "build",
+                         "code", "implement", "show me", "do", "écris", "fais", "crée"]
+        _CODE_NOUNS   = ["code", "function", "script", "algorithm", "algo", "program",
+                         "snippet", "class", "method", "implementation", "solution",
+                         "fonction", "algorithme", "programme", "classe", "méthode",
+                         "كود", "دالة", "خوارزمية", "برنامج"]
+        _has_verb = any(_q.startswith(v) or f" {v} " in _q for v in _CODE_VERBS)
+        _has_noun = any(n in _q for n in _CODE_NOUNS)
+        if _has_verb and _has_noun:
+            print("direct (code-gen guard)")
+            return {**state, "route": "direct"}
+
         if not self.llm.enabled:
             return self._fallback_router(state)
 
@@ -1022,6 +1039,18 @@ Reply with ONE word only — the route name."""
     def _fallback_router(self, state: AgentState) -> AgentState:
         """Simple keyword-based routing when LLM unavailable."""
         query = state["query"].lower()
+
+        # Code generation — route to direct
+        _CODE_VERBS = ["write", "make", "give me", "create", "generate", "build",
+                       "code", "implement", "show me", "do", "écris", "fais", "crée"]
+        _CODE_NOUNS = ["code", "function", "script", "algorithm", "algo", "program",
+                       "snippet", "class", "method", "implementation", "solution",
+                       "fonction", "algorithme", "programme", "classe", "méthode"]
+        _has_verb = any(query.startswith(v) or f" {v} " in query for v in _CODE_VERBS)
+        _has_noun = any(n in query for n in _CODE_NOUNS)
+        if _has_verb and _has_noun:
+            print("direct (code-gen fallback)")
+            return {**state, "route": "direct"}
         
         # Analytics route — only explicit aggregate/cross-doc requests
         if any(kw in query for kw in ["analytics", "statistiques", "rapport analytique"]):
