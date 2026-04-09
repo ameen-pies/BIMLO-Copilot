@@ -862,6 +862,7 @@ class CadUploadResponse(BaseModel):
     material_inventory: Optional[dict] = None
     parse_errors:   List[str]       = []
     cached_at:      str             = ""
+    converted_entities: Optional[int] = None
     ifc_available:  bool            = False   # True if silent CAD→IFC conversion succeeded
 
 
@@ -896,17 +897,35 @@ async def cad_upload(file: UploadFile = File(...)):
 
     # ── Silent CAD → IFC conversion (internal, not exposed to user) ──────────
     ifc_available = False
+    converted_entities: Optional[int] = None
     if pipeline == "cad" and _CAD_TO_IFC_AVAILABLE:
         try:
             ifc_bytes, conv_report = convert_cad_to_ifc(filename, file_bytes)
-            summary["_ifc_bytes"]           = ifc_bytes
             summary["_ifc_conversion_report"] = conv_report
-            ifc_available = True
-            logger.info(
-                f"[cad_upload] silent IFC conversion OK | "
-                f"entities={conv_report.get('cleaned_entities')} | "
-                f"ifc_size={conv_report.get('ifc_size_bytes')} bytes"
-            )
+            converted_entities = int(conv_report.get("cleaned_entities") or 0)
+            if converted_entities > 0:
+                summary["_ifc_bytes"] = ifc_bytes
+                ifc_available = True
+                logger.info(
+                    f"[cad_upload] silent IFC conversion OK | "
+                    f"entities={converted_entities} | "
+                    f"ifc_size={conv_report.get('ifc_size_bytes')} bytes"
+                )
+            else:
+                summary.pop("_ifc_bytes", None)
+                summary.setdefault("parse_errors", []).append(
+                    "No previewable geometry could be extracted for CAD to IFC conversion."
+                )
+                if Path(filename).suffix.lower() == ".dwg":
+                    summary["ux_hint"] = (
+                        "DWG uploaded, but no geometry could be extracted. "
+                        "Current DWG support is minimal; convert to DXF or IFC for preview."
+                    )
+                logger.warning(
+                    f"[cad_upload] silent IFC conversion produced no geometry | "
+                    f"entities={converted_entities} | "
+                    f"ifc_size={conv_report.get('ifc_size_bytes')} bytes"
+                )
         except Exception as conv_err:
             logger.warning(f"[cad_upload] silent IFC conversion failed: {conv_err}")
 
@@ -934,6 +953,7 @@ async def cad_upload(file: UploadFile = File(...)):
         parse_errors   = summary.get("parse_errors", []),
         cached_at      = summary.get("cached_at", ""),
         ifc_available  = ifc_available,
+        converted_entities = converted_entities,
     )
 
 

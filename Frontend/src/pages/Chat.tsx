@@ -1533,23 +1533,49 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ state, onClose }) => {
         {!state.loading && !state.error && (
           state.mediaType === 'cad' ? (
             <div className="p-4 space-y-4 overflow-y-auto h-full">
-              {/* ── Xeokit 3D Viewer (IFC only) ── */}
-              {state.blobUrl && state.cadSummary && (
+              {/* ── Xeokit 3D Viewer ── */}
+              {state.cadSummary && (
                 (() => {
                   const ps = state.cadSummary as any;
                   const pl = (ps.pipeline ?? '').toLowerCase();
                   const fn = (state.doc?.filename ?? ps.filename ?? 'model.ifc');
-                  // For CAD files with a converted IFC, render 3D using the IFC blob
-                  const viewerBlobUrl = state.ifcBlobUrl ?? state.blobUrl;
-                  const viewerFilename = state.ifcBlobUrl ? (fn.replace(/\.(dxf|dwg|step|stp)$/i, '.ifc') || 'model.ifc') : fn;
-                  const showViewer = pl === 'ifc' || fn.toLowerCase().endsWith('.dxf') || !!state.ifcBlobUrl;
-                  return showViewer ? (
-                    <XeokitViewer
-                      blobUrl={viewerBlobUrl}
-                      filename={viewerFilename}
-                      pipeline={pl}
-                    />
-                  ) : null;
+                  const ext = fn.split('.').pop()?.toLowerCase() ?? '';
+
+                  // Prefer converted IFC blob for 3D; fall back to native IFC blob
+                  const viewerBlobUrl = state.ifcBlobUrl ?? (pl === 'ifc' ? state.blobUrl : null);
+                  const viewerFilename = state.ifcBlobUrl
+                    ? fn.replace(/\.(dxf|dwg|step|stp|rvt|nwd|nwc|dgn|skp|fbx|obj|stl|sat|iges|igs|prt|sldprt|catpart|3ds|dae|rfa|rte)$/i, '.ifc') || 'model.ifc'
+                    : fn;
+
+                  if (viewerBlobUrl) {
+                    return (
+                      <XeokitViewer
+                        blobUrl={viewerBlobUrl}
+                        filename={viewerFilename}
+                        pipeline={pl}
+                      />
+                    );
+                  }
+
+                  // DXF without converted IFC — still show canvas 2D via original blob
+                  if (ext === 'dxf' && state.blobUrl) {
+                    return (
+                      <XeokitViewer
+                        blobUrl={state.blobUrl}
+                        filename={fn}
+                        pipeline={pl}
+                      />
+                    );
+                  }
+
+                  // No 3D available — show info panel
+                  return (
+                    <div className="w-full rounded-lg bg-muted/30 border border-border flex flex-col items-center justify-center gap-2 p-6 text-center" style={{ height: 200 }}>
+                      <svg className="h-8 w-8 text-muted-foreground/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" /></svg>
+                      <p className="text-xs text-muted-foreground/60">3D preview not available for this format</p>
+                      <p className="text-[10px] text-muted-foreground/40">AI analysis works via chat ↓</p>
+                    </div>
+                  );
                 })()
               )}
               {/* CAD/IFC Summary Panel */}
@@ -4116,7 +4142,7 @@ const Chat = () => {
         const blobUrl = URL.createObjectURL(file);
         const entry: { url: string; type: "cad"; cadSummary: Record<string, unknown>; ifcBlobUrl?: string } = { url: blobUrl, type: "cad", cadSummary: cadResp };
         // If silent CAD→IFC conversion succeeded, fetch the IFC bytes for 3D rendering
-        if (cadResp.ifc_available) {
+        if (cadResp.ifc_available && Number(cadResp.converted_entities ?? 0) > 0) {
           try {
             const ifcRes = await fetch(`${base}/api/cad/files/${cadResp.file_id}/ifc`);
             if (ifcRes.ok) {
@@ -5658,16 +5684,27 @@ const Chat = () => {
                               />
                             ) : bubbleViewer.mediaType === 'cad' ? (
                               <div className="h-full overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent">
-                                {bubbleViewer.cadSummary && (bubbleViewer.blobUrl || bubbleViewer.ifcBlobUrl) && (() => {
+                                {bubbleViewer.cadSummary && (() => {
                                   const ps = bubbleViewer.cadSummary as any;
                                   const pl = (ps.pipeline ?? '').toLowerCase();
                                   const fn = bubbleDoc.filename;
-                                  const viewerBlobUrl = bubbleViewer.ifcBlobUrl ?? bubbleViewer.blobUrl!;
-                                  const viewerFilename = bubbleViewer.ifcBlobUrl ? fn.replace(/\.(dxf|dwg|step|stp)$/i, '.ifc') || 'model.ifc' : fn;
-                                  const showViewer = pl === 'ifc' || !!bubbleViewer.ifcBlobUrl || fn.toLowerCase().endsWith('.dxf');
-                                  return showViewer ? (
-                                    <XeokitViewer blobUrl={viewerBlobUrl} filename={viewerFilename} pipeline={pl} />
-                                  ) : null;
+                                  const ext = fn.split('.').pop()?.toLowerCase() ?? '';
+                                  const viewerBlobUrl = bubbleViewer.ifcBlobUrl ?? (pl === 'ifc' ? bubbleViewer.blobUrl : null);
+                                  const viewerFilename = bubbleViewer.ifcBlobUrl
+                                    ? fn.replace(/\.(dxf|dwg|step|stp|rvt|nwd|nwc|dgn|skp|fbx|obj|stl|sat|iges|igs|prt|sldprt|catpart|3ds|dae|rfa|rte)$/i, '.ifc') || 'model.ifc'
+                                    : fn;
+                                  if (viewerBlobUrl) {
+                                    return <XeokitViewer blobUrl={viewerBlobUrl} filename={viewerFilename} pipeline={pl} />;
+                                  }
+                                  if (ext === 'dxf' && bubbleViewer.blobUrl) {
+                                    return <XeokitViewer blobUrl={bubbleViewer.blobUrl} filename={fn} pipeline={pl} />;
+                                  }
+                                  return (
+                                    <div className="w-full rounded-lg bg-muted/30 border border-border flex flex-col items-center justify-center gap-2 p-4 text-center" style={{ height: 160 }}>
+                                      <svg className="h-6 w-6 text-muted-foreground/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" /></svg>
+                                      <p className="text-[11px] text-muted-foreground/60">3D preview unavailable — AI analysis via chat ↓</p>
+                                    </div>
+                                  );
                                 })()}
                                 {bubbleViewer.cadSummary && (() => {
                                   const s = bubbleViewer.cadSummary as any;
@@ -6451,47 +6488,6 @@ const Chat = () => {
           </div>
         </div>
 
-        {/* Notification permission pill — floats above input bar */}
-        <AnimatePresence>
-          {showNotifyBanner && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.18 }}
-              style={{ bottom: notifyBottomOffset }}
-              className="fixed left-0 right-0 flex justify-center z-50 pointer-events-none"
-            >
-              <div className="pointer-events-auto inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
-                <Bell className="h-3 w-3 text-primary shrink-0" />
-                <span>Notify when done?</span>
-                <button
-                  onClick={() => {
-                    Notification.requestPermission().then(p => {
-                      if (p === "granted") setNotifyEnabled(true);
-                    });
-                    setShowNotifyBanner(false);
-                    setNotifyDismissed(true);
-                  }}
-                  className="font-medium text-primary hover:text-primary/80 transition-colors"
-                >
-                  Allow
-                </button>
-                <span className="text-border">·</span>
-                <button
-                  onClick={() => {
-                    setShowNotifyBanner(false);
-                    setNotifyDismissed(true);
-                  }}
-                  className="hover:text-foreground transition-colors"
-                >
-                  No thanks
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* Input */}
         <div
           ref={inputAreaRef}
@@ -6499,6 +6495,46 @@ const Chat = () => {
           style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 80px))" } : {}}
         >
           <div className="max-w-3xl mx-auto">
+
+            {/* Notification permission pill — sits above suggestion chips */}
+            <AnimatePresence>
+              {showNotifyBanner && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                  transition={{ duration: 0.18 }}
+                  className="flex justify-center mb-2"
+                >
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background shadow-sm text-xs text-muted-foreground">
+                    <Bell className="h-3 w-3 text-primary shrink-0" />
+                    <span>Notify when done?</span>
+                    <button
+                      onClick={() => {
+                        Notification.requestPermission().then(p => {
+                          if (p === "granted") setNotifyEnabled(true);
+                        });
+                        setShowNotifyBanner(false);
+                        setNotifyDismissed(true);
+                      }}
+                      className="font-medium text-primary hover:text-primary/80 transition-colors"
+                    >
+                      Allow
+                    </button>
+                    <span className="text-border">·</span>
+                    <button
+                      onClick={() => {
+                        setShowNotifyBanner(false);
+                        setNotifyDismissed(true);
+                      }}
+                      className="hover:text-foreground transition-colors"
+                    >
+                      No thanks
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* ── Contextual suggestion chips ── */}
             <AnimatePresence>
