@@ -199,7 +199,21 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
             onError={() => setImgError(true)}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", transition: "transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)", transformOrigin: "center center" }}
           />
-        : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"] }} />
+        : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"], display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <img
+              src="/favicon.svg"
+              alt=""
+              style={{
+                width:  isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
+                height: isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
+                objectFit: "contain",
+                opacity: 0.18,
+                filter: "brightness(0) invert(1)",
+                userSelect: "none",
+                pointerEvents: "none",
+              }}
+            />
+          </div>
       }
 
       {/* Overlay */}
