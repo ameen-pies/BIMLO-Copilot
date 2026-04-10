@@ -10,6 +10,8 @@ Model: BAAI/bge-reranker-v2-m3
   - Best-in-class multilingual reranker (handles French, Arabic, English)
   - ~560 MB download on first use (cached locally by HuggingFace)
   - Runs on CPU fine for batches of 20 chunks
+  - Outputs raw logits (unbounded floats) — we sigmoid-normalize to 0–1
+    so scores are human-readable AND compatible with _is_good_retrieval()
 
 Env vars:
   RERANKER_MODEL   — HuggingFace model ID   (default: BAAI/bge-reranker-v2-m3)
@@ -20,6 +22,7 @@ Env vars:
 from __future__ import annotations
 
 import os
+import math
 import time
 from typing import List, Dict, Optional
 
@@ -61,6 +64,14 @@ def _get_cross_encoder():
     return _cross_encoder
 
 
+def _sigmoid(x: float) -> float:
+    """Normalize a raw logit to 0–1 probability."""
+    try:
+        return 1.0 / (1.0 + math.exp(-x))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,7 +86,10 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
         top_k:  How many to return after re-ranking.
 
     Returns:
-        The top_k most relevant chunks, each with a `rerank_score` field added.
+        The top_k most relevant chunks, each with:
+          - rerank_score : sigmoid-normalized relevance score (0–1)
+          - distance     : overwritten with (1 - rerank_score) so that
+                           _is_good_retrieval() in rag_engine works correctly
         Falls back to the original order if the model is unavailable.
     """
     if not chunks:
@@ -93,14 +107,18 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
     pairs = [(query, c["text"][:512]) for c in chunks]
 
     try:
-        scores = model.predict(pairs, show_progress_bar=False)
+        raw_scores = model.predict(pairs, show_progress_bar=False)
     except Exception as e:
         print(f"⚠️  reranker.predict failed ({e}) — using original order")
         return chunks[:top_k]
 
-    # Attach scores and sort descending
-    for chunk, score in zip(chunks, scores):
-        chunk["rerank_score"] = float(score)
+    # Normalize logits → 0–1 via sigmoid, then write back onto each chunk.
+    # Also update `distance` (= 1 - score) so _is_good_retrieval() in
+    # rag_engine.py can correctly judge quality from reranked results.
+    for chunk, raw in zip(chunks, raw_scores):
+        score = _sigmoid(float(raw))
+        chunk["rerank_score"] = score
+        chunk["distance"]     = 1.0 - score   # ← keeps _is_good_retrieval() honest
 
     ranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
     result = ranked[:top_k]
