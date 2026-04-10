@@ -1229,7 +1229,11 @@ Reply with ONE word only — the route name."""
     # ------------------------------------------------------------------ #
 
     def retrieve(self, state: AgentState) -> AgentState:
-        """Retrieve relevant chunks from vector store."""
+        """
+        Retrieve relevant chunks from vector store, then:
+          1. Merge with graph RAG results (if query is relationship-focused)
+          2. Re-rank the combined pool with a cross-encoder for precision
+        """
         query = state["query"]
         top_k = state["top_k"]
         iteration = state["retrieval_iterations"] + 1
@@ -1246,25 +1250,71 @@ Reply with ONE word only — the route name."""
                 print(f"[filtered to {fname}] ", end="")
                 break
 
+        # ── Step 1: Vector retrieval — fetch MORE candidates for re-ranking ──
         try:
-            results = self.vs.search(query, top_k=top_k, filter_dict=filter_dict)
+            from reranker import get_fetch_k
+            fetch_k = get_fetch_k(top_k)
+        except ImportError:
+            fetch_k = top_k
+
+        try:
+            results = self.vs.search(query, top_k=fetch_k, filter_dict=filter_dict)
         except Exception:
-            # Some vector stores don't support filter — fall back to unfiltered
-            results = self.vs.search(query, top_k=top_k)
-        
-        # Merge with existing chunks (for iterative RAG)
-        existing = state["retrieved_chunks"]
-        all_chunks = existing + results
-        
-        # Deduplicate by text
-        seen = set()
-        unique = []
-        for c in all_chunks:
+            results = self.vs.search(query, top_k=fetch_k)
+
+        # ── Step 2: Graph RAG — inject relationship-aware context ─────────────
+        graph_chunks = []
+        try:
+            from graph_rag import get_engine as _get_graph_engine, is_graph_query
+            if is_graph_query(query):
+                self._emit("retrieve", "🕸️", "Traversing knowledge graph…")
+                graph_engine = _get_graph_engine()
+                if graph_engine.available:
+                    graph_chunks = graph_engine.query(query)
+                    if graph_chunks:
+                        print(f"[+{len(graph_chunks)} graph chunks] ", end="")
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[graph_rag error: {e}] ", end="")
+
+        # ── Step 3: Merge vector + graph results ─────────────────────────────
+        combined = graph_chunks + results  # graph chunks get priority in sort
+
+        # Deduplicate by text fingerprint
+        seen: set = set()
+        unique: List[Dict] = []
+        for c in combined:
             txt = c["text"][:200]
             if txt not in seen:
                 seen.add(txt)
                 unique.append(c)
-        
+
+        # ── Step 4: Cross-encoder re-ranking ─────────────────────────────────
+        try:
+            from reranker import rerank
+            # Graph chunks have rerank_score=2.0 pre-set — reranker will
+            # sort them correctly alongside vector chunks
+            unique = rerank(query, unique, top_k=top_k)
+        except ImportError:
+            unique = unique[:top_k]
+        except Exception as e:
+            print(f"[reranker error: {e}] ", end="")
+            unique = unique[:top_k]
+
+        # Merge with existing chunks from prior iterations (iterative RAG)
+        existing = state["retrieved_chunks"]
+        if existing:
+            all_chunks = existing + unique
+            seen2: set = set()
+            final: List[Dict] = []
+            for c in all_chunks:
+                txt = c["text"][:200]
+                if txt not in seen2:
+                    seen2.add(txt)
+                    final.append(c)
+            unique = final[:top_k * 2]  # cap total
+
         print(f"{len(unique)} total chunks")
 
         # Emit which files were found

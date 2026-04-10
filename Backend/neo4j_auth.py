@@ -13,8 +13,9 @@ Graph schema:
   (:Conversation)-[:USED_DOCUMENT]->(:Document)
 
 Mount in main.py:
-    from neo4j_auth import router as auth_router
+    from neo4j_auth import router as auth_router, init_neo4j
     app.include_router(auth_router)
+    # and in startup call init_neo4j() ONCE
 """
 
 from __future__ import annotations
@@ -28,7 +29,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends, Header
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
+from dotenv import load_dotenv
+load_dotenv()  # must run before os.getenv() calls below
 
 try:
     from neo4j import GraphDatabase, exceptions as neo4j_exc
@@ -39,16 +42,31 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
+# CONFIG  — set these in your .env file
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  LOCAL Neo4j Desktop / Community Edition:
+#    NEO4J_URI      = bolt://127.0.0.1:7687     ← use bolt://, NOT neo4j://
+#    NEO4J_DATABASE = neo4j                      ← Community only has ONE db
+#
+#  Neo4j AuraDB (cloud free tier):
+#    NEO4J_URI      = neo4j+s://<your-id>.databases.neo4j.io
+#    NEO4J_DATABASE = neo4j                      ← AuraDB free also uses "neo4j"
+#
 # ─────────────────────────────────────────────────────────────────────────────
 
-NEO4J_URI      = os.getenv("NEO4J_URI",      "neo4j://127.0.0.1:7687")
+NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://127.0.0.1:7687")
 NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "users")
+# ⚠️  IMPORTANT: Community Edition ONLY supports the default "neo4j" database.
+# Named databases (like "users") require Enterprise or AuraDB Pro.
+# On Community, keep this as "neo4j" and use labels to separate data.
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+
+print(f"🔍 NEO4J DEBUG — URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
 
 # Simple in-memory token store: token -> {user_id, expires_at, username, email}
-# For production swap with Redis or a proper JWT flow.
+# Survives restarts poorly — for production swap with Redis or proper JWT.
 _active_tokens: Dict[str, Dict] = {}
 TOKEN_TTL_HOURS = 72
 
@@ -63,17 +81,35 @@ def get_driver():
     global _driver
     if _driver is None:
         if not _NEO4J_AVAILABLE:
-            raise RuntimeError("neo4j package not installed")
-        _driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            raise RuntimeError("neo4j package not installed — run: pip install neo4j")
+        _driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            # Connection pool settings — keeps things snappy
+            max_connection_lifetime=3600,
+            max_connection_pool_size=50,
+        )
     return _driver
 
 
 def _run(cypher: str, params: dict = None, database: str = NEO4J_DATABASE):
-    """Execute a Cypher query and return a list of record dicts."""
-    driver = get_driver()
-    with driver.session(database=database) as session:
-        result = session.run(cypher, params or {})
-        return [dict(r) for r in result]
+    """Execute a Cypher query and return a list of record dicts.
+    Raises HTTPException(503) if Neo4j is unreachable so the API responds
+    with a clear error instead of hanging forever.
+    """
+    try:
+        driver = get_driver()
+        with driver.session(database=database) as session:
+            result = session.run(cypher, params or {})
+            return [dict(r) for r in result]
+    except RuntimeError as e:
+        raise HTTPException(503, f"Database driver error: {e}")
+    except Exception as e:
+        # Surface the real Neo4j error so you can debug it
+        err_msg = str(e)
+        print(f"❌ Neo4j query error: {err_msg}")
+        print(f"   Query: {cypher[:120]}")
+        raise HTTPException(503, f"Database error: {err_msg}")
 
 
 def _setup_constraints():
@@ -88,8 +124,8 @@ def _setup_constraints():
     for c in constraints:
         try:
             _run(c)
-        except Exception:
-            pass  # constraint may already exist
+        except HTTPException:
+            pass  # constraint may already exist — safe to ignore
     print("✅ Neo4j: constraints ready")
 
 
@@ -206,6 +242,8 @@ def signup(req: SignupRequest):
         raise HTTPException(400, "Password must be at least 6 characters")
     if len(username) < 2:
         raise HTTPException(400, "Username must be at least 2 characters")
+    if "@" not in email:
+        raise HTTPException(400, "Invalid email address")
 
     # Check email uniqueness
     existing = _run(
@@ -292,7 +330,6 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
     """Upsert a full conversation (create or update by conversation_id)."""
     now = datetime.utcnow().isoformat()
 
-    # Upsert Conversation node
     _run(
         """
         MERGE (c:Conversation {id: $conv_id})
@@ -315,7 +352,7 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
         },
     )
 
-    # Delete old messages and rewrite (simpler than diffing)
+    # Delete old messages and rewrite
     _run(
         """
         MATCH (:Conversation {id: $conv_id})-[:CONTAINS]->(m:Message)
@@ -324,7 +361,6 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
         {"conv_id": req.conversation_id},
     )
 
-    # Insert messages
     for idx, msg in enumerate(req.messages):
         _run(
             """
@@ -369,7 +405,6 @@ def list_conversations(user: Dict = Depends(require_user)):
 @router.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, user: Dict = Depends(require_user)):
     """Return a single conversation with all its messages."""
-    # Verify ownership
     conv = _run(
         """
         MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation {id: $conv_id})
@@ -452,18 +487,27 @@ def list_documents(user: Dict = Depends(require_user)):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STARTUP HOOK — call from main.py
+# STARTUP HOOK — call from main.py ONCE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def init_neo4j():
-    """Call this once at app startup."""
+    """Call this once at app startup to verify connection and create constraints."""
     if not _NEO4J_AVAILABLE:
-        print("⚠️  neo4j driver missing — auth endpoints will 500")
+        print("⚠️  neo4j driver missing — run: pip install neo4j")
+        print("    Auth endpoints will return 503 until the package is installed.")
         return
     try:
         get_driver().verify_connectivity()
         _setup_constraints()
         print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
     except Exception as e:
-        print(f"⚠️  Neo4j connection failed: {e}")
-        print("    Auth routes registered but will return 500 until Neo4j is reachable.")
+        print(f"❌ Neo4j connection FAILED: {e}")
+        print("─" * 60)
+        print("  Checklist:")
+        print("  1. Is Neo4j running? (neo4j start  or  check Desktop)")
+        print(f"  2. Is the URI correct? Current: {NEO4J_URI}")
+        print(f"     • Local:  bolt://127.0.0.1:7687")
+        print(f"     • AuraDB: neo4j+s://<id>.databases.neo4j.io")
+        print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
+        print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
+        print("─" * 60)

@@ -136,8 +136,9 @@ def _clean_completion(raw: str, partial: str) -> str:
     """
     Sanitize the model output so the frontend always gets a clean suffix.
 
-    The model occasionally repeats part of the partial or wraps in quotes.
-    We strip those so the frontend can blindly append the result.
+    The completion returned here is ONLY the suffix — the frontend appends
+    it directly to whatever the user typed. We ensure exactly one space
+    separates the partial from the completion when needed.
     """
     if not raw:
         return ""
@@ -146,9 +147,9 @@ def _clean_completion(raw: str, partial: str) -> str:
     completion = raw.strip().strip('"').strip("'").strip()
 
     # If the model returned the full sentence (partial + completion), strip the partial
-    partial_lower = partial.lower().rstrip()
+    partial_stripped = partial.lower().rstrip()
     comp_lower = completion.lower()
-    if comp_lower.startswith(partial_lower):
+    if comp_lower.startswith(partial_stripped):
         completion = completion[len(partial):].lstrip()
 
     # Remove any trailing junk: "..." or just whitespace
@@ -156,16 +157,28 @@ def _clean_completion(raw: str, partial: str) -> str:
 
     # Hard length gate — never show a completion longer than 80 chars
     if len(completion) > 80:
-        # Truncate at last word boundary
         completion = completion[:80].rsplit(" ", 1)[0]
 
     # If empty or only punctuation after cleaning, return nothing
     if not completion or re.fullmatch(r'[\s\W]+', completion):
         return ""
 
-    # Ensure the completion starts with a space if the partial doesn't end with one
-    if partial and not partial.endswith(" ") and not completion.startswith(" "):
+    # ── Space handling ────────────────────────────────────────────────────────
+    # The frontend does: ghostText = partial + completion
+    # So if partial ends with a space, we DON'T prepend one.
+    # If partial does NOT end with a space, we DO prepend one.
+    # This guarantees the result always reads as "partial completion" with
+    # exactly one space between — never "partialcompletion" or "partial  completion".
+    partial_ends_with_space = partial.endswith(" ")
+    completion_starts_with_space = completion.startswith(" ")
+
+    if partial_ends_with_space and completion_starts_with_space:
+        # e.g. partial="what " completion=" are" → strip leading space from completion
+        completion = completion.lstrip()
+    elif not partial_ends_with_space and not completion_starts_with_space:
+        # e.g. partial="what" completion="are" → add space
         completion = " " + completion
+    # else: exactly one space already present — leave as-is
 
     return completion
 

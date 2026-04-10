@@ -116,9 +116,16 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
       ? { email: email.trim(), password }
       : { email: email.trim(), username: username.trim(), password };
     const { data, error: err } = await apiPost(path, body);
-    setLoading(false);
-    if (err) { setError(err); return; }
-    if (data) onSuccess(data);
+    if (err) {
+      setLoading(false);
+      setError(err);
+      return;
+    }
+    if (data) {
+      // Dismiss first so the modal is gone before the pending action fires
+      onClose();
+      setTimeout(() => onSuccess(data), 50);
+    }
   };
 
   const handleKey = (e: React.KeyboardEvent) => {

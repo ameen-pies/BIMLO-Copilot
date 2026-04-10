@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -78,10 +78,6 @@ app = FastAPI(
 
 app.include_router(auth_router)
 
-@app.on_event("startup")
-async def startup_event():
-    init_neo4j()
-    
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -198,8 +194,14 @@ async def root():
 
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """Upload and index a document (PDF, DOCX, TXT)."""
+async def upload_document(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Upload and index a document (PDF, DOCX, TXT).
+    If the user is logged in (Bearer token), the document is also recorded
+    in Neo4j under their account so it persists across sessions.
+    """
     try:
         allowed = ['.pdf', '.docx', '.doc', '.txt']
         ext = os.path.splitext(file.filename)[1].lower()
@@ -218,6 +220,50 @@ async def upload_document(file: UploadFile = File(...)):
 
         doc_id = vector_store.add_document(file.filename, chunks)
         print(f"✅ Indexed: {doc_id}")
+
+        # ── GraphRAG ingestion (background, non-blocking) ─────────────────
+        try:
+            from graph_rag import get_engine as _get_graph_engine
+            import threading as _threading
+            _graph_engine = _get_graph_engine()
+            if _graph_engine.available:
+                def _ingest():
+                    _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
+                _threading.Thread(target=_ingest, daemon=True).start()
+                print(f"🕸️  graph_rag: ingestion started in background for '{file.filename}'")
+        except Exception as _ge:
+            print(f"⚠️  graph_rag ingestion skipped: {_ge}")
+
+        # ── Persist to Neo4j if the user is logged in ─────────────────────
+        from neo4j_auth import optional_user, _run as neo4j_run
+        user = optional_user(authorization)
+        if user:
+            try:
+                from datetime import datetime as _dt
+                neo4j_run(
+                    """
+                    MERGE (d:Document {id: $doc_id})
+                    SET d.filename    = $filename,
+                        d.doc_type    = $doc_type,
+                        d.chunk_count = $chunk_count,
+                        d.uploaded_at = $now
+                    WITH d
+                    MATCH (u:User {id: $user_id})
+                    MERGE (u)-[:UPLOADED]->(d)
+                    """,
+                    {
+                        "doc_id":      doc_id,
+                        "filename":    file.filename,
+                        "doc_type":    ext.lstrip("."),
+                        "chunk_count": len(chunks),
+                        "now":         _dt.utcnow().isoformat(),
+                        "user_id":     user["user_id"],
+                    },
+                )
+                print(f"☁️  Neo4j: doc '{file.filename}' saved for user {user['username']}")
+            except Exception as neo_err:
+                # Non-fatal — file is still indexed in Chroma
+                print(f"⚠️  Neo4j doc save failed (non-fatal): {neo_err}")
 
         return {
             "status":           "success",
@@ -907,6 +953,7 @@ async def health_check():
 
 @app.on_event("startup")
 async def startup_event():
+    init_neo4j()
     print("\n" + "="*60)
     print("🚀 BIMLO Copilot Télécom API v3 — LangGraph Agentic RAG")
     print("="*60)

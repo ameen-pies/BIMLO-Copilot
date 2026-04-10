@@ -105,13 +105,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const handleAuthSuccess = useCallback((user: AuthUser) => {
     setCurrentUser(user);
-    setModalOpen(false);
-    // Fire the pending action (e.g. actually send the message)
+    setModalOpen(false); // belt-and-suspenders in case onClose wasn't called
     if (pendingActionRef.current) {
       const action = pendingActionRef.current;
       pendingActionRef.current = null;
-      // Small delay so the modal animates out first
-      setTimeout(action, 120);
+      setTimeout(action, 150); // wait for modal exit animation
     }
   }, [setCurrentUser]);
 
