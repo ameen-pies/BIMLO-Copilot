@@ -484,6 +484,40 @@ def _build_context(chunks: List[Dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_chart_example_hint(chunks: list) -> str:
+    """
+    Scan retrieved chunk text for numeric patterns and return a realistic
+    chart suggestion phrased in terms of the actual document content.
+    Falls back to domain-appropriate telecom/BIM examples if nothing specific is found.
+    """
+    FIELD_CANDIDATES = [
+        # telecom / BIM / infra — highest-value signals first
+        ("fiber strand",      "chart fiber strand counts per site as a bar chart"),
+        ("insertion loss",    "chart insertion loss per span as a line chart"),
+        ("trenching length",  "chart trenching length by section as a bar chart"),
+        ("downlink",          "chart downlink throughput by site as a bar chart"),
+        ("uplink",            "chart uplink throughput by site as a bar chart"),
+        ("latency",           "chart end-to-end latency per node as a line chart"),
+        ("bbu",               "chart BBU quantities per site as a bar chart"),
+        ("rrh",               "chart RRH unit counts per site as a bar chart"),
+        ("antenna",           "chart antenna unit count by site as a bar chart"),
+        ("power",             "chart DC power load per site as a bar chart"),
+        ("battery",           "chart battery backup autonomy by site as a bar chart"),
+        ("signal",            "chart signal levels by sector as a line chart"),
+        ("frequency",         "chart frequency allocation by band as a pie chart"),
+        ("storey",            "chart element counts per storey as a bar chart"),
+        ("floor",             "chart equipment count per floor as a bar chart"),
+        ("material",          "chart material quantities as a pie chart"),
+        ("temperature",       "chart temperature readings as a line chart"),
+        ("load",              "chart load distribution as a bar chart"),
+    ]
+    combined = " ".join(c.get("text", "") for c in (chunks or [])[:6]).lower()
+    for keyword, example in FIELD_CANDIDATES:
+        if keyword in combined:
+            return example
+    return "chart fiber strand counts per site as a bar chart"
+
+
 def _confidence(chunks: List[Dict]) -> float:
     if not chunks:
         return 0.0
@@ -2108,27 +2142,73 @@ Remember: ALL text fields must be in {target_lang}."""
 
         # ── Clarification needed: query was too vague ─────────────────────
         if result.get("type") == "chart_clarification":
-            print(f"   🤔 graph_node: returning clarification options")
+            print(f"   🤔 graph_node: validating clarification options before suggesting")
+
+            # Pre-validate every group: only show groups that actually produce a chart.
+            # This prevents the user clicking an option and getting a chart_error back.
+            raw_groups = result.get("groups", [])
+            valid_groups = []
+            for grp in raw_groups:
+                hint = grp.get("hint") or grp.get("label", "")
+                if not hint:
+                    continue
+                try:
+                    probe = self.graph_agent.build_chart(
+                        query=hint,
+                        chunks=chunks,
+                        language=plan.target_language,
+                        skip_clarification=True,
+                    )
+                    if probe.get("type") == "chart_config":
+                        valid_groups.append(grp)
+                        print(f"      ✅ group valid: {grp.get('label','?')}")
+                    else:
+                        print(f"      ❌ group invalid (no data): {grp.get('label','?')}")
+                except Exception as _ve:
+                    print(f"      ⚠️  group probe failed for '{hint}': {_ve}")
+
+            if not valid_groups:
+                # Nothing is actually chartable — return a plain error instead
+                print(f"   ⚠️  graph_node: no valid chart groups found after validation")
+                fallback_answer = (
+                    f"I couldn't find numeric or structured data in your documents "
+                    f"that's ready to chart right now. Make sure your documents contain "
+                    f"tables or columns of measurements, then try a specific request — "
+                    f"for example: 'chart the fiber strand counts by site as a bar chart'."
+                )
+                return {
+                    **state,
+                    "answer":     fallback_answer,
+                    "raw_answer": fallback_answer,
+                    "sources":    [],
+                    "confidence": 0.0,
+                    "analytics":  {"type": "chart_error", "message": fallback_answer},
+                }
+
             clarif_answer = result.get(
                 "question",
                 "Your request covers several different types of data. Which would you like to chart?"
             )
+            result_validated = {**result, "groups": valid_groups}
+            print(f"   🤔 graph_node: {len(valid_groups)}/{len(raw_groups)} groups validated")
             return {
                 **state,
                 "answer":     clarif_answer,
                 "raw_answer": clarif_answer,
                 "sources":    [],
                 "confidence": 0.0,
-                "analytics":  result,
+                "analytics":  result_validated,
             }
 
         # ── Chart generation failed ───────────────────────────────────────
         if result.get("type") == "chart_error":
             print(f"   ⚠️  graph_node: {result['message']}")
+            # Build a realistic example from the actual retrieved chunks
+            _example_hint = _build_chart_example_hint(chunks)
             fallback_answer = (
                 f"I wasn't able to generate a chart: {result['message']} "
-                f"If your documents contain tables or numerical data, try being "
-                f"more specific — for example: 'plot monthly revenue as a bar chart'."
+                f"Make sure your documents contain tables or columns of numeric data, "
+                f"then try something specific — for example: '{_example_hint}'."
             )
             return {
                 **state,

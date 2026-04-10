@@ -282,18 +282,47 @@ class GraphAgent:
         if not skip_clarification and self._is_vague_request(query):
             groups = self._discover_metric_groups(query, chunks, language)
             if groups and len(groups) > 1:
-                print(f"   🤔 GraphAgent: vague query — returning {len(groups)} option groups")
-                group_names = ", ".join(g["label"] for g in groups[:3])
-                clarif_question = (
-                    f"I found several distinct data sets in your documents that I could chart: "
-                    f"{group_names}{'...' if len(groups) > 3 else ''}. "
-                    f"Which one would you like to visualize?"
-                )
-                return {
-                    "type":     "chart_clarification",
-                    "question": clarif_question,
-                    "groups":   groups,   # [{"label": "...", "description": "...", "hint": "..."}]
-                }
+                # ── Validate each group: only show options that actually produce a chart ──
+                # This prevents the user clicking an option and getting "no data found".
+                validated_groups = []
+                for grp in groups:
+                    hint = grp.get("hint", "")
+                    if not hint:
+                        continue
+                    try:
+                        probe = self._extract_data(
+                            query=hint,
+                            chunks=chunks,
+                            chart_type=_hint_chart_type(hint),
+                            axes_hint=self._extract_axes_hint(hint),
+                            language=language,
+                        )
+                        if probe is not None:
+                            validated_groups.append(grp)
+                            print(f"      ✅ group validated: {grp['label']!r}")
+                        else:
+                            print(f"      ❌ group dropped (no extractable data): {grp['label']!r}")
+                    except Exception as _ve:
+                        print(f"      ⚠️  group probe error for {grp['label']!r}: {_ve}")
+
+                if len(validated_groups) > 1:
+                    print(f"   🤔 GraphAgent: vague query — {len(validated_groups)}/{len(groups)} groups validated")
+                    group_names = ", ".join(g["label"] for g in validated_groups[:3])
+                    clarif_question = (
+                        f"I found several distinct data sets in your documents that I could chart: "
+                        f"{group_names}{'...' if len(validated_groups) > 3 else ''}. "
+                        f"Which one would you like to visualize?"
+                    )
+                    return {
+                        "type":     "chart_clarification",
+                        "question": clarif_question,
+                        "groups":   validated_groups,
+                    }
+                elif len(validated_groups) == 1:
+                    # Only one valid group — build it silently without asking
+                    print(f"   📊 GraphAgent: only 1 valid group after validation — building directly")
+                    query = validated_groups[0]["hint"]
+                # else: nothing validated — fall through to normal extraction with original query
 
         # Determine chart type from query + any explicit user axes hints
         chart_type = _hint_chart_type(query)
@@ -395,6 +424,16 @@ class GraphAgent:
 
 Read the document content below and extract all relevant numerical or categorical data.
 
+IMPORTANT — the document may contain data in ANY of these formats:
+- Markdown/text tables: columns separated by | or spaces, with header rows
+- PDF-extracted text: columns may appear as whitespace-separated values on each line
+- Key-value pairs: "Metric: value" or "Metric = value" format
+- Paragraph mentions: numbers mentioned inline like "Site A had 45.2 Mbps throughput"
+- Comma/semicolon-separated lists of values
+- Indented or aligned columns (align by character position)
+
+Extract ALL numeric data relevant to the request, regardless of format.
+
 REQUIRED JSON format — return EXACTLY this structure:
 {{
   "title": "concise chart title in {language}",
@@ -412,13 +451,12 @@ REQUIRED JSON format — return EXACTLY this structure:
 {scatter_note}
 
 RULES:
-- All values in "data" must be numbers (int or float), NOT strings.
+- All values in "data" must be numbers (int or float), NOT strings. Strip units (Mbps, dB, %, ms) and convert.
 - "labels" length must equal "data" length in each dataset.
-- If you find multiple related series (e.g. budgeted vs actual, or multiple products),
-  include them as separate objects in "datasets".
-- If you only find one series, "datasets" should have exactly one object.
-- Extract ALL available data points — do not truncate to fewer than what exists.
-- If the document has a table, extract every row.
+- If the document has multiple related columns (e.g. Downlink, Uplink, Latency), include each as a SEPARATE dataset.
+- If you find a table, extract EVERY row — do not truncate.
+- For PDF text that looks like aligned columns (spaces between values), parse each line as a row.
+- If the document mentions values inline in sentences, still extract them.
 - If you cannot find any numerical data relevant to the request, return:
   {{"error": "no_data", "reason": "brief explanation"}}
 - Return ONLY the JSON object. Nothing else.
@@ -648,12 +686,24 @@ DOCUMENTS:
         if len(words) <= 6:
             # If it mentions a specific metric word it's not vague (multilingual)
             specific_hints = [
-                # English
+                # English — generic
                 "revenue", "cost", "budget", "salary", "temperature", "speed",
                 "latency", "throughput", "loss", "power", "load", "rate",
                 "count", "total", "average", "percent", "ratio", "score",
                 "traffic", "bandwidth", "frequency", "voltage", "current",
                 "pressure", "distance", "weight", "height", "duration",
+                # Telecom / network (added)
+                "downlink", "uplink", "rsrp", "rsrq", "sinr", "rssi",
+                "insertion", "fiber", "fibre", "strand", "strands", "trench",
+                "trenching", "span", "attenuation", "signal", "sector",
+                "bbu", "rrh", "antenna", "antennae", "mast", "tower",
+                "node", "site", "sites", "base station", "coverage",
+                "packet", "jitter", "availability", "alarm", "alarms",
+                "otdr", "odf", "splitter", "amplifier", "transceiver",
+                # Power / electrical (added)
+                "dc", "ac", "watt", "kilowatt", "ampere", "volt", "battery",
+                "autonomy", "capacity", "utilisation", "utilization",
+                "shelter", "hvac", "cooling",
                 # BIM / construction / project management
                 "clash", "clashes", "conflict", "conflicts", "milestone", "milestones",
                 "completion", "schedule", "timeline", "deadline", "progress", "status",
@@ -661,11 +711,14 @@ DOCUMENTS:
                 "framing", "simulation", "review", "inspection", "phase", "phases",
                 "submittal", "rfi", "punch", "defect", "issue", "issues",
                 "quantity", "quantities", "takeoff", "area", "volume",
+                "storey", "storeys", "floor", "floors", "material", "materials",
+                "element", "elements", "wall", "slab", "column", "beam",
                 # French
                 "revenu", "coût", "budget", "salaire", "température", "vitesse",
                 "latence", "débit", "perte", "puissance", "charge", "taux",
                 "total", "moyenne", "pourcentage", "fréquence", "tension",
                 "pression", "distance", "poids", "durée", "trafic",
+                "fibre", "brin", "portée", "tranchée", "batterie",
                 # Arabic
                 "إيراد", "تكلفة", "ميزانية", "راتب", "سرعة", "كمون",
                 "إنتاجية", "طاقة", "حمل", "معدل", "مجموع", "متوسط",
@@ -715,24 +768,33 @@ DOCUMENTS:
 
         prompt = f"""The user asked: "{query}"
 
-Scan the document content below and identify 2-5 DISTINCT groups of metrics that could each make a meaningful, coherent chart.
-Each group should contain metrics of the same type/unit or the same domain — do NOT mix unrelated numbers.
+Scan the document content below and identify 2-5 DISTINCT groups of numeric data that could each make a meaningful chart.
+Each group must share the same unit or domain (e.g. all throughput values, all power readings, all equipment counts).
 
-Return ONLY a JSON array like this:
+Return ONLY a JSON array — no markdown, no backticks, no explanation:
 [
   {{
-    "label": "Short group name (2-4 words)",
-    "description": "Comma-separated list of the actual metrics in this group",
-    "hint": "Specific follow-up query the user could send, e.g. 'chart monthly revenue as a bar chart'"
+    "label": "Short group name (2-4 words, in {language})",
+    "description": "Comma-separated list of the EXACT metric names as they appear in the document",
+    "hint": "A very specific chart request using the exact metric and column names from the document, e.g. 'chart downlink throughput in Mbps per site as a bar chart' or 'plot insertion loss per span as a line chart'",
+    "source_file": "the filename this data comes from, exactly as shown in the document header"
   }}
 ]
+
+CRITICAL rules for "hint":
+- Use the EXACT metric name as it appears in the document (copy the column header or field name verbatim)
+- Include the unit if present (Mbps, dB, W, m, etc.)
+- Include the grouping dimension (per site, per span, by section, etc.)
+- Include a chart type (bar chart, line chart, pie chart)
+- The hint must be specific enough that a chart can be built from it WITHOUT any further clarification
+- BAD example: "chart network performance metrics" (too vague — will fail)
+- GOOD example: "chart downlink throughput in Mbps per site as a bar chart from site_survey.pdf" (exact, buildable, names the file)
 
 Rules:
 - 2 to 5 groups maximum
 - Each group must be internally coherent (same unit, same domain, or same time series)
-- "label" must be short and clear — the user will click it as a button
-- "hint" must be a complete, specific chart request the user could type
-- Language for labels/descriptions: {language}
+- "label" must be short and clear — the user will click it as a button — include the filename if it helps identify which doc
+- "source_file" must be the EXACT filename from the document header (e.g. "network_report.pdf")
 - Return ONLY the JSON array. Nothing else.
 
 DOCUMENTS:
@@ -756,9 +818,14 @@ DOCUMENTS:
         valid = []
         for item in parsed:
             if isinstance(item, dict) and item.get("label") and item.get("hint"):
+                source_file = str(item.get("source_file", "")).strip()
+                description = str(item.get("description", ""))[:120]
+                # Append filename to description if available so the frontend shows it
+                if source_file and source_file not in description:
+                    description = f"{description} — {source_file}".strip(" —")
                 valid.append({
                     "label":       str(item["label"])[:60],
-                    "description": str(item.get("description", ""))[:120],
+                    "description": description,
                     "hint":        str(item["hint"])[:200],
                 })
         return valid[:5]
@@ -947,11 +1014,12 @@ GRAPH_NODE_METHOD = '''
 
         # ── Chart error — fall back to a regular narrative answer ─────────────
         if result.get("type") == "chart_error":
-            print(f"   ⚠️  graph_node: {result[\'message\']}")
+            print(f"   ⚠️  graph_node: {result['message']}")
+            _example_hint = _build_chart_example_hint(chunks)
             fallback_answer = (
-                f"I wasn\'t able to generate a chart: {result[\'message\']} "
-                f"If your documents contain tables or numerical data, try being "
-                f"more specific — for example: \'plot monthly revenue as a bar chart\'."
+                f"I wasn't able to generate a chart: {result['message']} "
+                f"Make sure your documents contain tables or columns of numeric data, "
+                f"then try something specific — for example: '{_example_hint}'."
             )
             return {
                 **state,

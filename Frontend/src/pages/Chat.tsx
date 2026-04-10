@@ -2855,7 +2855,17 @@ function applyThemeToChart(chart: any, rawCfg: Record<string, any>, isDark: bool
 
   // Plugins
   const pl = chart.options.plugins ?? {};
-  if (pl.legend?.labels) pl.legend.labels.color = textColor;
+  if (pl.legend) {
+    pl.legend.labels = {
+      ...(pl.legend.labels ?? {}),
+      color:           textColor,
+      padding:         18,
+      usePointStyle:   true,
+      pointStyle:      "circle",
+      pointStyleWidth: 8,
+      font:            { size: 12, weight: "500" },
+    };
+  }
   if (pl.title)           pl.title.color         = textColor;
   if (pl.tooltip) {
     pl.tooltip.backgroundColor = tooltipBg;
@@ -2908,7 +2918,7 @@ function buildInitialCfg(raw: Record<string, any>, isDark: boolean): Record<stri
   }
 
   const pl = cfg.options.plugins;
-  pl.legend  = { ...(pl.legend ?? {}),  labels: { ...(pl.legend?.labels ?? {}), color: textColor, padding: 18, usePointStyle: true, pointStyleWidth: 10, font: { size: 12, weight: "500" } } };
+  pl.legend  = { ...(pl.legend ?? {}),  labels: { ...(pl.legend?.labels ?? {}), color: textColor, padding: 18, usePointStyle: true, pointStyle: "circle", pointStyleWidth: 8, font: { size: 12, weight: "500" } } };
   // Disable canvas title — rendered as a React <span> above the canvas instead,
   // so it automatically picks up Tailwind theme classes with no JS required.
   pl.title   = { display: false };
@@ -3087,6 +3097,15 @@ interface ChartClarificationProps {
 
 const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSelect }) => {
   const groups = analytics.groups ?? [];
+  const [selected, setSelected] = React.useState<string | null>(null);
+
+  if (selected !== null) {
+    return (
+      <p className="text-sm text-muted-foreground italic">
+        Got it — building chart for <span className="text-foreground font-medium">{selected}</span>…
+      </p>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-2 w-full">
@@ -3104,7 +3123,7 @@ const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSe
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.06 }}
-            onClick={() => onSelect(g.hint)}
+            onClick={() => { setSelected(g.label); onSelect(g.hint); }}
             className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/8 text-left transition-all group/opt"
           >
             <span className="text-[13px] font-medium text-foreground group-hover/opt:text-primary transition-colors">
@@ -5362,6 +5381,7 @@ const Chat = () => {
   // then fills the textarea with the expanded prompt.
   const expandSuggestion = useCallback(async (label: string, isGeneral: boolean) => {
     setExpandingSuggestion(label);
+    setSuggestions([]);
     try {
       const base =
         (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
@@ -6434,16 +6454,9 @@ const Chat = () => {
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`relative z-10 flex items-start ${msg.role === "user" ? "justify-end gap-2" : "gap-3"}`}
+                className={`relative z-10 flex items-end ${msg.role === "user" ? "justify-end gap-2" : "gap-3 items-start"}`}
               >
-                {msg.role === "assistant" && (
-                  <Logo className="h-8 w-8 shrink-0 mt-0.5" />
-                )}
-                {msg.role === "user" && (
-                  <div className="order-last h-8 w-8 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
-                    <User className="h-4 w-4 text-muted-foreground" />
-                  </div>
-                )}
+
                 <div className={`group/msg relative ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end gap-0.5" : "max-w-[80%] space-y-2"}`}>
                   {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
                   {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
@@ -6554,10 +6567,10 @@ const Chat = () => {
                           <button
                             key={docId}
                             onClick={() => openBubbleDoc(doc)}
-                            className="group flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                            className="group flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-xl bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
                             title={doc.filename}
                           >
-                            <div className="w-6 h-6 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
+                            <div className="w-7 h-7 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
                               {isImg && cached?.url ? (
                                 <img src={cached.url} alt="" className="w-full h-full object-cover" />
                               ) : isIfc ? (
@@ -6570,8 +6583,8 @@ const Chat = () => {
                                 <FileText className="h-3 w-3 text-muted-foreground/60" />
                               )}
                             </div>
-                            <span className="text-[10px] text-foreground/70 font-medium max-w-[80px] truncate group-hover:text-foreground transition-colors">
-                              {doc.filename.length > 14 ? doc.filename.slice(0, 12) + '…' + (ext ? '.' + ext : '') : doc.filename}
+                            <span className="text-[10px] text-foreground/70 font-medium max-w-[90px] truncate group-hover:text-foreground transition-colors">
+                              {(() => { const base = ext ? doc.filename.slice(0, doc.filename.length - ext.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (ext ? '.' + ext : '') : doc.filename; })()}
                             </span>
                           </button>
                         );
@@ -7135,7 +7148,6 @@ const Chat = () => {
                 </AnimatePresence>
                 {/* Logo + dots always same row */}
                 <div className="flex gap-3 items-center">
-                  <Logo className="h-8 w-8 shrink-0" />
                   <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
                     <TypingIndicator />
                   </div>
@@ -7274,8 +7286,8 @@ const Chat = () => {
                       <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
                         <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
                       </div>
-                      <span className="text-[11px] text-muted-foreground font-medium max-w-[80px] truncate">
-                        {doc.filename.length > 12 ? doc.filename.slice(0, 10) + '…' + (doc.filename.split('.').pop() ? '.' + doc.filename.split('.').pop() : '') : doc.filename}
+                      <span className="text-[11px] text-muted-foreground font-medium max-w-[90px] truncate">
+                        {(() => { const e = doc.filename.split('.').pop() ?? ''; const base = e ? doc.filename.slice(0, doc.filename.length - e.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (e ? '.' + e : '') : doc.filename; })()}
                       </span>
                     </div>
                   ))}
@@ -7309,8 +7321,8 @@ const Chat = () => {
                             <FileText className="h-3.5 w-3.5 text-muted-foreground/60" />
                           )}
                         </div>
-                        <span className="text-[11px] text-foreground/80 font-medium max-w-[80px] truncate group-hover:text-foreground transition-colors">
-                          {doc.filename.length > 12 ? doc.filename.slice(0, 10) + '…' + (ext ? '.' + ext : '') : doc.filename}
+                        <span className="text-[11px] text-foreground/80 font-medium max-w-[90px] truncate group-hover:text-foreground transition-colors">
+                          {(() => { const base = ext ? doc.filename.slice(0, doc.filename.length - ext.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (ext ? '.' + ext : '') : doc.filename; })()}
                         </span>
                       </button>
                     );
