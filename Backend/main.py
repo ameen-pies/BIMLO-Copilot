@@ -7,6 +7,7 @@ import os, mimetypes, uuid, json, asyncio, threading, queue
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import deque
+from neo4j_auth import router as auth_router, init_neo4j
 
 load_dotenv()
 groq_ok = bool(os.getenv("GROQ_API_KEY"))
@@ -75,6 +76,12 @@ app = FastAPI(
     description="Agentic RAG API powered by LangGraph — routes, retrieves, iterates, analyses."
 )
 
+app.include_router(auth_router)
+
+@app.on_event("startup")
+async def startup_event():
+    init_neo4j()
+    
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

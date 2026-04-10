@@ -9,6 +9,7 @@ import NotFound from "./pages/NotFound";
 import CallPage from "./pages/CallPage";
 import NewsPage from "./pages/NewsPage";
 import ClickSpark from "@/components/ClickSpark";
+import { AuthProvider } from "@/context/AuthContext";
 import './scrollbar.css';
 
 const queryClient = new QueryClient();
@@ -19,24 +20,26 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <ClickSpark
-          sparkColor="#60a5fa"
-          sparkSize={8}
-          sparkRadius={18}
-          sparkCount={8}
-          duration={380}
-        >
-          <div style={{ minHeight: '100vh' }}>
-            <Routes>
-              <Route path="/" element={<Index />} />
-              <Route path="/chat" element={<Chat />} />
-              <Route path="/call" element={<CallPage />} />
-              <Route path="/news" element={<NewsPage />} />
-              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </div>
-        </ClickSpark>
+        <AuthProvider>
+          <ClickSpark
+            sparkColor="#60a5fa"
+            sparkSize={8}
+            sparkRadius={18}
+            sparkCount={8}
+            duration={380}
+          >
+            <div style={{ minHeight: '100vh' }}>
+              <Routes>
+                <Route path="/" element={<Index />} />
+                <Route path="/chat" element={<Chat />} />
+                <Route path="/call" element={<CallPage />} />
+                <Route path="/news" element={<NewsPage />} />
+                {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </div>
+          </ClickSpark>
+        </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

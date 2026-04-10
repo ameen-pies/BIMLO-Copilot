@@ -12,6 +12,7 @@ import api, { Document, Source } from "@/services/api";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import BorderGlow from "@/components/BorderGlow";
+import { useAuth } from "@/context/AuthContext";
 
 interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
 
@@ -3311,6 +3312,7 @@ const Chat = () => {
   const bubbleViewerRef = useRef<ViewerState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const { currentUser, showAuthModal } = useAuth();
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -5066,6 +5068,13 @@ const Chat = () => {
   const handleSend = async () => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
+
+    // ── AUTH GATE — show popup if not logged in ──────────────────────────
+    if (!currentUser) {
+      showAuthModal(() => handleSend());
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     // ── Nav intent — detects topic interest and suggests the dedicated page naturally ──
     const _softNav = (() => {
