@@ -277,7 +277,27 @@ class GraphAgent:
                 "Chart generation unavailable: CF_API_KEY is not set."
             )
 
-        # ── Stage 0: check if query is vague and needs clarification ─────────
+        # ── Stage 0a: check if a specific file is mentioned in the query ────
+        # If multiple files are available and none is pinpointed, ask the user
+        # to pick a file (or a specific metric within a file).
+        if not skip_clarification:
+            available_files = list(dict.fromkeys(
+                c.get("metadata", {}).get("filename", "")
+                for c in chunks
+                if c.get("metadata", {}).get("filename")
+            ))
+            if len(available_files) > 1 and not self._query_mentions_file(query, available_files):
+                file_groups = self._discover_file_groups(query, chunks, language, available_files)
+                if file_groups and len(file_groups) > 1:
+                    print(f"   🤔 GraphAgent: no file specified — offering {len(file_groups)} file-based options")
+                    return {
+                        "type":               "chart_clarification",
+                        "clarification_mode": "file",
+                        "question":           "Your documents span multiple files. Which one should I chart from?",
+                        "groups":             file_groups,
+                    }
+
+        # ── Stage 0b: check if query is vague and needs clarification ────────
         # Skipped when the user already answered a clarification (skip_clarification=True)
         if not skip_clarification and self._is_vague_request(query):
             groups = self._discover_metric_groups(query, chunks, language)
@@ -314,9 +334,10 @@ class GraphAgent:
                         f"Which one would you like to visualize?"
                     )
                     return {
-                        "type":     "chart_clarification",
-                        "question": clarif_question,
-                        "groups":   validated_groups,
+                        "type":               "chart_clarification",
+                        "clarification_mode": "metric",
+                        "question":           clarif_question,
+                        "groups":             validated_groups,
                     }
                 elif len(validated_groups) == 1:
                     # Only one valid group — build it silently without asking
@@ -741,6 +762,105 @@ DOCUMENTS:
                 return True
 
         return False
+
+    @staticmethod
+    def _query_mentions_file(query: str, filenames: List[str]) -> bool:
+        """
+        Returns True if the query contains the name (or stem) of any available file.
+        Used to decide whether to skip the file-picker clarification.
+        """
+        q = query.lower()
+        for fn in filenames:
+            # Match full filename or stem (without extension)
+            name = fn.lower()
+            stem = name.rsplit(".", 1)[0] if "." in name else name
+            if name in q or stem in q:
+                return True
+        return False
+
+    def _discover_file_groups(
+        self,
+        query: str,
+        chunks: List[Dict],
+        language: str,
+        available_files: List[str],
+    ) -> List[Dict]:
+        """
+        For each available file, find 1-2 representative chartable metrics.
+        Returns a flat list of groups, each tagged with source_file so the
+        frontend can group them visually under their filename.
+
+        Capped at 4 suggestions total (max 2 per file) to keep the UI clean.
+        """
+        context = self._build_context(chunks, max_chars_per_chunk=800)
+        files_str = "\n".join(f"- {f}" for f in available_files)
+
+        system = (
+            "You are a data analyst for Bimlo Copilot. "
+            "You return ONLY valid JSON — no markdown, no explanation, no backticks."
+        )
+
+        prompt = f"""The user wants a chart but hasn't specified which file to use.
+Available files:
+{files_str}
+
+Scan the document content below and for EACH file suggest 1-2 of the most interesting numeric metrics that could make a chart.
+
+Return ONLY a JSON array (max 8 items total, ideally 1-2 per file):
+[
+  {{
+    "source_file": "exact filename from the list above",
+    "label": "Short metric name (2-4 words, in {language})",
+    "description": "What this metric represents (1 sentence)",
+    "hint": "chart <metric> from <filename> as a bar chart"
+  }}
+]
+
+Rules:
+- Only include metrics with actual numeric data in the documents
+- Keep label short and human-readable
+- hint must be a complete, specific chart request the user could send
+- Return ONLY the JSON array
+
+DOCUMENTS:
+{context}"""
+
+        raw = _call_llm(prompt, system, self.api_key, self.base_url,
+                        max_tokens=800, temperature=0.0)
+        if not raw:
+            return []
+
+        parsed = _parse_json(raw)
+        if not isinstance(parsed, list):
+            if isinstance(parsed, dict) and "groups" in parsed:
+                parsed = parsed["groups"]
+            else:
+                return []
+
+        valid = []
+        seen_files: dict = {}
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            sf = str(item.get("source_file", "")).strip()
+            label = str(item.get("label", "")).strip()
+            hint = str(item.get("hint", "")).strip()
+            if not (sf and label and hint):
+                continue
+            # Max 2 per file
+            seen_files[sf] = seen_files.get(sf, 0) + 1
+            if seen_files[sf] > 2:
+                continue
+            valid.append({
+                "source_file": sf,
+                "label":       label[:60],
+                "description": str(item.get("description", ""))[:120],
+                "hint":        hint[:200],
+            })
+            if len(valid) >= 4:
+                break
+
+        return valid
 
     def _discover_metric_groups(
         self,

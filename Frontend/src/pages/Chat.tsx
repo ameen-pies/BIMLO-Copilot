@@ -2633,25 +2633,27 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
 // ---------------------------------------------------------------------------
 
 interface ChartGroup {
-  label:       string;
-  description: string;
-  hint:        string;
+  label:        string;
+  description:  string;
+  hint:         string;
+  source_file?: string;
 }
 
 interface ChartAnalytics {
   type: "chart_config" | "chart_clarification" | "report_chart_clarification" | "chart_error";
   // chart_config
-  chart_js?:       Record<string, any>;
-  chart_type?:     string;
-  title?:          string;
-  description?:    string;
-  interpretation?: string;
-  sources?:        string[];
+  chart_js?:            Record<string, any>;
+  chart_type?:          string;
+  title?:               string;
+  description?:         string;
+  interpretation?:      string;
+  sources?:             string[];
   // chart_clarification
-  question?: string;
-  groups?:   ChartGroup[];
+  question?:            string;
+  groups?:              ChartGroup[];
+  clarification_mode?:  "file" | "metric";
   // chart_error
-  message?:  string;
+  message?:             string;
 }
 
 interface ChartMessageProps {
@@ -3007,15 +3009,10 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
 
   if (analytics.type === "chart_error") {
     return (
-      <div className="flex flex-col gap-3">
+      <div className="leading-relaxed text-sm text-foreground">
         {answer && (
-          <div className="leading-relaxed text-sm text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{answer}</ReactMarkdown>
-          </div>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{answer}</ReactMarkdown>
         )}
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300 leading-relaxed">
-          {analytics.message}
-        </div>
       </div>
     );
   }
@@ -3097,6 +3094,7 @@ interface ChartClarificationProps {
 
 const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSelect }) => {
   const groups = analytics.groups ?? [];
+  const isFilePicker = analytics.clarification_mode === "file";
   const [selected, setSelected] = React.useState<string | null>(null);
 
   if (selected !== null) {
@@ -3107,36 +3105,75 @@ const ChartClarification: React.FC<ChartClarificationProps> = ({ analytics, onSe
     );
   }
 
-  return (
-    <div className="flex flex-col gap-2 w-full">
+  // For file-mode: group pills under their filename headers
+  const fileGroups: Record<string, ChartGroup[]> = {};
+  if (isFilePicker) {
+    groups.forEach(g => {
+      const file = g.source_file ?? "Other";
+      if (!fileGroups[file]) fileGroups[file] = [];
+      fileGroups[file].push(g);
+    });
+  }
 
-      {/* Natural prose question — same visual weight as any RAG answer */}
+  return (
+    <div className="flex flex-col gap-3 w-full">
       <p className="text-sm leading-relaxed text-foreground">
         {analytics.question ?? "I found several types of data in your documents. Which would you like to chart?"}
       </p>
 
-      {/* Option rows — sit below the prose naturally */}
-      <div className="flex flex-col gap-1.5">
-        {groups.map((g, i) => (
-          <motion.button
-            key={i}
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.06 }}
-            onClick={() => { setSelected(g.label); onSelect(g.hint); }}
-            className="flex flex-col items-start gap-0.5 px-3 py-2.5 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/8 text-left transition-all group/opt"
-          >
-            <span className="text-[13px] font-medium text-foreground group-hover/opt:text-primary transition-colors">
-              {g.label}
-            </span>
-            {g.description && (
-              <span className="text-[11px] text-muted-foreground leading-snug">
-                {g.description}
+      {isFilePicker ? (
+        <div className="flex flex-col gap-3">
+          {Object.entries(fileGroups).map(([filename, items], fi) => (
+            <div key={fi} className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5 px-0.5">
+                <FileText className="h-3 w-3 text-primary/50 shrink-0" />
+                <span className="text-[11px] font-semibold text-primary/60 uppercase tracking-wide truncate">
+                  {filename}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {items.map((g, i) => (
+                  <motion.button
+                    key={i}
+                    initial={{ opacity: 0, scale: 0.94 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: (fi * 3 + i) * 0.04 }}
+                    onClick={() => { setSelected(g.label); onSelect(g.hint); }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt"
+                  >
+                    <BarChart2 className="h-3 w-3 text-primary/40 shrink-0 group-hover/opt:text-primary transition-colors" />
+                    <span className="text-[12px] font-medium text-foreground group-hover/opt:text-primary transition-colors">
+                      {g.label}
+                    </span>
+                  </motion.button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {groups.map((g, i) => (
+            <motion.button
+              key={i}
+              initial={{ opacity: 0, scale: 0.94 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: i * 0.05 }}
+              onClick={() => { setSelected(g.label); onSelect(g.hint); }}
+              className="flex flex-col items-start gap-0.5 px-3 py-2 rounded-xl border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt max-w-[220px]"
+            >
+              <span className="text-[13px] font-medium text-foreground group-hover/opt:text-primary transition-colors leading-snug">
+                {g.label}
               </span>
-            )}
-          </motion.button>
-        ))}
-      </div>
+              {g.description && (
+                <span className="text-[11px] text-muted-foreground leading-snug line-clamp-2">
+                  {g.description}
+                </span>
+              )}
+            </motion.button>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -7079,7 +7116,7 @@ const Chat = () => {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.2 }}
-                      className="flex flex-col gap-1 pl-11"
+                      className="flex flex-col gap-1"
                     >
                       <button
                         onClick={() => setThinkingExpanded(v => !v)}

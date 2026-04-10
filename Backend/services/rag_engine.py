@@ -2140,57 +2140,62 @@ Remember: ALL text fields must be in {target_lang}."""
             language=plan.target_language,
         )
 
-        # ── Clarification needed: query was too vague ─────────────────────
+        # ── Clarification needed: vague query or no file specified ──────────
         if result.get("type") == "chart_clarification":
-            print(f"   🤔 graph_node: validating clarification options before suggesting")
+            clarif_mode  = result.get("clarification_mode", "metric")
+            raw_groups   = result.get("groups", [])
+            valid_groups = raw_groups  # default: trust file-mode groups as-is
 
-            # Pre-validate every group: only show groups that actually produce a chart.
-            # This prevents the user clicking an option and getting a chart_error back.
-            raw_groups = result.get("groups", [])
-            valid_groups = []
-            for grp in raw_groups:
-                hint = grp.get("hint") or grp.get("label", "")
-                if not hint:
-                    continue
-                try:
-                    probe = self.graph_agent.build_chart(
-                        query=hint,
-                        chunks=chunks,
-                        language=plan.target_language,
-                        skip_clarification=True,
+            # For metric-mode only: pre-validate each group so users never click
+            # an option and get a chart_error back. File-mode groups are already
+            # filtered inside _discover_file_groups so no double-probe needed.
+            if clarif_mode == "metric":
+                print(f"   🤔 graph_node: validating {len(raw_groups)} metric groups…")
+                valid_groups = []
+                for grp in raw_groups:
+                    hint = grp.get("hint") or grp.get("label", "")
+                    if not hint:
+                        continue
+                    try:
+                        probe = self.graph_agent.build_chart(
+                            query=hint,
+                            chunks=chunks,
+                            language=plan.target_language,
+                            skip_clarification=True,
+                        )
+                        if probe.get("type") == "chart_config":
+                            valid_groups.append(grp)
+                            print(f"      ✅ group valid: {grp.get('label','?')}")
+                        else:
+                            print(f"      ❌ group invalid (no data): {grp.get('label','?')}")
+                    except Exception as _ve:
+                        print(f"      ⚠️  group probe failed for '{hint}': {_ve}")
+
+                if not valid_groups:
+                    print(f"   ⚠️  graph_node: no valid chart groups found after validation")
+                    fallback_answer = (
+                        "I couldn't find numeric or structured data in your documents "
+                        "that's ready to chart right now. Make sure your documents contain "
+                        "tables or columns of measurements, then try a specific request — "
+                        "for example: 'chart the fiber strand counts by site as a bar chart'."
                     )
-                    if probe.get("type") == "chart_config":
-                        valid_groups.append(grp)
-                        print(f"      ✅ group valid: {grp.get('label','?')}")
-                    else:
-                        print(f"      ❌ group invalid (no data): {grp.get('label','?')}")
-                except Exception as _ve:
-                    print(f"      ⚠️  group probe failed for '{hint}': {_ve}")
-
-            if not valid_groups:
-                # Nothing is actually chartable — return a plain error instead
-                print(f"   ⚠️  graph_node: no valid chart groups found after validation")
-                fallback_answer = (
-                    f"I couldn't find numeric or structured data in your documents "
-                    f"that's ready to chart right now. Make sure your documents contain "
-                    f"tables or columns of measurements, then try a specific request — "
-                    f"for example: 'chart the fiber strand counts by site as a bar chart'."
-                )
-                return {
-                    **state,
-                    "answer":     fallback_answer,
-                    "raw_answer": fallback_answer,
-                    "sources":    [],
-                    "confidence": 0.0,
-                    "analytics":  {"type": "chart_error", "message": fallback_answer},
-                }
+                    return {
+                        **state,
+                        "answer":     fallback_answer,
+                        "raw_answer": fallback_answer,
+                        "sources":    [],
+                        "confidence": 0.0,
+                        "analytics":  {"type": "chart_error", "message": fallback_answer},
+                    }
+            else:
+                print(f"   🤔 graph_node: file-picker clarification — {len(raw_groups)} options")
 
             clarif_answer = result.get(
                 "question",
                 "Your request covers several different types of data. Which would you like to chart?"
             )
             result_validated = {**result, "groups": valid_groups}
-            print(f"   🤔 graph_node: {len(valid_groups)}/{len(raw_groups)} groups validated")
+            print(f"   🤔 graph_node: clarification ({clarif_mode} mode, {len(valid_groups)} groups)")
             return {
                 **state,
                 "answer":     clarif_answer,
