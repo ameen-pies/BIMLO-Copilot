@@ -131,7 +131,29 @@ _session_routes: Dict[str, str] = {}
 _session_route_log: Dict[str, list] = {}
 
 def get_history(session_id: str) -> List[dict]:
-    return list(_sessions.get(session_id, []))
+    # Hot path: already in memory
+    if session_id in _sessions:
+        return list(_sessions[session_id])
+    # Cold path: server restarted — try to reload from Neo4j
+    try:
+        from neo4j_auth import _run as neo4j_run
+        rows = neo4j_run(
+            """
+            MATCH (c:Conversation {session_id: $sid})-[r:CONTAINS]->(m:Message)
+            RETURN m.role AS role, m.content AS content
+            ORDER BY r.index ASC
+            """,
+            {"sid": session_id},
+        )
+        if rows:
+            _sessions[session_id] = deque(
+                [{"role": r["role"], "content": r["content"]} for r in rows],
+                maxlen=MAX_HISTORY_TURNS,
+            )
+            return list(_sessions[session_id])
+    except Exception as e:
+        print(f"⚠️  Neo4j history reload failed: {e}")
+    return []
 
 def get_route_log(session_id: str) -> list:
     return list(_session_route_log.get(session_id, []))
@@ -197,10 +219,16 @@ async def root():
 async def upload_document(
     file: UploadFile = File(...),
     authorization: Optional[str] = Header(default=None),
+    session_id: Optional[str] = None,
 ):
     """Upload and index a document (PDF, DOCX, TXT).
-    If the user is logged in (Bearer token), the document is also recorded
-    in Neo4j under their account so it persists across sessions.
+
+    Documents are scoped to a chat session (session_id).  They are NOT
+    persisted globally across the account — each chat session owns its own
+    document set so users don't see stale files from previous sessions.
+
+    If the user is also logged in the doc node is linked to both the session
+    conversation node AND the user node in Neo4j (for audit / billing later).
     """
     try:
         allowed = ['.pdf', '.docx', '.doc', '.txt']
@@ -208,14 +236,21 @@ async def upload_document(
         if ext not in allowed:
             raise HTTPException(400, f"Unsupported type. Allowed: {', '.join(allowed)}")
 
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        with open(file_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+        # Read file bytes — no disk write, pass directly to processor
+        content = await file.read()
+        print(f"📄 Received: {file.filename} ({len(content)} bytes)")
 
-        print(f"📄 Saved: {file.filename} ({len(content)} bytes)")
+        # Write to a temp file so DocumentProcessor (which expects a path) can read it
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
 
-        chunks = doc_processor.process_document(file_path)
+        try:
+            chunks = doc_processor.process_document(tmp_path)
+        finally:
+            os.unlink(tmp_path)  # delete temp file immediately
+
         print(f"✂️  {len(chunks)} chunks created")
 
         doc_id = vector_store.add_document(file.filename, chunks)
@@ -234,36 +269,56 @@ async def upload_document(
         except Exception as _ge:
             print(f"⚠️  graph_rag ingestion skipped: {_ge}")
 
-        # ── Persist to Neo4j if the user is logged in ─────────────────────
+        # ── Persist to Neo4j — scoped to session + optionally user ─────────
         from neo4j_auth import optional_user, _run as neo4j_run
         user = optional_user(authorization)
-        if user:
-            try:
-                from datetime import datetime as _dt
+        try:
+            from datetime import datetime as _dt
+            _now = _dt.utcnow().isoformat()
+            # 1. Upsert the Document node
+            neo4j_run(
+                """
+                MERGE (d:Document {id: $doc_id})
+                SET d.filename    = $filename,
+                    d.doc_type    = $doc_type,
+                    d.chunk_count = $chunk_count,
+                    d.uploaded_at = $now,
+                    d.session_id  = $session_id
+                """,
+                {
+                    "doc_id":      doc_id,
+                    "filename":    file.filename,
+                    "doc_type":    ext.lstrip("."),
+                    "chunk_count": len(chunks),
+                    "now":         _now,
+                    "session_id":  session_id or "",
+                },
+            )
+            # 2. Link doc → conversation session (so /documents?session_id= filters work)
+            if session_id:
                 neo4j_run(
                     """
-                    MERGE (d:Document {id: $doc_id})
-                    SET d.filename    = $filename,
-                        d.doc_type    = $doc_type,
-                        d.chunk_count = $chunk_count,
-                        d.uploaded_at = $now
-                    WITH d
+                    MATCH (d:Document {id: $doc_id})
+                    MERGE (c:Conversation {session_id: $session_id})
+                    MERGE (c)-[:USED_DOCUMENT]->(d)
+                    """,
+                    {"doc_id": doc_id, "session_id": session_id},
+                )
+            # 3. Also link doc → user (if logged in — audit / future billing)
+            if user:
+                neo4j_run(
+                    """
+                    MATCH (d:Document {id: $doc_id})
                     MATCH (u:User {id: $user_id})
                     MERGE (u)-[:UPLOADED]->(d)
                     """,
-                    {
-                        "doc_id":      doc_id,
-                        "filename":    file.filename,
-                        "doc_type":    ext.lstrip("."),
-                        "chunk_count": len(chunks),
-                        "now":         _dt.utcnow().isoformat(),
-                        "user_id":     user["user_id"],
-                    },
+                    {"doc_id": doc_id, "user_id": user["user_id"]},
                 )
-                print(f"☁️  Neo4j: doc '{file.filename}' saved for user {user['username']}")
-            except Exception as neo_err:
-                # Non-fatal — file is still indexed in Chroma
-                print(f"⚠️  Neo4j doc save failed (non-fatal): {neo_err}")
+                print(f"☁️  Neo4j: '{file.filename}' → user {user['username']} | session {session_id}")
+            else:
+                print(f"☁️  Neo4j: '{file.filename}' → anonymous session {session_id}")
+        except Exception as neo_err:
+            print(f"⚠️  Neo4j doc save failed (non-fatal): {neo_err}")
 
         return {
             "status":           "success",
@@ -467,6 +522,13 @@ async def query_stream(request: QueryRequest):
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Return stored message history for a session so the frontend can restore a conversation."""
+    history = get_history(session_id)
+    return {"session_id": session_id, "messages": history}
 
 
 @app.delete("/sessions/{session_id}")
@@ -724,10 +786,46 @@ async def generate_report(request: QueryRequest):
 
 
 @app.get("/documents")
-async def list_documents():
+async def list_documents(
+    session_id: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return documents scoped strictly to the given session_id.
+
+    No session_id → empty list. Never leaks docs across sessions or accounts.
+    """
     try:
-        docs = vector_store.list_documents()
-        return {"status": "success", "documents": docs, "total": len(docs)}
+        if not session_id:
+            return {"status": "success", "documents": [], "total": 0, "scoped": False}
+
+        try:
+            from neo4j_auth import _run as neo4j_run
+            rows = neo4j_run(
+                """
+                MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document)
+                RETURN d.id        AS document_id,
+                       d.filename  AS filename,
+                       d.doc_type  AS doc_type,
+                       d.chunk_count AS chunk_count,
+                       d.uploaded_at AS timestamp
+                ORDER BY d.uploaded_at DESC
+                """,
+                {"sid": session_id},
+            )
+            docs = [
+                {
+                    "document_id": r["document_id"],
+                    "filename":    r["filename"] or "unknown",
+                    "doc_type":    r["doc_type"] or "unknown",
+                    "chunk_count": r["chunk_count"] or 0,
+                    "timestamp":   r["timestamp"] or "",
+                }
+                for r in rows
+            ]
+            return {"status": "success", "documents": docs, "total": len(docs), "scoped": True}
+        except Exception as neo_err:
+            print(f"⚠️  Neo4j session-doc lookup failed: {neo_err}")
+            return {"status": "success", "documents": [], "total": 0, "scoped": False}
     except Exception as e:
         raise HTTPException(500, f"Error listing documents: {e}")
 
@@ -743,65 +841,29 @@ async def delete_document(doc_id: str):
 
 @app.get("/documents/{doc_id}/content")
 async def get_document_content(doc_id: str):
-    """Return the raw text content of a stored document for in-app viewing."""
+    """Return the raw text content of a stored document by reassembling its chunks from ChromaDB."""
     try:
         # ── CAD/IFC files live in CadSharedContext, not the vector store ──
         if _cad_ifc_available:
             from cad_ifc_agent import CadSharedContext
             cad_file = CadSharedContext.get_file(doc_id)
             if cad_file:
-                # Return a JSON summary as readable text so the viewer renders something
                 import json as _json
                 summary_text = _json.dumps(cad_file, indent=2, default=str)
                 return {"document_id": doc_id, "filename": cad_file.get("filename", doc_id), "content": summary_text}
 
-        docs = vector_store.list_documents()
-        doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
-        if not doc_meta:
+        # Reassemble text from ChromaDB chunks (ordered by chunk_index)
+        results = vector_store.collection.get(where={"document_id": doc_id})
+        if not results or not results.get("ids"):
             raise HTTPException(status_code=404, detail="Document not found")
 
-        filename  = doc_meta["filename"]
-        file_path = os.path.join(UPLOAD_DIR, filename)
-
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found on disk: {filename}")
-
-        ext = os.path.splitext(filename)[1].lower()
-
-        if ext == ".txt":
-            content = None
-            for enc in ("utf-8", "latin-1", "cp1252"):
-                try:
-                    with open(file_path, "r", encoding=enc) as f:
-                        content = f.read()
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if content is None:
-                raise HTTPException(status_code=500, detail="Could not decode file")
-
-        elif ext == ".pdf":
-            try:
-                import PyPDF2
-                content = ""
-                with open(file_path, "rb") as f:
-                    reader = PyPDF2.PdfReader(f)
-                    for page in reader.pages:
-                        content += (page.extract_text() or "") + "\n"
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"PDF extraction failed: {e}")
-
-        elif ext in (".docx", ".doc"):
-            try:
-                from docx import Document as DocxDocument
-                doc = DocxDocument(file_path)
-                content = "\n".join(p.text for p in doc.paragraphs)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {e}")
-
-        else:
-            raise HTTPException(status_code=415, detail=f"Unsupported file type: {ext}")
-
+        # Sort chunks by chunk_index and join
+        pairs = sorted(
+            zip(results["metadatas"], results["documents"]),
+            key=lambda x: x[0].get("chunk_index", 0),
+        )
+        filename = pairs[0][0].get("filename", doc_id) if pairs else doc_id
+        content  = "\n\n".join(text for _, text in pairs)
         return {"document_id": doc_id, "filename": filename, "content": content}
 
     except HTTPException:
@@ -813,9 +875,8 @@ async def get_document_content(doc_id: str):
 
 @app.get("/documents/{doc_id}/download")
 async def download_document(doc_id: str):
-    """Return the original uploaded file as binary for in-app PDF/image viewer."""
+    """Return the document text reconstructed from ChromaDB chunks as a downloadable .txt file."""
     try:
-        # ── CAD/IFC files: not stored on disk via this route — return 404 with hint ──
         if _cad_ifc_available:
             from cad_ifc_agent import CadSharedContext
             if CadSharedContext.get_file(doc_id):
@@ -824,22 +885,22 @@ async def download_document(doc_id: str):
                     detail="CAD/IFC files are streamed from the browser blob URL, not re-downloaded from the server."
                 )
 
-        docs = vector_store.list_documents()
-        doc_meta = next((d for d in docs if d["document_id"] == doc_id), None)
-        if not doc_meta:
+        results = vector_store.collection.get(where={"document_id": doc_id})
+        if not results or not results.get("ids"):
             raise HTTPException(status_code=404, detail="Document not found")
 
-        filename  = doc_meta["filename"]
-        file_path = os.path.join(UPLOAD_DIR, filename)
+        pairs = sorted(
+            zip(results["metadatas"], results["documents"]),
+            key=lambda x: x[0].get("chunk_index", 0),
+        )
+        filename = pairs[0][0].get("filename", doc_id) if pairs else doc_id
+        content  = "\n\n".join(text for _, text in pairs)
 
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found on disk: {filename}")
-
-        mime, _ = mimetypes.guess_type(file_path)
-        return FileResponse(
-            file_path,
-            media_type=mime or "application/octet-stream",
-            filename=filename,
+        from fastapi.responses import Response
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.txt"'},
         )
     except HTTPException:
         raise

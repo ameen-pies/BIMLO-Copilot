@@ -7,6 +7,8 @@ import {
 } from "lucide-react";
 import TypewriterText from "@/components/TypewriterText";
 import CardNav from "@/components/CardNav";
+import { useAuth } from "@/context/AuthContext";
+import { ProfileBubble } from "@/components/Navbar";
 
 
 // ── Config ─────────────────────────────────────────────────────────────────
@@ -775,6 +777,7 @@ function NewsChatPanel({
 
 const NewsPage = () => {
   const navigate = useNavigate();
+  const { currentUser, logout } = useAuth();
   const navbarRef = useRef<HTMLDivElement>(null);
   const [navbarHeight, setNavbarHeight] = useState(108);
 
@@ -1137,6 +1140,9 @@ const NewsPage = () => {
           <button onClick={toggleTheme} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: "pointer", transition: "all 0.15s", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)" }} title="Toggle theme">
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>
+          {currentUser && (
+            <ProfileBubble user={currentUser} onLogout={logout} align="right" />
+          )}
         </div>
       </div>
 

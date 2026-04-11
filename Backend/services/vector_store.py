@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import chromadb
 from chromadb.config import Settings
@@ -182,7 +183,3 @@ class VectorStoreManager:
             "image_chunks":    image_chunks,
             "table_chunks":    table_chunks,
         }
-
-
-# ── tiny helper used by add_document ──────────────────────────────────────
-import re

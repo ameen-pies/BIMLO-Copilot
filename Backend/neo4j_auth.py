@@ -33,6 +33,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 load_dotenv()  # must run before os.getenv() calls below
 
+import logging
+# Suppress Neo4j notification spam (INFO/WARNING about missing props/relations
+# on empty databases — harmless, just noisy during first-run)
+logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+
 try:
     from neo4j import GraphDatabase, exceptions as neo4j_exc
     _NEO4J_AVAILABLE = True
@@ -65,10 +70,13 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 print(f"🔍 NEO4J DEBUG — URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
 
-# Simple in-memory token store: token -> {user_id, expires_at, username, email}
-# Survives restarts poorly — for production swap with Redis or proper JWT.
-_active_tokens: Dict[str, Dict] = {}
+# Token TTL
 TOKEN_TTL_HOURS = 72
+
+# ── In-memory cache (fast path) ───────────────────────────────────────────────
+# Tokens are ALSO persisted to Neo4j as (:Token) nodes so they survive restarts.
+# On a cache miss we hit Neo4j once, then warm the cache.
+_active_tokens: Dict[str, Dict] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +128,7 @@ def _setup_constraints():
         "CREATE CONSTRAINT conv_id IF NOT EXISTS FOR (c:Conversation) REQUIRE c.id IS UNIQUE",
         "CREATE CONSTRAINT msg_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
         "CREATE CONSTRAINT doc_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
+        "CREATE CONSTRAINT token_val IF NOT EXISTS FOR (t:Token) REQUIRE t.token IS UNIQUE",
     ]
     for c in constraints:
         try:
@@ -148,29 +157,86 @@ def _verify_password(password: str, stored: str) -> bool:
 
 
 def _issue_token(user_id: str, username: str, email: str) -> str:
-    token = secrets.token_urlsafe(32)
-    _active_tokens[token] = {
-        "user_id":    user_id,
-        "username":   username,
-        "email":      email,
-        "expires_at": time.time() + TOKEN_TTL_HOURS * 3600,
-    }
+    token      = secrets.token_urlsafe(32)
+    expires_at = time.time() + TOKEN_TTL_HOURS * 3600
+    payload    = {"user_id": user_id, "username": username, "email": email, "expires_at": expires_at}
+    # Warm in-memory cache
+    _active_tokens[token] = payload
+    # Persist to Neo4j so the token survives server restarts
+    try:
+        _run(
+            """
+            MATCH (u:User {id: $user_id})
+            CREATE (t:Token {
+                token:      $token,
+                expires_at: $expires_at,
+                created_at: $now
+            })
+            MERGE (u)-[:HAS_TOKEN]->(t)
+            """,
+            {"user_id": user_id, "token": token,
+             "expires_at": expires_at, "now": datetime.utcnow().isoformat()},
+        )
+    except Exception as e:
+        print(f"⚠️  Token persist failed (auth still works this session): {e}")
     return token
 
 
 def _revoke_token(token: str):
     _active_tokens.pop(token, None)
+    try:
+        _run("MATCH (t:Token {token: $token}) DETACH DELETE t", {"token": token})
+    except Exception:
+        pass
 
 
 def _resolve_token(token: str) -> Optional[Dict]:
-    """Return token payload if valid and not expired, else None."""
+    """Return token payload if valid and not expired, else None.
+    Checks in-memory cache first; falls back to Neo4j on a cache miss
+    (e.g. after a server restart) so existing sessions stay valid.
+    """
+    now = time.time()
+
+    # ── Fast path: in-memory cache ────────────────────────────────────────
     payload = _active_tokens.get(token)
-    if not payload:
+    if payload:
+        if now > payload["expires_at"]:
+            _active_tokens.pop(token, None)
+            try:
+                _run("MATCH (t:Token {token: $token}) DETACH DELETE t", {"token": token})
+            except Exception:
+                pass
+            return None
+        return payload
+
+    # ── Cold path: Neo4j lookup (server just restarted) ───────────────────
+    try:
+        rows = _run(
+            """
+            MATCH (u:User)-[:HAS_TOKEN]->(t:Token {token: $token})
+            RETURN u.id AS user_id, u.username AS username, u.email AS email,
+                   t.expires_at AS expires_at
+            """,
+            {"token": token},
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        if now > row["expires_at"]:
+            _run("MATCH (t:Token {token: $token}) DETACH DELETE t", {"token": token})
+            return None
+        # Warm the cache so subsequent requests skip Neo4j
+        payload = {
+            "user_id":    row["user_id"],
+            "username":   row["username"],
+            "email":      row["email"],
+            "expires_at": row["expires_at"],
+        }
+        _active_tokens[token] = payload
+        return payload
+    except Exception as e:
+        print(f"⚠️  Token Neo4j lookup failed: {e}")
         return None
-    if time.time() > payload["expires_at"]:
-        _active_tokens.pop(token, None)
-        return None
-    return payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,16 +244,22 @@ def _resolve_token(token: str) -> Optional[Dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def optional_user(authorization: Optional[str] = Header(default=None)) -> Optional[Dict]:
+    print(f"🔐 AUTH — header: {repr(authorization)[:80]}")
     if not authorization or not authorization.startswith("Bearer "):
+        print(f"   → REJECTED: no/missing Bearer header")
         return None
     token = authorization.split(" ", 1)[1]
-    return _resolve_token(token)
+    result = _resolve_token(token)
+    print(f"   → token={token[:16]}... in_memory={token in _active_tokens} resolved={result is not None}")
+    return result
 
 
 def require_user(authorization: Optional[str] = Header(default=None)) -> Dict:
     user = optional_user(authorization)
     if not user:
+        print(f"❌ 401 — header was: {repr(authorization)[:80]}")
         raise HTTPException(status_code=401, detail="Authentication required")
+    print(f"✅ AUTH OK — user={user.get('username')}")
     return user
 
 
@@ -327,63 +399,70 @@ def me(user: Dict = Depends(require_user)):
 
 @router.post("/conversations/save")
 def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require_user)):
-    """Upsert a full conversation (create or update by conversation_id)."""
+    """Upsert conversation + messages using execute_write (neo4j driver 5.x compatible)."""
     now = datetime.utcnow().isoformat()
 
-    _run(
-        """
-        MERGE (c:Conversation {id: $conv_id})
-        SET   c.title      = $title,
-              c.preview    = $preview,
-              c.session_id = $session_id,
-              c.updated_at = $now
-        ON CREATE SET c.created_at = $now
-        WITH c
-        MATCH (u:User {id: $user_id})
-        MERGE (u)-[:HAS_CONVERSATION]->(c)
-        """,
+    msgs_data = [
         {
-            "conv_id":    req.conversation_id,
-            "title":      req.title,
-            "preview":    req.preview,
-            "session_id": req.session_id,
-            "now":        now,
-            "user_id":    user["user_id"],
-        },
-    )
+            "msg_id":  msg.get("id") or str(uuid.uuid4()),
+            "role":    msg.get("role", "user"),
+            "content": msg.get("content", ""),
+            "ts":      str(msg.get("timestamp", now)),
+            "idx":     idx,
+        }
+        for idx, msg in enumerate(req.messages)
+    ]
 
-    # Delete old messages and rewrite
-    _run(
-        """
-        MATCH (:Conversation {id: $conv_id})-[:CONTAINS]->(m:Message)
-        DETACH DELETE m
-        """,
-        {"conv_id": req.conversation_id},
-    )
-
-    for idx, msg in enumerate(req.messages):
-        _run(
+    def _work(tx):
+        # Upsert conversation + link to user
+        tx.run(
             """
-            MATCH (c:Conversation {id: $conv_id})
-            CREATE (m:Message {
-                id:        $msg_id,
-                role:      $role,
-                content:   $content,
-                timestamp: $ts
-            })
-            CREATE (c)-[:CONTAINS {index: $idx}]->(m)
+            MATCH (u:User {id: $user_id})
+            MERGE (u)-[:HAS_CONVERSATION]->(c:Conversation {id: $conv_id})
+            SET   c.title      = $title,
+                  c.preview    = $preview,
+                  c.session_id = $session_id,
+                  c.updated_at = $now,
+                  c.created_at = CASE WHEN c.created_at IS NULL THEN $now ELSE c.created_at END
             """,
-            {
-                "conv_id": req.conversation_id,
-                "msg_id":  msg.get("id", str(uuid.uuid4())),
-                "role":    msg.get("role", "user"),
-                "content": msg.get("content", ""),
-                "ts":      msg.get("timestamp", now),
-                "idx":     idx,
-            },
+            conv_id=req.conversation_id,
+            title=req.title or "",
+            preview=req.preview or "",
+            session_id=req.session_id or "",
+            now=now,
+            user_id=user["user_id"],
         )
+        # Wipe old messages
+        tx.run(
+            "MATCH (:Conversation {id: $conv_id})-[:CONTAINS]->(m:Message) DETACH DELETE m",
+            conv_id=req.conversation_id,
+        )
+        # Bulk insert new messages
+        if msgs_data:
+            tx.run(
+                """
+                MATCH (c:Conversation {id: $conv_id})
+                UNWIND $msgs AS m
+                CREATE (msg:Message {
+                    id:        m.msg_id,
+                    role:      m.role,
+                    content:   m.content,
+                    timestamp: m.ts
+                })
+                CREATE (c)-[:CONTAINS {index: m.idx}]->(msg)
+                """,
+                conv_id=req.conversation_id,
+                msgs=msgs_data,
+            )
 
-    return {"ok": True, "conversation_id": req.conversation_id}
+    try:
+        driver = get_driver()
+        with driver.session(database=NEO4J_DATABASE) as session:
+            session.execute_write(_work)
+        return {"ok": True, "conversation_id": req.conversation_id}
+    except Exception as e:
+        print(f"❌ save_conversation error: {e}")
+        raise HTTPException(503, f"Database error: {e}")
 
 
 @router.get("/conversations")
@@ -499,6 +578,18 @@ def init_neo4j():
     try:
         get_driver().verify_connectivity()
         _setup_constraints()
+        # Clean up expired tokens left over from previous runs
+        try:
+            now = time.time()
+            result = _run(
+                "MATCH (t:Token) WHERE t.expires_at < $now DETACH DELETE t RETURN count(t) AS n",
+                {"now": now},
+            )
+            n = result[0]["n"] if result else 0
+            if n:
+                print(f"🧹 Neo4j: purged {n} expired token(s)")
+        except Exception as e:
+            print(f"⚠️  Token cleanup failed (non-fatal): {e}")
         print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
     except Exception as e:
         print(f"❌ Neo4j connection FAILED: {e}")

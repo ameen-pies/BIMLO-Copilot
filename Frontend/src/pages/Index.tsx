@@ -1,12 +1,13 @@
 import { Link } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
 import RotatingWords from "@/components/RotatingWords";
 import BackgroundManager from "@/components/BackgroundManager";
 import CardSwap, { Card } from "@/components/CardSwap";
-import { useState, useEffect, useRef } from "react";
+import AuthModal, { AuthUser } from "@/components/AuthModal";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
@@ -53,7 +54,7 @@ interface Article {
 }
 
 // ── Single ticker card ───────────────────────────────────────────────────────
-const TickerCard = ({ article }: { article: Article }) => {
+const TickerCard = ({ article, onLoginRequired }: { article: Article; onLoginRequired: () => void }) => {
   const meta  = CATEGORY_META[article.category] ?? CATEGORY_META["General"];
   const Icon  = meta.Icon;
   const href  = article.article_url  ?? article.articleUrl  ?? "#";
@@ -62,9 +63,8 @@ const TickerCard = ({ article }: { article: Article }) => {
 
   return (
     <a
-      href={href !== "#" ? href : undefined}
-      target={href !== "#" ? "_blank" : undefined}
-      rel="noopener noreferrer"
+      href={undefined}
+      onClick={e => { e.preventDefault(); onLoginRequired(); }}
       className="ticker-card"
     >
       {/* image or gradient fallback */}
@@ -92,7 +92,7 @@ const TickerCard = ({ article }: { article: Article }) => {
 };
 
 // ── Trending section ─────────────────────────────────────────────────────────
-const TrendingSection = () => {
+const TrendingSection = ({ onLoginRequired }: { onLoginRequired: () => void }) => {
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading,  setLoading]  = useState(true);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -153,11 +153,9 @@ const TrendingSection = () => {
           <div
             ref={trackRef}
             className="ticker-track"
-            onMouseEnter={() => { if (trackRef.current) trackRef.current.style.animationPlayState = "paused"; }}
-            onMouseLeave={() => { if (trackRef.current) trackRef.current.style.animationPlayState = "running"; }}
           >
             {[...articles, ...articles].map((a, i) => (
-              <TickerCard key={`${a.id}-${i}`} article={a} />
+              <TickerCard key={`${a.id}-${i}`} article={a} onLoginRequired={onLoginRequired} />
             ))}
           </div>
         </motion.div>
@@ -172,13 +170,15 @@ const TrendingSection = () => {
         variants={fadeUp}
         custom={2}
       >
-        <Link to="/news">
-          <Button size="lg" className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-10 h-12 gap-2">
-            <TrendingUp className="h-4 w-4" />
-            Open full industry briefing
-            <ArrowRight className="h-4 w-4" />
-          </Button>
-        </Link>
+        <Button
+          size="lg"
+          onClick={onLoginRequired}
+          className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-10 h-12 gap-2"
+        >
+          <TrendingUp className="h-4 w-4" />
+          Open full industry briefing
+          <ArrowRight className="h-4 w-4" />
+        </Button>
       </motion.div>
     </section>
   );
@@ -190,6 +190,8 @@ const Index = () => {
   const [isDark, setIsDark] = useState(() =>
     document.documentElement.classList.contains("dark")
   );
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const openLogin = useCallback(() => setLoginModalOpen(true), []);
 
   useEffect(() => {
     const observer = new MutationObserver(() =>
@@ -416,12 +418,24 @@ const Index = () => {
           justify-content: center;
           margin-top: 44px;
         }
+
+        /* ── Ticker pauses on hover via CSS (no JS flicker) ── */
+        .ticker-wrap:hover .ticker-track {
+          animation-play-state: paused;
+        }
       `}</style>
 
       <div
         className="min-h-screen bg-background overflow-x-hidden"
         style={{ animation: "bgFadeIn 0.6s ease-out both", ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}
       >
+        {/* ── Login required modal ── */}
+        <AuthModal
+          open={loginModalOpen}
+          onClose={() => setLoginModalOpen(false)}
+          onSuccess={(user: AuthUser) => { setLoginModalOpen(false); /* handle authed user here */ }}
+        />
+
         <BackgroundManager />
         <Navbar />
 
@@ -482,7 +496,7 @@ const Index = () => {
         </section>
 
         {/* Trending — live infinite ticker (2nd, right after hero) */}
-        <TrendingSection />
+        <TrendingSection onLoginRequired={openLogin} />
 
         {/* Features */}
         <section className="content-above-bg pt-0 pb-24 px-6 mt-8">

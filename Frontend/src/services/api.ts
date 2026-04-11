@@ -80,10 +80,21 @@ class APIClient {
   ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
 
+    // Attach auth token if available (stored by AuthContext as JSON under 'bimlo_auth')
+    let token: string | null = null;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('bimlo_auth');
+        if (stored) token = JSON.parse(stored).token ?? null;
+      } catch { /* ignore parse errors */ }
+    }
+    const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
     try {
       const response = await fetch(url, {
         ...options,
         headers: {
+          ...authHeaders,
           ...options.headers,
         },
       });
@@ -109,23 +120,27 @@ class APIClient {
   // ==========================================================================
 
   /**
-   * Upload a document for processing
+   * Upload a document for processing.
+   * Pass sessionId so the backend scopes the doc to the current chat session.
    */
-  async uploadDocument(file: File): Promise<UploadResponse> {
+  async uploadDocument(file: File, sessionId?: string): Promise<UploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
-    return this.request<UploadResponse>('/upload', {
+    const url = sessionId ? `/upload?session_id=${encodeURIComponent(sessionId)}` : '/upload';
+    return this.request<UploadResponse>(url, {
       method: 'POST',
       body: formData,
     });
   }
 
   /**
-   * List all indexed documents
+   * List documents — filtered by session_id when provided.
+   * Each chat session only sees files uploaded in that session.
    */
-  async listDocuments(): Promise<DocumentListResponse> {
-    return this.request<DocumentListResponse>('/documents');
+  async listDocuments(sessionId?: string): Promise<DocumentListResponse> {
+    const url = sessionId ? `/documents?session_id=${encodeURIComponent(sessionId)}` : '/documents';
+    return this.request<DocumentListResponse>(url);
   }
 
   /**

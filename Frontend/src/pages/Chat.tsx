@@ -13,6 +13,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import BorderGlow from "@/components/BorderGlow";
 import { useAuth } from "@/context/AuthContext";
+import { ProfileBubble } from "@/components/Navbar";
 
 interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
 
@@ -2732,31 +2733,35 @@ const STROKES_DARK  = ["#818cf8","#34d399","#fbbf24","#fb7185","#60a5fa","#f472b
 const STROKES_LIGHT = ["#6366f1","#10b981","#f59e0b","#ef4444","#3b82f6","#ec4899","#8b5cf6","#14b8a6"];
 
 // Gradient stop pairs [top, bottom] per palette
+// Top stop is near-fully opaque; bottom stop is used at ~80% of height,
+// then the plugin adds a hard rgba(0,0,0,0) stop at 1.0 for a clean fade.
 const GRAD_STOPS_DARK: [string, string][] = [
-  ["rgba(129,140,248,0.88)", "rgba(99,102,241,0.18)"],
-  ["rgba(52,211,153,0.88)",  "rgba(16,185,129,0.18)"],
-  ["rgba(251,191,36,0.88)",  "rgba(245,158,11,0.18)"],
-  ["rgba(251,113,133,0.88)", "rgba(239,68,68,0.18)"],
-  ["rgba(96,165,250,0.88)",  "rgba(59,130,246,0.18)"],
-  ["rgba(244,114,182,0.88)", "rgba(236,72,153,0.18)"],
-  ["rgba(167,139,250,0.88)", "rgba(139,92,246,0.18)"],
-  ["rgba(45,212,191,0.88)",  "rgba(20,184,166,0.18)"],
+  ["rgba(129,140,248,0.95)", "rgba(99,102,241,0.22)"],
+  ["rgba(52,211,153,0.95)",  "rgba(16,185,129,0.22)"],
+  ["rgba(251,191,36,0.95)",  "rgba(245,158,11,0.22)"],
+  ["rgba(251,113,133,0.95)", "rgba(239,68,68,0.22)"],
+  ["rgba(96,165,250,0.95)",  "rgba(59,130,246,0.22)"],
+  ["rgba(244,114,182,0.95)", "rgba(236,72,153,0.22)"],
+  ["rgba(167,139,250,0.95)", "rgba(139,92,246,0.22)"],
+  ["rgba(45,212,191,0.95)",  "rgba(20,184,166,0.22)"],
 ];
 const GRAD_STOPS_LIGHT: [string, string][] = [
-  ["rgba(99,102,241,0.82)",  "rgba(99,102,241,0.12)"],
-  ["rgba(16,185,129,0.82)",  "rgba(16,185,129,0.12)"],
-  ["rgba(245,158,11,0.82)",  "rgba(245,158,11,0.12)"],
-  ["rgba(239,68,68,0.82)",   "rgba(239,68,68,0.12)"],
-  ["rgba(59,130,246,0.82)",  "rgba(59,130,246,0.12)"],
-  ["rgba(236,72,153,0.82)",  "rgba(236,72,153,0.12)"],
-  ["rgba(139,92,246,0.82)",  "rgba(139,92,246,0.12)"],
-  ["rgba(20,184,166,0.82)",  "rgba(20,184,166,0.12)"],
+  ["rgba(99,102,241,0.90)",  "rgba(99,102,241,0.15)"],
+  ["rgba(16,185,129,0.90)",  "rgba(16,185,129,0.15)"],
+  ["rgba(245,158,11,0.90)",  "rgba(245,158,11,0.15)"],
+  ["rgba(239,68,68,0.90)",   "rgba(239,68,68,0.15)"],
+  ["rgba(59,130,246,0.90)",  "rgba(59,130,246,0.15)"],
+  ["rgba(236,72,153,0.90)",  "rgba(236,72,153,0.15)"],
+  ["rgba(139,92,246,0.90)",  "rgba(139,92,246,0.15)"],
+  ["rgba(20,184,166,0.90)",  "rgba(20,184,166,0.15)"],
 ];
 
 // ── Gradient plugin — recreates gradients each draw using the chart's own ctx ─
 // This is the correct pattern: gradients are tied to the canvas they're built on,
 // so they must be created inside beforeDraw where `chart.ctx` and `chart.chartArea`
 // are guaranteed to be the right canvas and have valid dimensions.
+//
+// Gradient direction: top = highly opaque, bottom = fully transparent, for all types.
 function makeGradientPlugin(rawCfg: Record<string, any>, isDark: boolean) {
   return {
     id: "dynamicGradients",
@@ -2769,6 +2774,9 @@ function makeGradientPlugin(rawCfg: Record<string, any>, isDark: boolean) {
       const chartType  = rawCfg.type as string;
       const isPie      = chartType === "pie" || chartType === "doughnut";
       const isLine     = chartType === "line" || chartType === "scatter";
+      const isRadar    = chartType === "radar";
+      const isPolar    = chartType === "polarArea";
+      const isHBar     = chartType === "bar" && (rawCfg.options?.indexAxis === "y");
       const gradStops  = isDark ? GRAD_STOPS_DARK  : GRAD_STOPS_LIGHT;
       const strokes    = isDark ? STROKES_DARK      : STROKES_LIGHT;
       const nDatasets  = chart.data.datasets.length;
@@ -2776,20 +2784,23 @@ function makeGradientPlugin(rawCfg: Record<string, any>, isDark: boolean) {
       chart.data.datasets.forEach((ds: any, i: number) => {
         const si = i % gradStops.length;
 
+        // ── Line / Scatter — strong fill gradient top→bottom ────────────────
         if (isLine) {
           const grad = ctx.createLinearGradient(0, top, 0, bottom);
-          grad.addColorStop(0, strokes[si] + "44");
-          grad.addColorStop(1, strokes[si] + "00");
+          grad.addColorStop(0,   gradStops[si][0]);   // highly opaque at top
+          grad.addColorStop(0.6, gradStops[si][1]);   // fades to low at 60%
+          grad.addColorStop(1,   "rgba(0,0,0,0)");    // fully transparent at bottom
           ds.backgroundColor = grad;
           return;
         }
 
+        // ── Pie / Doughnut — radial-style diagonal gradient per slice ────────
         if (isPie) {
           const nSlices = (chart.data.labels ?? []).length;
           ds.backgroundColor = Array.from({ length: nSlices }, (_: any, j: number) => {
-            const g = ctx.createLinearGradient(left, top, left + w * 0.7, top + h * 0.7);
-            g.addColorStop(0, gradStops[j % gradStops.length][0]);
-            g.addColorStop(1, gradStops[j % gradStops.length][1]);
+            const g = ctx.createLinearGradient(left + w * 0.1, top + h * 0.1, left + w * 0.9, top + h * 0.9);
+            g.addColorStop(0,   gradStops[j % gradStops.length][0]);
+            g.addColorStop(1,   "rgba(0,0,0,0)");
             return g;
           });
           ds.borderColor  = Array.from({ length: nSlices }, (_: any, j: number) => strokes[j % strokes.length]);
@@ -2798,24 +2809,75 @@ function makeGradientPlugin(rawCfg: Record<string, any>, isDark: boolean) {
           return;
         }
 
-        // Bar
+        // ── Polar Area — top-to-bottom gradient per segment ─────────────────
+        if (isPolar) {
+          const nSlices = (chart.data.labels ?? []).length;
+          ds.backgroundColor = Array.from({ length: nSlices }, (_: any, j: number) => {
+            const g = ctx.createLinearGradient(0, top, 0, bottom);
+            g.addColorStop(0,   gradStops[j % gradStops.length][0]);
+            g.addColorStop(1,   "rgba(0,0,0,0)");
+            return g;
+          });
+          ds.borderColor = Array.from({ length: nSlices }, (_: any, j: number) => strokes[j % strokes.length]);
+          ds.borderWidth = 1.5;
+          return;
+        }
+
+        // ── Radar — gradient fill ────────────────────────────────────────────
+        if (isRadar) {
+          const grad = ctx.createLinearGradient(0, top, 0, bottom);
+          grad.addColorStop(0,   gradStops[si][0]);
+          grad.addColorStop(1,   "rgba(0,0,0,0)");
+          ds.backgroundColor = grad;
+          ds.borderColor     = strokes[si];
+          ds.borderWidth     = 2;
+          ds.pointBackgroundColor = strokes[si];
+          return;
+        }
+
+        // ── Horizontal Bar — left (opaque) → right (transparent) ────────────
+        if (isHBar) {
+          if (nDatasets === 1) {
+            const nBars = (chart.data.labels ?? []).length;
+            ds.backgroundColor = Array.from({ length: nBars }, (_: any, j: number) => {
+              const g = ctx.createLinearGradient(left, 0, right, 0);
+              g.addColorStop(0,   gradStops[j % gradStops.length][0]);
+              g.addColorStop(1,   "rgba(0,0,0,0)");
+              return g;
+            });
+          } else {
+            const g = ctx.createLinearGradient(left, 0, right, 0);
+            g.addColorStop(0,   gradStops[si][0]);
+            g.addColorStop(1,   "rgba(0,0,0,0)");
+            ds.backgroundColor = g;
+          }
+          ds.borderColor   = "transparent";
+          ds.borderWidth   = 0;
+          ds.borderRadius  = nDatasets === 1 ? 7 : 6;
+          ds.borderSkipped = false;
+          return;
+        }
+
+        // ── Vertical Bar (default) — top (opaque) → bottom (transparent) ────
         if (nDatasets === 1) {
           const nBars = (chart.data.labels ?? []).length;
           ds.backgroundColor = Array.from({ length: nBars }, (_: any, j: number) => {
             const g = ctx.createLinearGradient(0, top, 0, bottom);
-            g.addColorStop(0, gradStops[j % gradStops.length][0]);
-            g.addColorStop(1, gradStops[j % gradStops.length][1]);
+            g.addColorStop(0,   gradStops[j % gradStops.length][0]);
+            g.addColorStop(0.8, gradStops[j % gradStops.length][1]);
+            g.addColorStop(1,   "rgba(0,0,0,0)");
             return g;
           });
         } else {
           const g = ctx.createLinearGradient(0, top, 0, bottom);
-          g.addColorStop(0, gradStops[si][0]);
-          g.addColorStop(1, gradStops[si][1]);
+          g.addColorStop(0,   gradStops[si][0]);
+          g.addColorStop(0.8, gradStops[si][1]);
+          g.addColorStop(1,   "rgba(0,0,0,0)");
           ds.backgroundColor = g;
         }
-        ds.borderColor  = "transparent";
-        ds.borderWidth  = 0;
-        ds.borderRadius = nDatasets === 1 ? 7 : 6;
+        ds.borderColor   = "transparent";
+        ds.borderWidth   = 0;
+        ds.borderRadius  = nDatasets === 1 ? 7 : 6;
         ds.borderSkipped = false;
       });
     },
@@ -3331,7 +3393,7 @@ const Chat = () => {
   const bubbleViewerRef = useRef<ViewerState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const { currentUser, showAuthModal } = useAuth();
+  const { currentUser, showAuthModal, logout } = useAuth();
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
@@ -3339,10 +3401,6 @@ const Chat = () => {
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragDepth, setDragDepth] = useState(0);
-  const [isDraggingInput, setIsDraggingInput] = useState(false);
-  const [inputDragDepth, setInputDragDepth] = useState(0);
   const [openSourceKey, setOpenSourceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
@@ -3350,7 +3408,42 @@ const Chat = () => {
   const bubbleHighlightRef = useRef<HTMLElement>(null);
   const bubbleScrollRef    = useRef<HTMLDivElement>(null);
   bubbleViewerRef.current  = bubbleViewer; // always-fresh mirror, no stale closure
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null); // kept for CAD upload only (no local picker UI)
+  const docFileInputRef = useRef<HTMLInputElement>(null); // regular doc upload
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0); // track nested drag enter/leave
+  const [isChatDragOver, setIsChatDragOver] = useState(false);
+  const chatDragCounterRef = useRef(0); // track nested drag enter/leave for chat area
+
+  const handleFiles = async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    if (!arr.length) return;
+    const sid = sessionIdRef.current ?? sessionId;
+    setIsUploading(true);
+    for (const file of arr) {
+      // Optimistic placeholder in docs panel
+      const placeholderId = `uploading-${Date.now()}-${file.name}`;
+      setDocuments(prev => [...prev, {
+        document_id: placeholderId,
+        filename: file.name,
+        doc_type: "uploading",
+        timestamp: new Date().toISOString(),
+      } as any]);
+      try {
+        const res = await api.uploadDocument(file, sid ?? undefined);
+        setPendingDocIds(prev => [...prev, res.document_id]);
+        setDocuments(prev => prev
+          .filter(d => d.document_id !== placeholderId)
+          .concat([{ document_id: res.document_id, filename: res.filename, doc_type: file.name.split(".").pop() ?? "doc", timestamp: new Date().toISOString() }])
+        );
+        toast({ title: "File uploaded", description: `${res.filename} ready` });
+      } catch (err) {
+        setDocuments(prev => prev.filter(d => d.document_id !== placeholderId));
+        toast({ title: "Upload failed", description: String(err), variant: "destructive" });
+      }
+    }
+    setIsUploading(false);
+  };
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
@@ -3528,6 +3621,8 @@ const Chat = () => {
                   if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
                   return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
                 });
+                // Persist voice reply to DB
+                saveConversationToDB(activeConvId, sessionIdRef.current ?? "", title, preview, updated);
                 return updated;
               });
               setTypingMessageId(assistantMsg.id);
@@ -3740,6 +3835,10 @@ const Chat = () => {
 
   // ── Document viewer helpers ──────────────────────────────────────────────
 
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+  const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp', '.rvt', '.nwd', '.nwc', '.dgn', '.skp', '.3dm', '.fbx', '.obj', '.stl', '.sat', '.iges', '.igs', '.prt', '.sldprt', '.catpart', '.3ds', '.dae', '.rfa', '.rte'];
+  const ALLOWED_EXTS = ['.pdf', '.docx', '.doc', '.txt', ...IMAGE_EXTS, ...CAD_EXTS];
+
   const getApiBase = () =>
     ((typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000");
 
@@ -3778,6 +3877,9 @@ const Chat = () => {
       const smartTitle = (data.title ?? "").trim();
       if (!smartTitle || smartTitle.length > 80) return;
       setConversations(convs => convs.map(c => c.id === convId ? { ...c, title: smartTitle } : c));
+      // Update title in DB
+      const _conv = conversations.find(c => c.id === convId);
+      if (_conv) saveConversationToDB(convId, (_conv as any).sessionId ?? sessionIdRef.current ?? "", smartTitle, _conv.preview, _conv.messages);
     } catch {
       // Silent fail — title stays as-is
     }
@@ -4084,19 +4186,42 @@ const Chat = () => {
     }
   }, [reportEditMode]);
 
-  // Load documents on mount
+  // Load documents + conversations on mount
   useEffect(() => {
     loadDocuments();
     loadReports();
+    loadConversationsFromDB();
   }, []);
+
+  // Re-load conversations + docs when user logs in or out
+  useEffect(() => {
+    if (currentUser) {
+      // Logged in — fetch their conversations and session-scoped docs
+      loadConversationsFromDB();
+      loadDocuments(sessionIdRef.current);
+    } else {
+      // Logged out — clear everything
+      setConversations([]);
+      setDocuments([]);
+      startNewConversation();
+    }
+  }, [currentUser?.user_id]); // user_id stable ref avoids re-runs on object recreation
+
+
+
+
+
 
   // ==========================================================================
   // DOCUMENT MANAGEMENT
   // ==========================================================================
 
-  const loadDocuments = async () => {
+  const loadDocuments = async (sid?: string | null) => {
     try {
-      const response = await api.listDocuments();
+      // Pass session_id so the backend returns only this session's documents.
+      // Falls back to full list if session_id is not yet known (first load).
+      const effectiveSid = sid ?? sessionIdRef.current;
+      const response = await api.listDocuments(effectiveSid ?? undefined);
       setDocuments(response.documents);
     } catch (error) {
       console.error("Failed to load documents:", error);
@@ -4105,6 +4230,81 @@ const Chat = () => {
         description: serializeError(error),
         variant: "destructive",
       });
+    }
+  };
+
+
+  // ── DB conversation persistence helpers ──────────────────────────────────
+
+  const getAuthHeader = (): Record<string, string> => {
+    // currentUser.token is always the source of truth (AuthContext stores full object in bimlo_auth)
+    const token = currentUser?.token ?? (() => {
+      try { return JSON.parse(localStorage.getItem("bimlo_auth") ?? "{}").token ?? ""; } catch { return ""; }
+    })();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const loadConversationsFromDB = async () => {
+    if (!currentUser) return;
+    try {
+      const base = getApiBase();
+      const res = await fetch(`${base}/auth/conversations`, {
+        headers: { ...(getAuthHeader() as any), "Content-Type": "application/json" },
+      });
+      if (!res.ok) return;
+      const rows: Array<{ id: string; title: string; preview: string; updated_at: string; session_id: string }> = await res.json();
+      // We only restore sidebar entries (id/title/preview/timestamp).
+      // Full messages are fetched lazily when user clicks a conversation.
+      setConversations(rows.map(r => ({
+        id: r.id,
+        title: r.title || "Untitled",
+        preview: r.preview || "",
+        timestamp: new Date(r.updated_at || Date.now()),
+        messages: [],
+        sessionId: r.session_id,
+      } as any)));
+    } catch (e) {
+      console.error("loadConversationsFromDB failed:", e);
+    }
+  };
+
+  const saveConversationToDB = async (
+    convId: string,
+    sid: string,
+    title: string,
+    preview: string,
+    msgs: Message[],
+  ) => {
+    // Always cache locally so switching is instant even if DB fetch fails
+    try {
+      const serializable = msgs.map(m => ({
+        ...m,
+        timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
+      }));
+      localStorage.setItem(`conv_msgs_${convId}`, JSON.stringify(serializable));
+    } catch {}
+
+    if (!currentUser) return;
+    try {
+      const base = getApiBase();
+      await fetch(`${base}/auth/conversations/save`, {
+        method: "POST",
+        headers: { ...(getAuthHeader() as any), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: convId,
+          session_id: sid,
+          title,
+          preview,
+          messages: msgs.map(m => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
+          })),
+        }),
+      });
+    } catch (e) {
+      console.error("saveConversationToDB failed:", e);
     }
   };
 
@@ -4570,168 +4770,7 @@ const Chat = () => {
     });
   };
 
-  const handleDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragDepth(prev => prev + 1);
-    setIsDragging(true);
-  };
 
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragDepth(prev => {
-      const newDepth = prev - 1;
-      if (newDepth === 0) {
-        setIsDragging(false);
-      }
-      return newDepth;
-    });
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
-  const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp', '.rvt', '.nwd', '.nwc', '.dgn', '.skp', '.3dm', '.fbx', '.obj', '.stl', '.sat', '.iges', '.igs', '.prt', '.sldprt', '.catpart', '.3ds', '.dae', '.rfa', '.rte'];
-  const ALLOWED_EXTS = ['.pdf', '.docx', '.doc', '.txt', ...IMAGE_EXTS, ...CAD_EXTS];
-
-  const _processUploadFile = async (file: File) => {
-    const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-    const isImage = IMAGE_EXTS.includes(fileExt);
-    const isPdf   = fileExt === '.pdf';
-    const isCad   = CAD_EXTS.includes(fileExt);
-    const tempDocId = `uploading:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-
-    if (!ALLOWED_EXTS.includes(fileExt)) {
-      toast({ title: "Invalid file type", description: `${file.name}: supported formats are PDF, DOCX, TXT, PNG, JPG, WEBP, GIF, IFC, IFCZIP, DXF, DWG, STEP, RVT, NWD, NWC, DGN, SKP, FBX, OBJ, STL, IGES, and more CAD formats`, variant: "destructive" });
-      return;
-    }
-    if (file.size > 50 * 1024 * 1024) {
-      toast({ title: "File too large", description: `${file.name}: maximum file size is 50MB`, variant: "destructive" });
-      return;
-    }
-
-    setIsUploading(true);
-    setDocuments(prev => [{
-      document_id: tempDocId,
-      filename: file.name,
-      doc_type: "uploading",
-      timestamp: new Date().toISOString(),
-    }, ...prev]);
-    try {
-      if (isCad) {
-        // Route CAD/IFC/BIM files to the dedicated agent endpoint
-        const formData = new FormData();
-        formData.append("file", file);
-        const base = getApiBase();
-        const res = await fetch(`${base}/api/cad/upload`, { method: "POST", body: formData });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: res.statusText }));
-          throw new Error(err.detail ?? "CAD upload failed");
-        }
-        const cadResp = await res.json();
-        // Inject into documents state so it appears in the sidebar like any normal file
-        const cadDoc = {
-          document_id: cadResp.file_id,
-          filename: file.name,
-          doc_type: cadResp.pipeline ?? "cad",
-          chunk_count: cadResp.total_elements ?? cadResp.total_entities ?? 0,
-          created_at: cadResp.cached_at ?? new Date().toISOString(),
-        };
-        setDocuments(prev => [cadDoc, ...prev.filter(d => d.document_id !== cadDoc.document_id && d.document_id !== tempDocId)]);
-        setPendingDocIds(prev => prev.includes(cadResp.file_id) ? prev : [...prev, cadResp.file_id]);
-        const blobUrl = URL.createObjectURL(file);
-        const entry: { url: string; type: "cad"; cadSummary: Record<string, unknown>; ifcBlobUrl?: string } = { url: blobUrl, type: "cad", cadSummary: cadResp };
-        // If silent CAD→IFC conversion succeeded, fetch the IFC bytes for 3D rendering
-        if (cadResp.ifc_available && Number(cadResp.converted_entities ?? 0) > 0) {
-          try {
-            const ifcRes = await fetch(`${base}/api/cad/files/${cadResp.file_id}/ifc`);
-            if (ifcRes.ok) {
-              const ifcBlob = await ifcRes.blob();
-              entry.ifcBlobUrl = URL.createObjectURL(new Blob([ifcBlob], { type: "application/x-step" }));
-            }
-          } catch { /* silent — 3D just won't show */ }
-        }
-        blobUrlMapRef.current.set(cadResp.file_id, entry);
-        (window as any).__lastCadFileId = cadResp.file_id;
-      } else {
-        const response = await api.uploadDocument(file);
-        const docId = response.document_id ?? response.id ?? response.filename;
-
-        // Store a local object URL so the viewer can open it instantly without re-downloading
-        const blobUrl = URL.createObjectURL(file);
-        blobUrlMapRef.current.set(docId, {
-          url: blobUrl,
-          type: isImage ? "image" : isPdf ? "pdf" : "txt",
-        });
-
-        setPendingDocIds(prev => prev.includes(docId) ? prev : [...prev, docId]);
-        await loadDocuments();
-        setDocuments(prev => prev.filter(d => d.document_id !== tempDocId));
-      }
-    } catch (error) {
-      setDocuments(prev => prev.filter(d => d.document_id !== tempDocId));
-      toast({ title: "Upload failed", description: `${file.name}: ${serializeError(error)}`, variant: "destructive" });
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    setDragDepth(0);
-
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
-
-    for (const file of files) {
-      await _processUploadFile(file);
-    }
-  };
-
-  const handleInputDragEnter = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setInputDragDepth(prev => prev + 1);
-    setIsDraggingInput(true);
-  };
-
-  const handleInputDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setInputDragDepth(prev => {
-      const next = prev - 1;
-      if (next === 0) setIsDraggingInput(false);
-      return next;
-    });
-  };
-
-  const handleInputDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const handleInputDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingInput(false);
-    setInputDragDepth(0);
-    await handleDrop(e);
-  };
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    for (const file of Array.from(files)) {
-      await _processUploadFile(file);
-    }
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
 
   const removeDocument = async (documentId: string) => {
     if (!confirm("Are you sure you want to delete this document?")) return;
@@ -4770,14 +4809,112 @@ const Chat = () => {
     }]);
   };
 
-  const loadConversation = (conv: Conversation) => {
+  const loadConversation = async (conv: Conversation) => {
+    console.log("[loadConv] clicked:", conv.id, "active:", activeConvId, "msgs in conv:", conv.messages?.length, "sessionId:", (conv as any).sessionId, "currentUser:", !!currentUser);
+    if (conv.id === activeConvId) { console.log("[loadConv] EARLY RETURN same id"); return; }
     setActiveConvId(conv.id);
-    setMessages(conv.messages);
+    setSessionId(null);
+    sessionIdRef.current = null;
+
+    const sid = (conv as any).sessionId ?? null;
+
+    // 1. In-memory fast path
+    if (conv.messages && conv.messages.length > 0) {
+      console.log("[loadConv] path 1: in-memory msgs:", conv.messages.length);
+      setMessages(conv.messages);
+      if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+      return;
+    }
+
+    // 2. localStorage cache
+    try {
+      const cached = localStorage.getItem(`conv_msgs_${conv.id}`);
+      console.log("[loadConv] path 2: localStorage hit:", !!cached);
+      if (cached) {
+        const parsed: Message[] = JSON.parse(cached).map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) }));
+        if (parsed.length > 0) {
+          console.log("[loadConv] path 2: loaded", parsed.length, "msgs");
+          setMessages(parsed);
+          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: parsed } : c));
+          if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
+          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+          return;
+        }
+      }
+    } catch {}
+
+    // 3. Fetch from backend
+    const base = getApiBase();
+    const authHeaders = { ...(getAuthHeader() as any), "Content-Type": "application/json" };
+
+    // 3a. Session history
+    console.log("[loadConv] path 3a: sid=", sid);
+    if (sid) {
+      try {
+        const res = await fetch(`${base}/sessions/${sid}/history`);
+        console.log("[loadConv] path 3a status:", res.status);
+        if (res.ok) {
+          const data = await res.json();
+          const turns: Array<{ role: string; content: string }> = data.messages ?? [];
+          console.log("[loadConv] path 3a turns:", turns.length);
+          if (turns.length > 0) {
+            const restored: Message[] = turns.map((m, i) => ({
+              id: `${conv.id}-${i}`,
+              role: m.role as "user" | "assistant",
+              content: m.content,
+              timestamp: new Date(),
+            }));
+            setMessages(restored);
+            setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
+            try { localStorage.setItem(`conv_msgs_${conv.id}`, JSON.stringify(restored.map(m => ({ ...m, timestamp: m.timestamp.toISOString() })))); } catch {}
+            setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid);
+            setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+            return;
+          }
+        }
+      } catch (e) { console.error("[loadConv] path 3a failed:", e); }
+    }
+
+    // 3b. Auth endpoint
+    console.log("[loadConv] path 3b: currentUser=", !!currentUser);
+    if (currentUser) {
+      try {
+        const url = `${base}/auth/conversations/${conv.id}`;
+        const res = await fetch(url, { headers: authHeaders });
+        console.log("[loadConv] path 3b status:", res.status);
+        if (res.ok) {
+          const data = await res.json();
+          console.log("[loadConv] path 3b msgs:", data.messages?.length);
+          const restored: Message[] = (data.messages ?? []).map((m: any) => ({
+            id: m.id ?? Date.now().toString(),
+            role: m.role as "user" | "assistant",
+            content: m.content ?? "",
+            timestamp: new Date(m.timestamp ?? Date.now()),
+          }));
+          setMessages(restored);
+          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
+          if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
+          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+        }
+      } catch (e) { console.error("[loadConv] path 3b failed:", e); }
+    } else {
+      console.warn("[loadConv] ALL PATHS EXHAUSTED — no messages loaded");
+    }
   };
 
-  const deleteConversation = (convId: string) => {
+  const deleteConversation = async (convId: string) => {
     setConversations(prev => prev.filter(c => c.id !== convId));
     if (convId === activeConvId) startNewConversation();
+    if (currentUser) {
+      try {
+        const base = getApiBase();
+        await fetch(`${base}/auth/conversations/${convId}`, {
+          method: "DELETE",
+          headers: getAuthHeader() as any,
+        });
+      } catch (e) { console.error("deleteConversation from DB failed:", e); }
+    }
   };
 
   // ── Shared streaming query runner ────────────────────────────────────────
@@ -4834,7 +4971,7 @@ const Chat = () => {
               accumulatedSteps.push(step);
               setThinkingSteps(prev => [...prev, step]);
             } else if (event.type === "result") {
-              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; loadDocuments(event.session_id); }
               const reportId: string | undefined = event.report_id;
               // If the router sent us to report_node, schedule a background fetch for the
               // reports panel — but the card itself uses inline SSE data, no fetch needed.
@@ -4952,7 +5089,7 @@ const Chat = () => {
               accumulatedSteps.push(step);
               setThinkingSteps(prev => [...prev, step]);
             } else if (event.type === "result") {
-              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; loadDocuments(event.session_id); }
               const reportId: string | undefined = event.report_id;
               if (reportId) {
                 const _fetchReport2 = (attempt = 0) => {
@@ -5055,7 +5192,7 @@ const Chat = () => {
               accumulatedSteps.push(step);
               setThinkingSteps(prev => [...prev, step]);
             } else if (event.type === "result") {
-              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; }
+              if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; loadDocuments(event.session_id); }
               resultMsg = {
                 id:        Date.now().toString(),
                 role:      "assistant",
@@ -5233,6 +5370,8 @@ const Chat = () => {
         if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updatedMessages, preview, timestamp: new Date() } : c);
         return [{ id: activeConvId, title: rawTitle, preview, timestamp: new Date(), messages: updatedMessages, sessionId } as any, ...convs];
       });
+      // Persist to DB (non-blocking)
+      saveConversationToDB(activeConvId, sessionIdRef.current ?? "", rawTitle, preview, updatedMessages);
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
@@ -5629,39 +5768,34 @@ const Chat = () => {
     <div 
       className="h-screen flex bg-background relative overflow-hidden"
       style={{ ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; setIsDragOver(true); }}
+      onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current === 0) setIsDragOver(false); }}
+      onDragOver={e => e.preventDefault()}
+      onDrop={e => { e.preventDefault(); dragCounterRef.current = 0; setIsDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
     >
-      {/* Hidden file input — always mounted so fileInputRef is never null */}
-      <input ref={fileInputRef} type="file" accept=".pdf,.txt,.docx,.doc,.png,.jpg,.jpeg,.webp,.gif,.ifc,.ifczip,.dxf,.dwg,.step,.stp,.rvt,.nwd,.nwc,.dgn,.skp,.3dm,.fbx,.obj,.stl,.sat,.iges,.igs,.prt,.sldprt,.catpart,.3ds,.dae,.rfa,.rte" className="hidden" onChange={handleFileUpload} disabled={isUploading} />
-      {/* Drag Overlay */}
+
+      {/* ── Drag-and-drop overlay (page-level) ── */}
       <AnimatePresence>
-        {isDragging && (
+        {isDragOver && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="absolute inset-0 z-50 bg-background/60 backdrop-blur-md flex items-center justify-center pointer-events-none"
+            className="absolute inset-0 z-[9999] bg-background/50 backdrop-blur-[3px] flex items-center justify-center pointer-events-none"
           >
             <motion.div
-              initial={{ scale: 0.95, y: 8 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.95, y: 8 }}
-              transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              className="relative flex flex-col items-center gap-3 px-10 py-8 rounded-3xl bg-card/70 border border-primary/20 shadow-xl"
-              style={{ backdropFilter: "blur(12px)" }}
+              initial={{ scale: 0.92, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.92, opacity: 0 }}
+              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+              className="flex flex-col items-center gap-2 px-8 py-6 rounded-2xl border border-primary/30 bg-card/90 shadow-2xl"
             >
-
-              <div className="relative flex items-center justify-center w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20">
-                <FileText className="h-5 w-5 text-primary" />
+              <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+                <Plus className="h-5 w-5 text-primary" />
               </div>
-              <div className="relative text-center">
-                <p className="text-sm font-medium text-foreground tracking-tight">Drop to upload</p>
-                <p className="text-xs text-muted-foreground/60 mt-0.5">PDF · DOCX · IFC · DXF · DWG · Images</p>
-              </div>
+              <p className="text-sm font-medium text-foreground">Drop to upload</p>
+              <p className="text-[11px] text-muted-foreground/60">PDF · DOCX · TXT · PNG · JPG · WEBP · IFC · DWG · DXF · STEP</p>
             </motion.div>
           </motion.div>
         )}
@@ -5670,7 +5804,7 @@ const Chat = () => {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0">
+        <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0 bg-background">
           <Link to="/">
             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">
               <ArrowLeft className="h-4 w-4" />
@@ -6324,17 +6458,6 @@ const Chat = () => {
                             </div>
                           )}
                         </div>
-
-                        <div className="p-3 border-t border-border shrink-0">
-                          <button
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={isUploading}
-                            className="w-full flex items-center justify-center gap-2 py-2 rounded-xl bg-primary/10 hover:bg-primary/15 text-primary text-xs font-medium transition-colors disabled:opacity-50"
-                          >
-                            <Plus className="h-3.5 w-3.5" />
-                            Upload document
-                          </button>
-                        </div>
                       </>
                     )}
 
@@ -6488,6 +6611,22 @@ const Chat = () => {
               <span>Call</span>
             </button>
             <ThemeToggle />
+            {currentUser && (
+              <ProfileBubble user={currentUser} onLogout={logout} align="right" />
+            )}
+            {!currentUser && (
+              <button
+                onClick={() => showAuthModal()}
+                style={{
+                  fontSize: 12, fontWeight: 600, padding: "5px 12px",
+                  borderRadius: 8, border: "1px solid rgba(96,165,250,0.35)",
+                  background: "rgba(96,165,250,0.08)", color: "#60a5fa",
+                  cursor: "pointer",
+                }}
+              >
+                Log in
+              </button>
+            )}
           </div>
         </header>
 
@@ -6511,7 +6650,37 @@ const Chat = () => {
             </motion.div>
           )}
         </AnimatePresence>
-        <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40 relative">
+        <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40 relative"
+          onDragEnter={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current++; setIsChatDragOver(true); }}
+          onDragLeave={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current--; if (chatDragCounterRef.current === 0) setIsChatDragOver(false); }}
+          onDragOver={e => e.preventDefault()}
+          onDrop={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current = 0; setIsChatDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
+        >
+          <AnimatePresence>
+            {isChatDragOver && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="absolute inset-0 z-50 bg-background/60 backdrop-blur-[2px] flex items-center justify-center pointer-events-none rounded-lg"
+              >
+                <motion.div
+                  initial={{ scale: 0.92, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.92, opacity: 0 }}
+                  transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+                  className="flex flex-col items-center gap-2 px-8 py-6 rounded-2xl border border-primary/30 bg-card/90 shadow-2xl"
+                >
+                  <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+                    <Plus className="h-5 w-5 text-primary" />
+                  </div>
+                  <p className="text-sm font-medium text-foreground">Drop to upload</p>
+                  <p className="text-[11px] text-muted-foreground/60">PDF · DOCX · TXT · PNG · JPG · WEBP · IFC · DWG · DXF · STEP</p>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
           <WelcomeSplash visible={messages.length === 0} />
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.map((msg) => (
@@ -7270,6 +7439,10 @@ const Chat = () => {
           ref={inputAreaRef}
           className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messages.length > 0 ? "relative border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent"}`}
           style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 80px))" } : {}}
+          onDragEnter={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current++; setIsChatDragOver(true); }}
+          onDragLeave={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current--; if (chatDragCounterRef.current === 0) setIsChatDragOver(false); }}
+          onDragOver={e => e.preventDefault()}
+          onDrop={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current = 0; setIsChatDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
         >
           <div className="max-w-3xl mx-auto">
 
@@ -7416,50 +7589,28 @@ const Chat = () => {
               >
               <div
                 className="relative rounded-2xl bg-card shadow-md"
-                onDragEnter={handleInputDragEnter}
-                onDragOver={handleInputDragOver}
-                onDragLeave={handleInputDragLeave}
-                onDrop={handleInputDrop}
               >
-                {/* Drag-over overlay */}
+                {/* ── Type-bar drag overlay ── */}
                 <AnimatePresence>
-                  {isDraggingInput && (
+                  {isChatDragOver && (
                     <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
-                      transition={{ duration: 0.12 }}
-                      className="absolute inset-0 z-10 rounded-2xl bg-background/50 backdrop-blur-sm flex items-center justify-center pointer-events-none"
+                      transition={{ duration: 0.15 }}
+                      className="absolute inset-0 z-20 rounded-2xl bg-primary/8 border-2 border-dashed border-primary/40 flex items-center justify-center pointer-events-none"
                     >
-                      <motion.div
-                        initial={{ scale: 0.94, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.94, opacity: 0 }}
-                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                        className="flex items-center gap-2.5 px-4 py-2 rounded-xl bg-card/80 border border-primary/15 shadow-sm"
-                      >
-                        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-primary/10">
-                          <FileText className="h-3.5 w-3.5 text-primary" />
-                        </div>
-                        <span className="text-xs font-medium text-foreground/80">Drop file</span>
-                        <span className="text-[10px] text-muted-foreground/50 font-normal">PDF · IFC · DXF · IMG</span>
-                      </motion.div>
+                      <div className="flex items-center gap-2">
+                        <Plus className="h-4 w-4 text-primary" />
+                        <span className="text-xs font-medium text-primary">Drop files here</span>
+                        <span className="text-[10px] text-primary/60">PDF · DOCX · TXT · PNG · JPG · IFC · DWG</span>
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
 
                 {/* Actual input row */}
-                <div className={`flex items-center gap-2 px-3 py-2.5 transition-opacity duration-150 ${isDraggingInput ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
-                  {/* Plus / attach button */}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isUploading}
-                  >
-                    <Plus className="h-5 w-5" />
-                  </Button>
+                <div className={"flex items-center gap-2 px-3 py-2.5"}>
 
                   {/* Auto-expanding textarea with ghost-text word completion — hidden while recording */}
                   {voiceState === "recording" ? (
@@ -7524,7 +7675,28 @@ const Chat = () => {
                       </span>
                     </div>
                   ) : (
-                  <div className="flex-1 relative">
+                  <div className="flex-1 relative flex items-center gap-1.5">
+                    {/* Upload plus button — sits at the left edge, inline with placeholder */}
+                    <button
+                      type="button"
+                      onClick={() => docFileInputRef.current?.click()}
+                      disabled={isLoading || isUploading}
+                      className="shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground/50 hover:text-primary hover:bg-primary/8 transition-colors disabled:opacity-30"
+                      title="Upload file"
+                    >
+                      {isUploading
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <Plus className="h-3.5 w-3.5" />
+                      }
+                    </button>
+                    <input
+                      ref={docFileInputRef}
+                      type="file"
+                      accept=".pdf,.docx,.doc,.txt,.png,.jpg,.jpeg,.webp,.gif,.ifc,.ifczip,.dxf,.dwg,.step,.stp,.rvt,.nwd,.nwc,.dgn,.skp,.3dm,.fbx,.obj,.stl,.sat,.iges,.igs,.prt,.sldprt,.catpart,.3ds,.dae,.rfa,.rte"
+                      multiple
+                      className="hidden"
+                      onChange={e => { if (e.target.files) handleFiles(e.target.files); e.target.value = ""; }}
+                    />
                     <textarea
                       ref={textareaRef}
                       value={input}
@@ -7538,7 +7710,7 @@ const Chat = () => {
                       rows={1}
                       disabled={isLoading}
                       style={{ maxHeight: "160px" }}
-                      className="w-full resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-0 pt-[7px] overflow-y-auto scrollbar-thin"
+                      className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-0 pt-[7px] overflow-y-auto scrollbar-thin"
                     />
                     {/* Ghost-text suffix — never shown on empty input */}
                     {wordSuffix && input.length > 0 && !autocomplete && (
@@ -7547,7 +7719,6 @@ const Chat = () => {
                         className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 pt-[7px] whitespace-pre-wrap break-words select-none"
                         style={{ color: "transparent" }}
                       >
-                        {/* Invisible clone of typed text to push the ghost to the right position */}
                         <span>{input}</span>
                         <span className="text-muted-foreground/40">{wordSuffix}</span>
                       </span>
