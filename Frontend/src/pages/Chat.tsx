@@ -2311,7 +2311,7 @@ async function fetchAICompletion(
   apiBase: string,
   availableDocs: string[] = [],
 ): Promise<string> {
-  if (typed.trim().length < 4) return "";
+  if (typed.trim().length < 4) return ""; // guard on trimmed length, but send raw `typed` to backend
 
   // Use only the last assistant reply as context — keeps the prompt tiny for speed
   const lastAssistant = [...recentMessages].reverse().find(m => m.role === "assistant");
@@ -2331,9 +2331,9 @@ async function fetchAICompletion(
     });
     if (!res.ok) return "";
     const data = await res.json();
-    const completion = (data.completion ?? "").trim();
-    if (!completion || completion.length > 80) return "";
-    return completion;
+    const completion = data.completion ?? "";
+    if (!completion || completion.trim().length === 0 || completion.length > 80) return "";
+    return completion; // preserve leading space — backend sets it intentionally
   } catch {
     return "";
   }
@@ -5203,8 +5203,26 @@ const Chat = () => {
     }
   }, [sessionId]);
 
+  const inputOverrideRef = useRef<string | null>(null);
+
+  // Sends a specific text string directly, bypassing the input state flush delay.
+  // Used by expandSuggestion to auto-send immediately after expansion.
+  const handleSendWithText = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || isLoading) return;
+    inputOverrideRef.current = trimmed;
+    setInput(trimmed);
+    // handleSend will pick up inputOverrideRef.current synchronously
+    setTimeout(() => handleSendDirectRef.current?.(), 0);
+  }, [isLoading]);
+
+  // Stable ref that always points to the latest handleSend — avoids stale closures.
+  const handleSendDirectRef = useRef<(() => Promise<void>) | null>(null);
+
   const handleSend = async () => {
-    const trimmedInput = input.trim();
+    const rawInput = inputOverrideRef.current ?? input;
+    inputOverrideRef.current = null;
+    const trimmedInput = rawInput.trim();
     if (!trimmedInput || isLoading) return;
 
     // ── AUTH GATE — show popup if not logged in ──────────────────────────
@@ -5394,6 +5412,9 @@ const Chat = () => {
     }
   };
 
+  // Keep the stable ref up-to-date so handleSendWithText can call handleSend
+  handleSendDirectRef.current = handleSend;
+
   const handleStop = () => {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
@@ -5460,7 +5481,7 @@ const Chat = () => {
       ghostDebounceRef.current = setTimeout(async () => {
         const base = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000";
         const docNames = documents.map((d: { filename: string }) => d.filename);
-        const suffix = await fetchAICompletion(trimmed, messages, base, docNames);
+        const suffix = await fetchAICompletion(before, messages, base, docNames);
         setWordSuffix(suffix);
       }, 280);
     }
@@ -5563,17 +5584,17 @@ const Chat = () => {
   }, []);
 
   // ── Expand a suggestion pill into a full polished prompt ─────────────────
-  // Calls /expand-suggestion on the backend, shows a spinner on the pill,
-  // then fills the textarea with the expanded prompt.
+  // Keeps the clicked pill visible with a spinner while the backend expands
+  // the label, then auto-sends the resulting prompt so the user sees it work.
   const expandSuggestion = useCallback(async (label: string, isGeneral: boolean) => {
     setExpandingSuggestion(label);
-    setSuggestions([]);
+    // Do NOT clear suggestions yet — keep the pill visible while loading
+    let expandedPrompt = label;
     try {
       const base =
         (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
         "http://localhost:8000";
 
-      // Get the last assistant message for context
       const lastAssistant = [...messages].reverse().find(m => m.role === "assistant");
       const lastUser      = [...messages].reverse().find(m => m.role === "user");
 
@@ -5588,20 +5609,18 @@ const Chat = () => {
           available_docs:  documents.map(d => d.filename),
         }),
       });
-      if (!res.ok) {
-        // Fallback: just use the label as-is
-        setInput(label);
-      } else {
+      if (res.ok) {
         const data = await res.json();
-        setInput(data.prompt ?? label);
+        expandedPrompt = data.prompt ?? label;
       }
     } catch {
-      setInput(label); // fallback
-    } finally {
-      setExpandingSuggestion(null);
-      setSuggestions([]);
-      textareaRef.current?.focus();
+      // fallback to raw label
     }
+    // Hide pills, populate textarea, focus it
+    setSuggestions([]);
+    setExpandingSuggestion(null);
+    setInput(expandedPrompt);
+    textareaRef.current?.focus();
   }, [messages, documents]);
 
   const handleEditCancel = () => {
@@ -7377,7 +7396,7 @@ const Chat = () => {
 
         {/* Notification banner — fixed, always floats above the input area regardless of layout */}
         <AnimatePresence>
-          {showNotifyBanner && (
+          {showNotifyBanner && messages.length > 0 && (
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
@@ -7430,7 +7449,7 @@ const Chat = () => {
 
             {/* ── Contextual suggestion chips ── */}
             <AnimatePresence>
-              {(suggestions.length > 0 || suggestionsLoading) && !isLoading && (
+              {(suggestions.length > 0 || suggestionsLoading || expandingSuggestion !== null) && !isLoading && messages.length > 0 && (
                 <motion.div
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -7459,15 +7478,18 @@ const Chat = () => {
                           <motion.button
                             key={s}
                             initial={{ opacity: 0, scale: 0.92 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: i * 0.06 }}
+                            animate={isExpanding
+                              ? { opacity: 1, scale: 1.04 }
+                              : { opacity: expandingSuggestion !== null ? 0.35 : 1, scale: 1 }
+                            }
+                            transition={{ delay: isExpanding ? 0 : i * 0.06, duration: 0.18 }}
                             disabled={expandingSuggestion !== null}
                             onClick={() => expandSuggestion(s, isGeneral)}
-                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-150 whitespace-nowrap inline-flex items-center gap-1.5 ${
+                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-200 whitespace-nowrap inline-flex items-center gap-1.5 ${
                               isExpanding
-                                ? "border-primary/40 bg-primary/10 text-primary"
+                                ? "border-primary/60 bg-primary/15 text-primary shadow-sm"
                                 : expandingSuggestion !== null
-                                ? "opacity-40 cursor-not-allowed border-border bg-card text-muted-foreground"
+                                ? "cursor-not-allowed border-border bg-card text-muted-foreground"
                                 : isGeneral
                                 ? "border-dashed border-border/70 bg-transparent hover:bg-muted hover:border-primary/30 text-muted-foreground/60 hover:text-muted-foreground cursor-pointer"
                                 : "border-border bg-card hover:bg-muted hover:border-primary/40 text-muted-foreground hover:text-foreground cursor-pointer"

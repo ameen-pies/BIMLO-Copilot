@@ -176,10 +176,10 @@ const Navbar = () => {
 
         <div className="flex items-center gap-2">
           {currentUser ? (
-            /* ── Logged-in: theme + profile bubble ── */
+            /* ── Logged-in: profile bubble + theme ── */
             <>
-              <ThemeToggle />
               <ProfileBubble user={currentUser} onLogout={logout} align="right" />
+              <ThemeToggle />
             </>
           ) : (
             /* ── Guest: Log in + Launch Copilot + Theme ── */

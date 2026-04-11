@@ -7,6 +7,8 @@ import RotatingWords from "@/components/RotatingWords";
 import BackgroundManager from "@/components/BackgroundManager";
 import CardSwap, { Card } from "@/components/CardSwap";
 import AuthModal, { AuthUser } from "@/components/AuthModal";
+import { useAuth } from "@/context/AuthContext";
+import { useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
@@ -54,7 +56,7 @@ interface Article {
 }
 
 // ── Single ticker card ───────────────────────────────────────────────────────
-const TickerCard = ({ article, onLoginRequired }: { article: Article; onLoginRequired: () => void }) => {
+const TickerCard = ({ article, onLoginRequired, isLoggedIn }: { article: Article; onLoginRequired: () => void; isLoggedIn: boolean }) => {
   const meta  = CATEGORY_META[article.category] ?? CATEGORY_META["General"];
   const Icon  = meta.Icon;
   const href  = article.article_url  ?? article.articleUrl  ?? "#";
@@ -64,7 +66,7 @@ const TickerCard = ({ article, onLoginRequired }: { article: Article; onLoginReq
   return (
     <a
       href={undefined}
-      onClick={e => { e.preventDefault(); onLoginRequired(); }}
+      onClick={e => { e.preventDefault(); if (isLoggedIn) { window.open(href, "_blank", "noopener,noreferrer"); } else { onLoginRequired(); } }}
       className="ticker-card"
     >
       {/* image or gradient fallback */}
@@ -92,10 +94,11 @@ const TickerCard = ({ article, onLoginRequired }: { article: Article; onLoginReq
 };
 
 // ── Trending section ─────────────────────────────────────────────────────────
-const TrendingSection = ({ onLoginRequired }: { onLoginRequired: () => void }) => {
+const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () => void; isLoggedIn: boolean }) => {
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading,  setLoading]  = useState(true);
   const trackRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     (async () => {
@@ -155,7 +158,7 @@ const TrendingSection = ({ onLoginRequired }: { onLoginRequired: () => void }) =
             className="ticker-track"
           >
             {[...articles, ...articles].map((a, i) => (
-              <TickerCard key={`${a.id}-${i}`} article={a} onLoginRequired={onLoginRequired} />
+              <TickerCard key={`${a.id}-${i}`} article={a} onLoginRequired={onLoginRequired} isLoggedIn={isLoggedIn} />
             ))}
           </div>
         </motion.div>
@@ -172,7 +175,7 @@ const TrendingSection = ({ onLoginRequired }: { onLoginRequired: () => void }) =
       >
         <Button
           size="lg"
-          onClick={onLoginRequired}
+          onClick={() => isLoggedIn ? navigate("/news") : onLoginRequired()}
           className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-10 h-12 gap-2"
         >
           <TrendingUp className="h-4 w-4" />
@@ -186,6 +189,7 @@ const TrendingSection = ({ onLoginRequired }: { onLoginRequired: () => void }) =
 
 // ── Main page ────────────────────────────────────────────────────────────────
 const Index = () => {
+  const { isLoggedIn } = useAuth();
   const [showScrollArrow, setShowScrollArrow] = useState(true);
   const [isDark, setIsDark] = useState(() =>
     document.documentElement.classList.contains("dark")
@@ -496,7 +500,7 @@ const Index = () => {
         </section>
 
         {/* Trending — live infinite ticker (2nd, right after hero) */}
-        <TrendingSection onLoginRequired={openLogin} />
+        <TrendingSection onLoginRequired={openLogin} isLoggedIn={isLoggedIn} />
 
         {/* Features */}
         <section className="content-above-bg pt-0 pb-24 px-6 mt-8">
