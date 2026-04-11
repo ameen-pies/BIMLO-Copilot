@@ -2856,19 +2856,9 @@ function applyThemeToChart(chart: any, rawCfg: Record<string, any>, isDark: bool
     if (axis.grid)  axis.grid.color  = gridColor;
   }
 
-  // Plugins
+  // Plugins — legend is rendered in React DOM, not by Chart.js
   const pl = chart.options.plugins ?? {};
-  if (pl.legend) {
-    pl.legend.labels = {
-      ...(pl.legend.labels ?? {}),
-      color:           textColor,
-      padding:         18,
-      usePointStyle:   true,
-      pointStyle:      "circle",
-      pointStyleWidth: 8,
-      font:            { size: 12, weight: "500" },
-    };
-  }
+  pl.legend = { display: false };
   if (pl.title)           pl.title.color         = textColor;
   if (pl.tooltip) {
     pl.tooltip.backgroundColor = tooltipBg;
@@ -2921,7 +2911,7 @@ function buildInitialCfg(raw: Record<string, any>, isDark: boolean): Record<stri
   }
 
   const pl = cfg.options.plugins;
-  pl.legend  = { ...(pl.legend ?? {}),  labels: { ...(pl.legend?.labels ?? {}), color: textColor, padding: 18, usePointStyle: true, pointStyle: "circle", pointStyleWidth: 8, font: { size: 12, weight: "500" } } };
+  pl.legend  = { display: false };  // legend rendered as React DOM below the canvas
   // Disable canvas title — rendered as a React <span> above the canvas instead,
   // so it automatically picks up Tailwind theme classes with no JS required.
   pl.title   = { display: false };
@@ -3060,6 +3050,35 @@ const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer }) => {
         {/* Canvas */}
         <div className="rounded-xl border border-border bg-card p-4 shadow-inner overflow-hidden">
           <canvas ref={canvasRef} />
+          {/* ── React-rendered legend — immune to Chart.js theme bugs ── */}
+          {(() => {
+            const cfg    = analytics.chart_js;
+            const labels = cfg?.data?.labels as string[] | undefined;
+            const ds0    = cfg?.data?.datasets?.[0];
+            if (!labels || labels.length === 0) return null;
+            const isPie  = cfg?.type === "pie" || cfg?.type === "doughnut";
+            const isDarkNow = typeof window !== "undefined" && document.documentElement.classList.contains("dark");
+            const palette = isDarkNow
+              ? ["#818cf8","#34d399","#fbbf24","#fb7185","#60a5fa","#f472b4","#a78bfa","#2dd4bf"]
+              : ["#6366f1","#10b981","#f59e0b","#ef4444","#3b82f6","#ec4899","#8b5cf6","#14b8a6"];
+            return (
+              <div className="flex flex-wrap justify-center gap-x-4 gap-y-1.5 mt-3 px-1">
+                {labels.map((label: string, i: number) => {
+                  const color = isPie
+                    ? palette[i % palette.length]
+                    : (Array.isArray(ds0?.backgroundColor)
+                        ? ds0.backgroundColor[i % ds0.backgroundColor.length]
+                        : ds0?.borderColor ?? palette[i % palette.length]);
+                  return (
+                    <span key={i} className="flex items-center gap-1.5 text-[11px] font-normal text-muted-foreground">
+                      <span style={{ background: color, width: 8, height: 8, borderRadius: "50%", display: "inline-block", flexShrink: 0 }} />
+                      {label}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Key insights — collapsible */}
