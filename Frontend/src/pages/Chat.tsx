@@ -4801,40 +4801,31 @@ const Chat = () => {
     const newId = Date.now().toString();
     setActiveConvId(newId);
     setSessionId(null);
-    setMessages([{
-      id: "welcome-" + newId,
-      role: "assistant",
-      content: "Hello! I'm Bimlo Copilot. How can I help you with your documents today?",
-      timestamp: new Date(),
-    }]);
+    setMessages([]);
   };
 
   const loadConversation = async (conv: Conversation) => {
-    console.log("[loadConv] clicked:", conv.id, "active:", activeConvId, "msgs in conv:", conv.messages?.length, "sessionId:", (conv as any).sessionId, "currentUser:", !!currentUser);
-    if (conv.id === activeConvId) { console.log("[loadConv] EARLY RETURN same id"); return; }
+    if (conv.id === activeConvId) return;
     setActiveConvId(conv.id);
     setSessionId(null);
     sessionIdRef.current = null;
 
     const sid = (conv as any).sessionId ?? null;
 
-    // 1. In-memory fast path
+    // 1. In-memory fast path (current session or previously cached)
     if (conv.messages && conv.messages.length > 0) {
-      console.log("[loadConv] path 1: in-memory msgs:", conv.messages.length);
       setMessages(conv.messages);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
       return;
     }
 
-    // 2. localStorage cache
+    // 2. localStorage cache — instant, no network needed
     try {
       const cached = localStorage.getItem(`conv_msgs_${conv.id}`);
-      console.log("[loadConv] path 2: localStorage hit:", !!cached);
       if (cached) {
         const parsed: Message[] = JSON.parse(cached).map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) }));
         if (parsed.length > 0) {
-          console.log("[loadConv] path 2: loaded", parsed.length, "msgs");
           setMessages(parsed);
           setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: parsed } : c));
           if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
@@ -4844,20 +4835,17 @@ const Chat = () => {
       }
     } catch {}
 
-    // 3. Fetch from backend
+    // 3. Fetch from backend — try session history first (reliable), then auth endpoint as fallback
     const base = getApiBase();
     const authHeaders = { ...(getAuthHeader() as any), "Content-Type": "application/json" };
 
-    // 3a. Session history
-    console.log("[loadConv] path 3a: sid=", sid);
+    // 3a. Session history endpoint (works for any session stored in Neo4j)
     if (sid) {
       try {
         const res = await fetch(`${base}/sessions/${sid}/history`);
-        console.log("[loadConv] path 3a status:", res.status);
         if (res.ok) {
           const data = await res.json();
           const turns: Array<{ role: string; content: string }> = data.messages ?? [];
-          console.log("[loadConv] path 3a turns:", turns.length);
           if (turns.length > 0) {
             const restored: Message[] = turns.map((m, i) => ({
               id: `${conv.id}-${i}`,
@@ -4873,19 +4861,15 @@ const Chat = () => {
             return;
           }
         }
-      } catch (e) { console.error("[loadConv] path 3a failed:", e); }
+      } catch (e) { console.error("session history fetch failed:", e); }
     }
 
-    // 3b. Auth endpoint
-    console.log("[loadConv] path 3b: currentUser=", !!currentUser);
+    // 3b. Auth conversations endpoint fallback
     if (currentUser) {
       try {
-        const url = `${base}/auth/conversations/${conv.id}`;
-        const res = await fetch(url, { headers: authHeaders });
-        console.log("[loadConv] path 3b status:", res.status);
+        const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
         if (res.ok) {
           const data = await res.json();
-          console.log("[loadConv] path 3b msgs:", data.messages?.length);
           const restored: Message[] = (data.messages ?? []).map((m: any) => ({
             id: m.id ?? Date.now().toString(),
             role: m.role as "user" | "assistant",
@@ -4897,9 +4881,7 @@ const Chat = () => {
           if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
           setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
         }
-      } catch (e) { console.error("[loadConv] path 3b failed:", e); }
-    } else {
-      console.warn("[loadConv] ALL PATHS EXHAUSTED — no messages loaded");
+      } catch (e) { console.error("loadConversation from DB failed:", e); }
     }
   };
 
