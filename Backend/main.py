@@ -253,21 +253,30 @@ async def upload_document(
 
         print(f"✂️  {len(chunks)} chunks created")
 
-        doc_id = vector_store.add_document(file.filename, chunks)
-        print(f"✅ Indexed: {doc_id}")
+        # ── Ingestion pipeline (LangGraph — background, non-blocking) ──────
+        # Generates a UUID for this document, then submits a 3-node LangGraph
+        # pipeline that handles:  chunk_document → index_vector_store → ingest_graph_rag
+        # The pipeline owns the vector_store.add_document() call; we just supply the UUID.
+        import uuid as _uuid_mod
+        doc_id = str(_uuid_mod.uuid4())
 
-        # ── GraphRAG ingestion (background, non-blocking) ─────────────────
-        try:
-            from graph_rag import get_engine as _get_graph_engine
-            import threading as _threading
-            _graph_engine = _get_graph_engine()
-            if _graph_engine.available:
-                def _ingest():
-                    _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
-                _threading.Thread(target=_ingest, daemon=True).start()
-                print(f"🕸️  graph_rag: ingestion started in background for '{file.filename}'")
-        except Exception as _ge:
-            print(f"⚠️  graph_rag ingestion skipped: {_ge}")
+        if _ingestion_graph_available:
+            run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks)
+            print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id})")
+        else:
+            # Fallback: direct synchronous indexing when ingestion_graph not available
+            vector_store.add_document(file.filename, chunks)
+            print(f"✅ Indexed (direct fallback): {doc_id}")
+            try:
+                from graph_rag import get_engine as _get_graph_engine
+                import threading as _threading
+                _graph_engine = _get_graph_engine()
+                if _graph_engine.available:
+                    def _ingest_fallback():
+                        _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
+                    _threading.Thread(target=_ingest_fallback, daemon=True).start()
+            except Exception as _ge:
+                print(f"⚠️  graph_rag ingestion skipped (fallback): {_ge}")
 
         # ── Persist to Neo4j — scoped to session + optionally user ─────────
         from neo4j_auth import optional_user, _run as neo4j_run
@@ -1028,8 +1037,9 @@ async def startup_event():
     except:
         print("⚠️  Vector store stats unavailable")
     print(f"🔑 Groq API: {'✅ configured' if os.getenv('GROQ_API_KEY') else '⚠️  not configured'}")
-    print(f"📰 News pipeline: {'✅ available' if _news_pipeline_available else '⚠️  not available'}")
-    print(f"🏗️  CAD/IFC agent: {'✅ available' if _cad_ifc_available else '⚠️  not available'}")
+    print(f"📰 News pipeline:     {'✅ available' if _news_pipeline_available else '⚠️  not available'}")
+    print(f"🏗️  CAD/IFC agent:     {'✅ available' if _cad_ifc_available else '⚠️  not available'}")
+    print(f"🔄 Ingestion graph:   {'✅ LangGraph pipeline' if _ingestion_graph_available else '⚠️  fallback (direct)'}")
 
     # ── News pipeline scheduler (every 4 days) ────────────────────────────
     if _news_pipeline_available:

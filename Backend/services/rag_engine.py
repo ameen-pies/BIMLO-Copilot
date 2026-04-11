@@ -149,6 +149,9 @@ class AgentState(TypedDict):
     # voice call optimisation — skips expensive judge/source/retry nodes
     voice_mode: bool
 
+    # internal: stores chunks from prior iterative_rag iterations for merge in rerank_merge
+    _prev_retrieved_chunks: List[Dict]
+
 
 MAX_ITER = 3
 MAX_RETRIES = 1  # Max retries for quality issues (was 2 — caused up to 7 LLM calls per query)
@@ -653,6 +656,7 @@ class RAGEngine:
             "_route_log": route_log or [],
             "route": initial_route,
             "retrieved_chunks": [],
+            "_prev_retrieved_chunks": [],
             "retrieval_iterations": 0,
             "sub_queries": [],
             "response_plan": None,
@@ -709,9 +713,12 @@ class RAGEngine:
 
     # Default fallbacks — used when LLM generation fails or times out
     _DEFAULT_STATUS_MSGS = {
-        "router":          ("🔍", "Understanding your question…"),
-        "retrieve":        ("📂", "Searching through documents…"),
-        "check_retrieval": ("🔎", "Checking search results…"),
+        "router":           ("🔍", "Understanding your question…"),
+        "retrieve_vector":  ("📂", "Searching through documents…"),
+        "retrieve_graph":   ("🕸️", "Traversing knowledge graph…"),
+        "rerank_merge":     ("🏆", "Re-ranking results for precision…"),
+        "retrieve":         ("📂", "Searching through documents…"),
+        "check_retrieval":  ("🔎", "Checking search results…"),
         "rewrite_query":   ("✏️",  "Refining the search…"),
         "judge_plan":      ("🧠", "Planning the response…"),
         "synthesise":      ("✍️",  "Generating answer…"),
@@ -828,11 +835,16 @@ Now generate for: "{q}" """
             return _wrapped
 
         # Add nodes
-        workflow.add_node("router",          _wrap("router",          self.router))
-        workflow.add_node("direct_answer",   _wrap("direct_answer",   self.direct_answer))
-        workflow.add_node("retrieve",        _wrap("retrieve",        self.retrieve))
-        workflow.add_node("check_retrieval", _wrap("check_retrieval", self.check_retrieval))
-        workflow.add_node("rewrite_query",   _wrap("rewrite_query",   self.rewrite_query))
+        workflow.add_node("router",           _wrap("router",           self.router))
+        workflow.add_node("direct_answer",    _wrap("direct_answer",    self.direct_answer))
+        # Three-stage retrieval pipeline — each gets its own node for traceability
+        workflow.add_node("retrieve_vector",  _wrap("retrieve_vector",  self.retrieve_vector))
+        workflow.add_node("retrieve_graph",   _wrap("retrieve_graph",   self.retrieve_graph))
+        workflow.add_node("rerank_merge",     _wrap("rerank_merge",     self.rerank_merge))
+        # Legacy single retrieve node (used by rewrite_query loop only)
+        workflow.add_node("retrieve",         _wrap("retrieve",         self.retrieve))
+        workflow.add_node("check_retrieval",  _wrap("check_retrieval",  self.check_retrieval))
+        workflow.add_node("rewrite_query",    _wrap("rewrite_query",    self.rewrite_query))
         workflow.add_node("judge_plan",      _wrap("judge_plan",      self.judge_plan))
         workflow.add_node("synthesise",      _wrap("synthesise",      self.synthesise))
         workflow.add_node("judge_evaluate",  _wrap("judge_evaluate",  self.judge_evaluate))
@@ -845,21 +857,25 @@ Now generate for: "{q}" """
         # Entry point
         workflow.set_entry_point("router")
 
-        # Router edges
+        # Router edges — doc retrieval routes now enter the 3-stage pipeline
         workflow.add_conditional_edges(
             "router",
             lambda s: s["route"],
             {
-                "direct": "direct_answer",
-                "rag": "retrieve",
-                "iterative_rag": "retrieve",
-                "analytics": "retrieve",
-                "transform": "retrieve",   # fetch doc content, then transform
-                "define": "define_node",   # goes straight to Wikipedia — no doc retrieval
-                "graph": "retrieve",       # fetch doc content, then build chart
-                "report": "retrieve",      # fetch doc content, then write report
+                "direct":        "direct_answer",
+                "rag":           "retrieve_vector",
+                "iterative_rag": "retrieve_vector",
+                "analytics":     "retrieve_vector",
+                "transform":     "retrieve_vector",
+                "define":        "define_node",    # Wikipedia — no doc retrieval
+                "graph":         "retrieve_vector",
+                "report":        "retrieve_vector",
             }
         )
+        # Three-stage retrieval pipeline edges
+        workflow.add_edge("retrieve_vector", "retrieve_graph")
+        workflow.add_edge("retrieve_graph",  "rerank_merge")
+        workflow.add_edge("rerank_merge",    "check_retrieval")
 
         # Direct answer ends
         workflow.add_edge("direct_answer", END)
@@ -1228,17 +1244,26 @@ Reply with ONE word only — the route name."""
     #  RETRIEVAL NODES                                                    #
     # ------------------------------------------------------------------ #
 
-    def retrieve(self, state: AgentState) -> AgentState:
+    # ─────────────────────────────────────────────────────────────────────
+    # RETRIEVAL PIPELINE — three dedicated LangGraph nodes
+    #
+    #   retrieve_vector  →  retrieve_graph  →  rerank_merge
+    #
+    # Each has its own state slice, status callback, and error isolation.
+    # The old monolithic retrieve() is kept as a private helper only for
+    # the iterative_rag loop (rewrite_query → retrieve → check_retrieval).
+    # ─────────────────────────────────────────────────────────────────────
+
+    def retrieve_vector(self, state: AgentState) -> AgentState:
         """
-        Retrieve relevant chunks from vector store, then:
-          1. Merge with graph RAG results (if query is relationship-focused)
-          2. Re-rank the combined pool with a cross-encoder for precision
+        Node 1/3: fetch up to fetch_k candidates from ChromaDB.
+        Stores raw results in retrieved_chunks; graph and reranker run next.
         """
         query = state["query"]
         top_k = state["top_k"]
         iteration = state["retrieval_iterations"] + 1
 
-        print(f"🔎 Retrieval #{iteration} (+{top_k} chunks) → ", end="")
+        print(f"🔎 [retrieve_vector] #{iteration} (+{top_k} candidates) → ", end="")
 
         # If the query explicitly names a file, restrict search to that file only
         filter_dict = None
@@ -1250,7 +1275,7 @@ Reply with ONE word only — the route name."""
                 print(f"[filtered to {fname}] ", end="")
                 break
 
-        # ── Step 1: Vector retrieval — fetch MORE candidates for re-ranking ──
+        # Fetch MORE candidates than top_k so the reranker has room to work
         try:
             from reranker import get_fetch_k
             fetch_k = get_fetch_k(top_k)
@@ -1262,26 +1287,44 @@ Reply with ONE word only — the route name."""
         except Exception:
             results = self.vs.search(query, top_k=fetch_k)
 
-        # ── Step 2: Graph RAG — inject relationship-aware context ─────────────
-        graph_chunks = []
+        print(f"{len(results)} vector chunks")
+
+        return {
+            **state,
+            "retrieved_chunks": results,
+            "retrieval_iterations": iteration,
+        }
+
+    def retrieve_graph(self, state: AgentState) -> AgentState:
+        """
+        Node 2/3: fetch relationship-aware context from the Neo4j knowledge graph.
+        Only runs when the query contains graph-traversal signals (topology, connected-to,
+        etc.).  Results are APPENDED to retrieved_chunks from the previous node.
+        Skipped silently if graph_rag is unavailable or the query has no graph signals.
+        """
+        query  = state["query"]
+        chunks = state["retrieved_chunks"]
+
+        graph_chunks: List[Dict] = []
         try:
             from graph_rag import get_engine as _get_graph_engine, is_graph_query
             if is_graph_query(query):
-                self._emit("retrieve", "🕸️", "Traversing knowledge graph…")
+                self._emit("retrieve_graph", "🕸️", "Traversing knowledge graph…")
                 graph_engine = _get_graph_engine()
                 if graph_engine.available:
                     graph_chunks = graph_engine.query(query)
                     if graph_chunks:
-                        print(f"[+{len(graph_chunks)} graph chunks] ", end="")
+                        print(f"🕸️  [retrieve_graph] +{len(graph_chunks)} graph chunks")
         except ImportError:
-            pass
+            pass  # graph_rag optional — vector-only mode
         except Exception as e:
-            print(f"[graph_rag error: {e}] ", end="")
+            print(f"⚠️  [retrieve_graph] error: {e}")
 
-        # ── Step 3: Merge vector + graph results ─────────────────────────────
-        combined = graph_chunks + results  # graph chunks get priority in sort
+        if not graph_chunks:
+            return state  # nothing to merge, pass through unchanged
 
-        # Deduplicate by text fingerprint
+        # Merge graph chunks ahead of vector results, deduplicate
+        combined = graph_chunks + chunks
         seen: set = set()
         unique: List[Dict] = []
         for c in combined:
@@ -1290,20 +1333,48 @@ Reply with ONE word only — the route name."""
                 seen.add(txt)
                 unique.append(c)
 
-        # ── Step 4: Cross-encoder re-ranking ─────────────────────────────────
+        return {**state, "retrieved_chunks": unique}
+
+    def rerank_merge(self, state: AgentState) -> AgentState:
+        """
+        Node 3/3: cross-encoder re-ranking + graph-chunk boost + iterative merge.
+
+        - Scores every (query, chunk) pair with BAAI/bge-reranker-v2-m3.
+        - Graph chunks get +0.3 additive boost AFTER honest scoring, so they
+          surface above vector chunks for relationship queries but only when
+          genuinely relevant.
+        - Merges with chunks from prior retrieval iterations (iterative_rag).
+        - Emits status callbacks for files found and visual/table chunks.
+        """
+        query  = state["query"]
+        top_k  = state["top_k"]
+        unique = state["retrieved_chunks"]
+
+        # ── Cross-encoder re-ranking ──────────────────────────────────────────
         try:
             from reranker import rerank
-            # Graph chunks have rerank_score=2.0 pre-set — reranker will
-            # sort them correctly alongside vector chunks
-            unique = rerank(query, unique, top_k=top_k)
+            ranked = rerank(query, unique, top_k=top_k * 2)  # extra budget for boost sort
+            # Post-rerank additive boost for graph knowledge chunks
+            n_graph = 0
+            for c in ranked:
+                if c.get("_is_graph_chunk") or c.get("metadata", {}).get("source") == "knowledge_graph":
+                    boosted = min(1.0, c.get("rerank_score", 0.5) + 0.3)
+                    c["rerank_score"] = boosted
+                    c["distance"]     = 1.0 - boosted
+                    n_graph += 1
+            if n_graph:
+                ranked = sorted(ranked, key=lambda c: c.get("rerank_score", 0), reverse=True)
+            unique = ranked[:top_k]
+            if n_graph:
+                print(f"🏆 [rerank_merge] {len(unique)} chunks (graph boost: {n_graph})")
         except ImportError:
             unique = unique[:top_k]
         except Exception as e:
-            print(f"[reranker error: {e}] ", end="")
+            print(f"⚠️  [rerank_merge] reranker error: {e}")
             unique = unique[:top_k]
 
-        # Merge with existing chunks from prior iterations (iterative RAG)
-        existing = state["retrieved_chunks"]
+        # ── Merge with prior iteration chunks (iterative_rag loop) ───────────
+        existing = [c for c in state.get("_prev_retrieved_chunks", [])]
         if existing:
             all_chunks = existing + unique
             seen2: set = set()
@@ -1313,33 +1384,45 @@ Reply with ONE word only — the route name."""
                 if txt not in seen2:
                     seen2.add(txt)
                     final.append(c)
-            unique = final[:top_k * 2]  # cap total
+            unique = final[:top_k * 2]
 
-        print(f"{len(unique)} total chunks")
+        print(f"📦 [rerank_merge] {len(unique)} total chunks ready")
 
-        # Emit which files were found
+        # ── Status emissions ─────────────────────────────────────────────────
         filenames = list(dict.fromkeys(
             c["metadata"].get("filename", "unknown") for c in unique
         ))
         if filenames:
             if len(filenames) == 1:
-                self._emit("retrieve", "📄", f"Reading {filenames[0]}…")
+                self._emit("rerank_merge", "📄", f"Reading {filenames[0]}…")
             else:
-                self._emit("retrieve", "📂", f"Found {len(filenames)} files: {', '.join(filenames[:3])}…")
+                self._emit("rerank_merge", "📂", f"Found {len(filenames)} files: {', '.join(filenames[:3])}…")
 
-        # Emit a note if any chunk contains vision-described images or tables
         visual_chunks = [c for c in unique if c["metadata"].get("has_images")]
         table_chunks  = [c for c in unique if c["metadata"].get("has_tables")]
         if visual_chunks:
-            self._emit("retrieve", "🖼️", f"Found {len(visual_chunks)} chunk(s) with diagram descriptions…")
+            self._emit("rerank_merge", "🖼️", f"Found {len(visual_chunks)} chunk(s) with diagram descriptions…")
         if table_chunks:
-            self._emit("retrieve", "📊", f"Found {len(table_chunks)} chunk(s) with table data…")
+            self._emit("rerank_merge", "📊", f"Found {len(table_chunks)} chunk(s) with table data…")
 
         return {
             **state,
-            "retrieved_chunks": unique,
-            "retrieval_iterations": iteration,
+            "retrieved_chunks":       unique,
+            "_prev_retrieved_chunks": unique,  # stored for next iteration if iterative_rag
         }
+
+    # ── Legacy retrieve() — kept for backwards compat; delegates to the three nodes ──
+
+    def retrieve(self, state: AgentState) -> AgentState:
+        """
+        Thin orchestrator kept so that the iterative_rag loop edge
+        (rewrite_query → retrieve → check_retrieval) still works without
+        changing the graph topology.  Calls the three dedicated nodes in sequence.
+        """
+        state = self.retrieve_vector(state)
+        state = self.retrieve_graph(state)
+        state = self.rerank_merge(state)
+        return state
 
     def check_retrieval(self, state: AgentState) -> AgentState:
         """Check if retrieval quality is good enough."""

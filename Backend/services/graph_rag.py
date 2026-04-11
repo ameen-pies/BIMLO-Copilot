@@ -581,7 +581,7 @@ class GraphRAGEngine:
             chunks.append({
                 "text":         text,
                 "distance":     0.05,  # treat graph results as high-confidence
-                "rerank_score": 2.0,   # always surface above vector results
+                "_is_graph_chunk": True,  # flagged for post-rerank boost in retrieve node
                 "id":           f"graph_{entity_name}",
                 "metadata": {
                     "filename":    info["filename"],
