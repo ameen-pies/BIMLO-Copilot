@@ -28,10 +28,12 @@ import AuthModal from "@/components/AuthModal";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface AuthUser {
-  token:    string;
-  user_id:  string;
-  username: string;
-  email:    string;
+  token:         string;
+  user_id:       string;
+  username:      string;
+  email:         string;
+  avatar_url?:   string;
+  display_name?: string;
 }
 
 export type PendingAction = (() => void) | null;

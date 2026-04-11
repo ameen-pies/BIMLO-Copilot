@@ -277,10 +277,12 @@ class LoginRequest(BaseModel):
     password: str
 
 class AuthResponse(BaseModel):
-    token:    str
-    user_id:  str
-    username: str
-    email:    str
+    token:        str
+    user_id:      str
+    username:     str
+    email:        str
+    avatar_url:   str = ""
+    display_name: str = ""
 
 class SaveConversationRequest(BaseModel):
     conversation_id: str
@@ -382,11 +384,40 @@ def logout(user: Dict = Depends(require_user), authorization: Optional[str] = He
     return {"ok": True}
 
 
+@router.delete("/delete-account")
+def delete_account(user: Dict = Depends(require_user), authorization: Optional[str] = Header(default=None)):
+    """
+    Permanently delete the authenticated user and all their data:
+    conversations, messages, documents, and tokens.
+    """
+    user_id = user["user_id"]
+
+    # Revoke token from cache + Neo4j
+    if authorization and authorization.startswith("Bearer "):
+        _revoke_token(authorization.split(" ", 1)[1])
+
+    # Delete everything linked to the user in one Cypher sweep
+    _run(
+        """
+        MATCH (u:User {id: $user_id})
+        OPTIONAL MATCH (u)-[:HAS_TOKEN]->(t:Token)
+        OPTIONAL MATCH (u)-[:HAS_CONVERSATION]->(c:Conversation)
+        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+        OPTIONAL MATCH (u)-[:UPLOADED]->(d:Document)
+        DETACH DELETE u, t, c, m, d
+        """,
+        {"user_id": user_id},
+    )
+    print(f"🗑️  auth: deleted account user_id={user_id}")
+    return {"ok": True}
+
+
 class GoogleTokenRequest(BaseModel):
     access_token: str
     email:        str
     name:         str
-    sub:          str   # Google user ID
+    sub:          str        # Google user ID
+    picture:      str = ""  # Google profile picture URL
 
 
 @router.post("/google-token", response_model=AuthResponse)
@@ -426,7 +457,8 @@ def google_token_auth(req: GoogleTokenRequest):
     if rows:
         user_id  = rows[0]["id"]
         username = rows[0]["username"]
-        _run("MATCH (u:User {id: $id}) SET u.last_seen = $now", {"id": user_id, "now": now})
+        _run("MATCH (u:User {id: $id}) SET u.last_seen = $now, u.picture = $picture, u.display_name = $display_name",
+             {"id": user_id, "now": now, "picture": req.picture, "display_name": req.name})
         print(f"✅ auth/google-token: existing user '{username}' ({email})")
     else:
         user_id = str(uuid.uuid4())
@@ -444,15 +476,18 @@ def google_token_auth(req: GoogleTokenRequest):
             CREATE (u:User {
                 id: $id, email: $email, username: $username,
                 password_hash: '', google_auth: true,
+                picture: $picture,
+                display_name: $display_name,
                 created_at: $now, last_seen: $now
             })
             """,
-            {"id": user_id, "email": email, "username": username, "now": now},
+            {"id": user_id, "email": email, "username": username,
+             "picture": req.picture, "display_name": req.name, "now": now},
         )
         print(f"✅ auth/google-token: new user '{username}' ({email})")
 
     token = _issue_token(user_id, username, email)
-    return AuthResponse(token=token, user_id=user_id, username=username, email=email)
+    return AuthResponse(token=token, user_id=user_id, username=username, email=email, avatar_url=req.picture, display_name=req.name)
 
 
 @router.get("/me")

@@ -5,10 +5,12 @@ import { X, Loader2, Eye, EyeOff, LogIn, UserPlus } from "lucide-react";
 declare global { interface Window { google?: any; } }
 
 export interface AuthUser {
-  token:    string;
-  user_id:  string;
-  username: string;
-  email:    string;
+  token:         string;
+  user_id:       string;
+  username:      string;
+  email:         string;
+  avatar_url?:   string;
+  display_name?: string;
 }
 
 interface Props {
@@ -128,15 +130,24 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
               headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
             });
             const info = await infoRes.json();
+            console.log("[BIMLO] Google userinfo full response:", info);
+            console.log("[BIMLO] picture field:", info.picture);
             // Send to our backend — we'll pass the access token, backend verifies via userinfo
             const { data, error: err } = await apiPost("/auth/google-token", {
               access_token: tokenResponse.access_token,
               email: info.email,
               name: info.name,
               sub: info.sub,
+              picture: info.picture,
             });
+            console.log("[BIMLO] /auth/google-token response:", data, "error:", err);
             if (err) { setError(err); }
-            else if (data) { onClose(); setTimeout(() => onSuccess(data), 50); }
+            else if (data) {
+              const userWithAvatar = { ...data, avatar_url: info.picture };
+              console.log("[BIMLO] calling onSuccess with:", userWithAvatar);
+              onClose();
+              setTimeout(() => onSuccess(userWithAvatar), 50);
+            }
           } catch { setError("Google sign-in failed. Try again."); }
           finally { setLoading(false); }
         },

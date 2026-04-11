@@ -29,6 +29,18 @@ from services.report_agent import (
 # SharedContext also exposes set_analytics — call it after every query
 # so the report agent can embed charts generated in analytics routes.
 
+# Ingestion pipeline — LangGraph-based, replaces fire-and-forget thread
+try:
+    from services.ingestion_graph import run_ingestion_pipeline
+    _ingestion_graph_available = True
+except ImportError:
+    try:
+        from ingestion_graph import run_ingestion_pipeline
+        _ingestion_graph_available = True
+    except ImportError:
+        _ingestion_graph_available = False
+        print("⚠️  ingestion_graph not found — falling back to direct indexing")
+
 # News pipeline — scheduled global cache (every 4 days)
 try:
     from news_pipeline import (

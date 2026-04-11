@@ -6,18 +6,21 @@ import { useAuth } from "@/context/AuthContext";
 import { useState, useRef, useEffect } from "react";
 
 // ── Reusable profile bubble used by Navbar, Chat, CallPage, NewsPage ─────────
-export interface ProfileUser { username: string; email: string; }
+export interface ProfileUser { username: string; email: string; avatar_url?: string; display_name?: string; }
 
 export const ProfileBubble = ({
   user,
   onLogout,
+  onDeleteAccount,
   align = "right",
 }: {
   user: ProfileUser;
   onLogout: () => void;
+  onDeleteAccount: () => void;
   align?: "right" | "left";
 }) => {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen]       = useState(false);
+  const [confirm, setConfirm] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -28,7 +31,9 @@ export const ProfileBubble = ({
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const initial = user.username[0].toUpperCase();
+  const initial      = user.username[0].toUpperCase();
+  const hasPfp       = !!user.avatar_url;
+  const displayName  = user.display_name || user.username;
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -38,20 +43,29 @@ export const ProfileBubble = ({
         title={user.username}
         style={{
           width: 34, height: 34, borderRadius: "50%",
-          background: open
+          background: hasPfp ? "transparent" : open
             ? "linear-gradient(135deg,#6366f1,#3b82f6)"
             : "linear-gradient(135deg,#3b82f6,#6366f1)",
           border: open ? "2px solid rgba(99,102,241,0.6)" : "2px solid rgba(99,102,241,0.25)",
           cursor: "pointer", color: "#fff",
           fontSize: 13, fontWeight: 700,
           display: "flex", alignItems: "center", justifyContent: "center",
+          overflow: "hidden",
           boxShadow: open
             ? "0 0 0 3px rgba(99,102,241,0.2), 0 8px 24px rgba(99,102,241,0.3)"
             : "0 0 0 2px rgba(99,102,241,0.15)",
           transition: "all 0.18s cubic-bezier(0.4,0,0.2,1)",
+          padding: 0,
         }}
       >
-        {initial}
+        {hasPfp ? (
+          <img
+            src={user.avatar_url}
+            alt={user.username}
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : initial}
       </button>
 
       {/* Dropdown */}
@@ -83,17 +97,24 @@ export const ProfileBubble = ({
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{
               width: 38, height: 38, borderRadius: "50%",
-              background: "linear-gradient(135deg,#3b82f6,#6366f1)",
+              background: hasPfp ? "transparent" : "linear-gradient(135deg,#3b82f6,#6366f1)",
               display: "flex", alignItems: "center", justifyContent: "center",
               fontSize: 15, fontWeight: 800, color: "#fff",
               boxShadow: "0 4px 12px rgba(99,102,241,0.35)",
-              flexShrink: 0,
+              flexShrink: 0, overflow: "hidden",
             }}>
-              {initial}
+              {hasPfp ? (
+                <img
+                  src={user.avatar_url}
+                  alt={user.username}
+                  referrerPolicy="no-referrer"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+              ) : initial}
             </div>
             <div style={{ minWidth: 0 }}>
               <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "hsl(var(--foreground))", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {user.username}
+                {displayName}
               </p>
               <p style={{ margin: "2px 0 0", fontSize: 11, color: "rgba(148,163,184,0.8)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {user.email}
@@ -123,6 +144,67 @@ export const ProfileBubble = ({
             </svg>
             Log out
           </button>
+
+          {/* Divider */}
+          <div style={{ height: "1px", background: "hsl(var(--border))", margin: "4px 16px" }} />
+
+          {/* Delete account — two-step confirm */}
+          {!confirm ? (
+            <button
+              onClick={() => setConfirm(true)}
+              style={{
+                width: "100%", textAlign: "left",
+                padding: "9px 16px",
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 13, fontWeight: 500,
+                color: "hsl(var(--muted-foreground))",
+                display: "flex", alignItems: "center", gap: 8,
+                transition: "background 0.12s, color 0.12s",
+              }}
+              onMouseEnter={e => {
+                (e.currentTarget as HTMLButtonElement).style.background = "rgba(248,113,113,0.06)";
+                (e.currentTarget as HTMLButtonElement).style.color = "#f87171";
+              }}
+              onMouseLeave={e => {
+                (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                (e.currentTarget as HTMLButtonElement).style.color = "hsl(var(--muted-foreground))";
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+              </svg>
+              Delete account
+            </button>
+          ) : (
+            <div style={{ padding: "10px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+              <p style={{ margin: 0, fontSize: 12, color: "#f87171", fontWeight: 600 }}>
+                This is permanent. Are you sure?
+              </p>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  onClick={() => { setConfirm(false); setOpen(false); onDeleteAccount(); }}
+                  style={{
+                    flex: 1, padding: "7px 0", borderRadius: 8, border: "none",
+                    background: "#f87171", color: "#fff",
+                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  }}
+                >
+                  Yes, delete
+                </button>
+                <button
+                  onClick={() => setConfirm(false)}
+                  style={{
+                    flex: 1, padding: "7px 0", borderRadius: 8,
+                    border: "1px solid hsl(var(--border))",
+                    background: "transparent", color: "hsl(var(--foreground))",
+                    fontSize: 12, fontWeight: 600, cursor: "pointer",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -139,7 +221,18 @@ const scrollTo = (id: string, extraOffset = 0) => (e: React.MouseEvent) => {
 };
 
 const Navbar = () => {
-  const { currentUser, showAuthModal, logout } = useAuth();
+  const { currentUser, showAuthModal, logout, setCurrentUser } = useAuth();
+
+  const deleteAccount = async () => {
+    if (!currentUser?.token) return;
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/auth/delete-account`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${currentUser.token}` },
+      });
+    } catch { /* ignore — wipe local state regardless */ }
+    setCurrentUser(null);
+  };
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50" style={{
@@ -176,9 +269,8 @@ const Navbar = () => {
 
         <div className="flex items-center gap-2">
           {currentUser ? (
-            /* ── Logged-in: profile bubble + theme ── */
             <>
-              <ProfileBubble user={currentUser} onLogout={logout} align="right" />
+              <ProfileBubble user={currentUser} onLogout={logout} onDeleteAccount={deleteAccount} align="right" />
               <ThemeToggle />
             </>
           ) : (
