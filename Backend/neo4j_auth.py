@@ -382,6 +382,79 @@ def logout(user: Dict = Depends(require_user), authorization: Optional[str] = He
     return {"ok": True}
 
 
+class GoogleTokenRequest(BaseModel):
+    access_token: str
+    email:        str
+    name:         str
+    sub:          str   # Google user ID
+
+
+@router.post("/google-token", response_model=AuthResponse)
+def google_token_auth(req: GoogleTokenRequest):
+    """
+    Accept a Google OAuth2 access token + basic user info from the frontend.
+    Verifies the token is valid by hitting Google's tokeninfo endpoint,
+    then find-or-create the user in Neo4j.
+    """
+    import urllib.request, json as _json
+
+    # Verify the access token is genuine
+    try:
+        url = f"https://www.googleapis.com/oauth2/v3/tokeninfo?access_token={req.access_token}"
+        with urllib.request.urlopen(url, timeout=8) as r:
+            info = _json.loads(r.read())
+        if info.get("error_description"):
+            raise HTTPException(401, f"Invalid Google token: {info['error_description']}")
+        # Make sure the email matches what the frontend sent
+        if info.get("email", "").lower() != req.email.strip().lower():
+            raise HTTPException(401, "Token email mismatch")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(401, f"Google token verification failed: {e}")
+
+    email    = req.email.strip().lower()
+    now      = datetime.utcnow().isoformat()
+    name     = req.name or email.split("@")[0]
+    username = "".join(c for c in name if c.isalnum() or c in "_-")[:30] or "user"
+
+    rows = _run(
+        "MATCH (u:User {email: $email}) RETURN u.id AS id, u.username AS username",
+        {"email": email},
+    )
+
+    if rows:
+        user_id  = rows[0]["id"]
+        username = rows[0]["username"]
+        _run("MATCH (u:User {id: $id}) SET u.last_seen = $now", {"id": user_id, "now": now})
+        print(f"✅ auth/google-token: existing user '{username}' ({email})")
+    else:
+        user_id = str(uuid.uuid4())
+        base = username
+        suffix = 0
+        while True:
+            check = _run("MATCH (u:User {username: $u}) RETURN u.id LIMIT 1", {"u": username})
+            if not check:
+                break
+            suffix += 1
+            username = f"{base}{suffix}"
+
+        _run(
+            """
+            CREATE (u:User {
+                id: $id, email: $email, username: $username,
+                password_hash: '', google_auth: true,
+                created_at: $now, last_seen: $now
+            })
+            """,
+            {"id": user_id, "email": email, "username": username, "now": now},
+        )
+        print(f"✅ auth/google-token: new user '{username}' ({email})")
+
+    token = _issue_token(user_id, username, email)
+    return AuthResponse(token=token, user_id=user_id, username=username, email=email)
+
+
 @router.get("/me")
 def me(user: Dict = Depends(require_user)):
     rows = _run(

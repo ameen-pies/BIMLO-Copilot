@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Loader2, Eye, EyeOff, LogIn, UserPlus } from "lucide-react";
 
+declare global { interface Window { google?: any; } }
+
 export interface AuthUser {
   token:    string;
   user_id:  string;
@@ -16,6 +18,7 @@ interface Props {
 }
 
 const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
 async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; error?: string }> {
   try {
@@ -105,6 +108,52 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
     document.body.style.overflow = open ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [open]);
+
+
+  const handleGoogleClick = () => {
+    if (!GOOGLE_CLIENT_ID) { setError("Google Sign-In not configured."); return; }
+
+    const loadAndOpen = () => {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: "openid email profile",
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse.error) { setError("Google sign-in failed."); return; }
+          // Exchange access token for user info, then send to backend as credential
+          setLoading(true);
+          setError(null);
+          try {
+            // Get user info from Google
+            const infoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+              headers: { Authorization: `Bearer ${tokenResponse.access_token}` },
+            });
+            const info = await infoRes.json();
+            // Send to our backend — we'll pass the access token, backend verifies via userinfo
+            const { data, error: err } = await apiPost("/auth/google-token", {
+              access_token: tokenResponse.access_token,
+              email: info.email,
+              name: info.name,
+              sub: info.sub,
+            });
+            if (err) { setError(err); }
+            else if (data) { onClose(); setTimeout(() => onSuccess(data), 50); }
+          } catch { setError("Google sign-in failed. Try again."); }
+          finally { setLoading(false); }
+        },
+      });
+      client.requestAccessToken({ prompt: "select_account" });
+    };
+
+    if (window.google?.accounts?.oauth2) {
+      loadAndOpen();
+    } else {
+      const script = document.createElement("script");
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.onload = loadAndOpen;
+      document.head.appendChild(script);
+    }
+  };
 
   const handleSubmit = async () => {
     setError(null);
@@ -222,7 +271,7 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
 
               {/* Google Sign-In */}
               <button
-                onClick={() => { window.location.href = `${BASE}/auth/google`; }}
+                onClick={handleGoogleClick}
                 style={{
                   width: "100%", display: "flex", alignItems: "center", justifyContent: "center",
                   gap: 10, padding: "10px", borderRadius: 10, cursor: "pointer",
