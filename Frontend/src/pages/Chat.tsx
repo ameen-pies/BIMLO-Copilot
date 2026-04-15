@@ -4275,15 +4275,6 @@ const Chat = () => {
     preview: string,
     msgs: Message[],
   ) => {
-    // Always cache locally so switching is instant even if DB fetch fails
-    try {
-      const serializable = msgs.map(m => ({
-        ...m,
-        timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
-      }));
-      localStorage.setItem(`conv_msgs_${convId}`, JSON.stringify(serializable));
-    } catch {}
-
     if (!currentUser) return;
     try {
       const base = getApiBase();
@@ -4295,11 +4286,25 @@ const Chat = () => {
           session_id: sid,
           title,
           preview,
+          chat_type: "rag",
           messages: msgs.map(m => ({
             id: m.id,
             role: m.role,
             content: m.content,
             timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
+            // Rich payload — everything beyond core text fields
+            sources:          m.sources          ?? undefined,
+            confidence:       m.confidence       ?? undefined,
+            analytics:        m.analytics        ?? undefined,
+            reportId:         m.reportId         ?? undefined,
+            reportTitle:      m.reportTitle      ?? undefined,
+            reportMeta:       m.reportMeta       ?? undefined,
+            thinkingSteps:    m.thinkingSteps    ?? undefined,
+            voiceTranscript:  m.voiceTranscript  ?? undefined,
+            callCard:         m.callCard         ?? undefined,
+            attachedDocIds:   m.attachedDocIds   ?? undefined,
+            navAction:        m.navAction        ?? undefined,
+            interrupted:      m.interrupted      ?? undefined,
           })),
         }),
       });
@@ -4812,7 +4817,7 @@ const Chat = () => {
 
     const sid = (conv as any).sessionId ?? null;
 
-    // 1. In-memory fast path (current session or previously cached)
+    // 1. In-memory fast path (already loaded this session)
     if (conv.messages && conv.messages.length > 0) {
       setMessages(conv.messages);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
@@ -4820,26 +4825,33 @@ const Chat = () => {
       return;
     }
 
-    // 2. localStorage cache — instant, no network needed
-    try {
-      const cached = localStorage.getItem(`conv_msgs_${conv.id}`);
-      if (cached) {
-        const parsed: Message[] = JSON.parse(cached).map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) }));
-        if (parsed.length > 0) {
-          setMessages(parsed);
-          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: parsed } : c));
-          if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
-          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
-          return;
-        }
-      }
-    } catch {}
-
-    // 3. Fetch from backend — try session history first (reliable), then auth endpoint as fallback
+    // 2. Fetch from DB — auth conversations endpoint (has full payload)
     const base = getApiBase();
     const authHeaders = { ...(getAuthHeader() as any), "Content-Type": "application/json" };
 
-    // 3a. Session history endpoint (works for any session stored in Neo4j)
+    if (currentUser) {
+      try {
+        const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
+        if (res.ok) {
+          const data = await res.json();
+          const restored: Message[] = (data.messages ?? []).map((m: any) => ({
+            id:        m.id ?? Date.now().toString(),
+            role:      m.role as "user" | "assistant",
+            content:   m.content ?? "",
+            timestamp: new Date(m.timestamp ?? Date.now()),
+            // Spread the rich payload back onto the message object
+            ...(m.payload ?? {}),
+          }));
+          setMessages(restored);
+          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
+          if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
+          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+          return;
+        }
+      } catch (e) { console.error("loadConversation from DB failed:", e); }
+    }
+
+    // 3. Fallback — session history endpoint (text-only, no payload)
     if (sid) {
       try {
         const res = await fetch(`${base}/sessions/${sid}/history`);
@@ -4848,40 +4860,18 @@ const Chat = () => {
           const turns: Array<{ role: string; content: string }> = data.messages ?? [];
           if (turns.length > 0) {
             const restored: Message[] = turns.map((m, i) => ({
-              id: `${conv.id}-${i}`,
-              role: m.role as "user" | "assistant",
-              content: m.content,
+              id:        `${conv.id}-${i}`,
+              role:      m.role as "user" | "assistant",
+              content:   m.content,
               timestamp: new Date(),
             }));
             setMessages(restored);
             setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
-            try { localStorage.setItem(`conv_msgs_${conv.id}`, JSON.stringify(restored.map(m => ({ ...m, timestamp: m.timestamp.toISOString() })))); } catch {}
             setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid);
             setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
-            return;
           }
         }
       } catch (e) { console.error("session history fetch failed:", e); }
-    }
-
-    // 3b. Auth conversations endpoint fallback
-    if (currentUser) {
-      try {
-        const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
-        if (res.ok) {
-          const data = await res.json();
-          const restored: Message[] = (data.messages ?? []).map((m: any) => ({
-            id: m.id ?? Date.now().toString(),
-            role: m.role as "user" | "assistant",
-            content: m.content ?? "",
-            timestamp: new Date(m.timestamp ?? Date.now()),
-          }));
-          setMessages(restored);
-          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
-          if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
-          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
-        }
-      } catch (e) { console.error("loadConversation from DB failed:", e); }
     }
   };
 

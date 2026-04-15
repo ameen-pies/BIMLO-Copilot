@@ -126,6 +126,7 @@ def _setup_constraints():
         "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
         "CREATE CONSTRAINT user_email IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE",
         "CREATE CONSTRAINT conv_id IF NOT EXISTS FOR (c:Conversation) REQUIRE c.id IS UNIQUE",
+        "CREATE CONSTRAINT news_conv_id IF NOT EXISTS FOR (c:NewsConversation) REQUIRE c.id IS UNIQUE",
         "CREATE CONSTRAINT msg_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
         "CREATE CONSTRAINT doc_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
         "CREATE CONSTRAINT token_val IF NOT EXISTS FOR (t:Token) REQUIRE t.token IS UNIQUE",
@@ -291,6 +292,15 @@ class SaveConversationRequest(BaseModel):
     preview:         str
     messages:        List[Dict[str, Any]]
     doc_ids:         List[str] = []
+    chat_type:       str = "rag"   # "rag" | "news"
+
+
+class SaveNewsChatRequest(BaseModel):
+    conversation_id: str
+    session_id:      str
+    title:           str
+    preview:         str
+    messages:        List[Dict[str, Any]]
 
 class SaveDocumentRequest(BaseModel):
     doc_id:      str
@@ -507,19 +517,27 @@ def me(user: Dict = Depends(require_user)):
 
 @router.post("/conversations/save")
 def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require_user)):
-    """Upsert conversation + messages using execute_write (neo4j driver 5.x compatible)."""
+    """
+    Upsert conversation + messages.
+    Each message payload (sources, analytics, reportId, thinkingSteps, etc.)
+    is JSON-serialised into Message.payload so nothing is lost.
+    """
+    import json as _json
     now = datetime.utcnow().isoformat()
 
-    msgs_data = [
-        {
+    msgs_data = []
+    for idx, msg in enumerate(req.messages):
+        # Collect every field that isn't the core text fields into the payload
+        payload_dict = {k: v for k, v in msg.items()
+                        if k not in ("id", "role", "content", "timestamp")}
+        msgs_data.append({
             "msg_id":  msg.get("id") or str(uuid.uuid4()),
             "role":    msg.get("role", "user"),
             "content": msg.get("content", ""),
             "ts":      str(msg.get("timestamp", now)),
             "idx":     idx,
-        }
-        for idx, msg in enumerate(req.messages)
-    ]
+            "payload": _json.dumps(payload_dict, default=str) if payload_dict else "",
+        })
 
     def _work(tx):
         # Upsert conversation + link to user
@@ -530,6 +548,7 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
             SET   c.title      = $title,
                   c.preview    = $preview,
                   c.session_id = $session_id,
+                  c.chat_type  = $chat_type,
                   c.updated_at = $now,
                   c.created_at = CASE WHEN c.created_at IS NULL THEN $now ELSE c.created_at END
             """,
@@ -537,15 +556,16 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
             title=req.title or "",
             preview=req.preview or "",
             session_id=req.session_id or "",
+            chat_type=req.chat_type,
             now=now,
             user_id=user["user_id"],
         )
-        # Wipe old messages
+        # Wipe old messages (full replace on every save)
         tx.run(
             "MATCH (:Conversation {id: $conv_id})-[:CONTAINS]->(m:Message) DETACH DELETE m",
             conv_id=req.conversation_id,
         )
-        # Bulk insert new messages
+        # Bulk insert messages with rich payload
         if msgs_data:
             tx.run(
                 """
@@ -555,7 +575,8 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
                     id:        m.msg_id,
                     role:      m.role,
                     content:   m.content,
-                    timestamp: m.ts
+                    timestamp: m.ts,
+                    payload:   m.payload
                 })
                 CREATE (c)-[:CONTAINS {index: m.idx}]->(msg)
                 """,
@@ -591,11 +612,13 @@ def list_conversations(user: Dict = Depends(require_user)):
 
 @router.get("/conversations/{conversation_id}")
 def get_conversation(conversation_id: str, user: Dict = Depends(require_user)):
-    """Return a single conversation with all its messages."""
+    """Return a single conversation with all its messages + rich payload."""
+    import json as _json
     conv = _run(
         """
         MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation {id: $conv_id})
-        RETURN c.id AS id, c.title AS title, c.session_id AS session_id
+        RETURN c.id AS id, c.title AS title, c.session_id AS session_id,
+               c.chat_type AS chat_type
         """,
         {"user_id": user["user_id"], "conv_id": conversation_id},
     )
@@ -605,12 +628,24 @@ def get_conversation(conversation_id: str, user: Dict = Depends(require_user)):
     messages = _run(
         """
         MATCH (:Conversation {id: $conv_id})-[r:CONTAINS]->(m:Message)
-        RETURN m.id AS id, m.role AS role, m.content AS content, m.timestamp AS timestamp
+        RETURN m.id AS id, m.role AS role, m.content AS content,
+               m.timestamp AS timestamp, m.payload AS payload
         ORDER BY r.index ASC
         """,
         {"conv_id": conversation_id},
     )
-    return {**conv[0], "messages": messages}
+
+    enriched = []
+    for m in messages:
+        msg = dict(m)
+        raw = msg.pop("payload", "") or ""
+        try:
+            msg["payload"] = _json.loads(raw) if raw else {}
+        except Exception:
+            msg["payload"] = {}
+        enriched.append(msg)
+
+    return {**conv[0], "messages": enriched}
 
 
 @router.delete("/conversations/{conversation_id}")
@@ -671,6 +706,152 @@ def list_documents(user: Dict = Depends(require_user)):
         {"user_id": user["user_id"]},
     )
     return rows
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEWS CHAT CONVERSATION PERSISTENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/news-conversations/save")
+def save_news_conversation(req: SaveNewsChatRequest, user: Dict = Depends(require_user)):
+    """
+    Persist a news chat conversation to Neo4j as a NewsConversation node.
+    Messages include full payload (pinnedArticles, etc.).
+    """
+    import json as _json
+    now = datetime.utcnow().isoformat()
+
+    msgs_data = [
+        {
+            "msg_id":  msg.get("id") or str(uuid.uuid4()),
+            "role":    msg.get("role", "user"),
+            "content": msg.get("content", ""),
+            "ts":      str(msg.get("timestamp", now)),
+            "idx":     idx,
+            "payload": _json.dumps(
+                {k: v for k, v in msg.items()
+                 if k not in ("id", "role", "content", "timestamp")},
+                default=str,
+            ),
+        }
+        for idx, msg in enumerate(req.messages)
+    ]
+
+    def _work(tx):
+        tx.run(
+            """
+            MATCH (u:User {id: $user_id})
+            MERGE (u)-[:HAS_NEWS_CONVERSATION]->(c:NewsConversation {id: $conv_id})
+            SET   c.title      = $title,
+                  c.preview    = $preview,
+                  c.session_id = $session_id,
+                  c.updated_at = $now,
+                  c.created_at = CASE WHEN c.created_at IS NULL THEN $now ELSE c.created_at END
+            """,
+            conv_id=req.conversation_id,
+            title=req.title or "News Chat",
+            preview=req.preview or "",
+            session_id=req.session_id or "",
+            now=now,
+            user_id=user["user_id"],
+        )
+        tx.run(
+            "MATCH (:NewsConversation {id: $conv_id})-[:CONTAINS]->(m:Message) DETACH DELETE m",
+            conv_id=req.conversation_id,
+        )
+        if msgs_data:
+            tx.run(
+                """
+                MATCH (c:NewsConversation {id: $conv_id})
+                UNWIND $msgs AS m
+                CREATE (msg:Message {
+                    id:        m.msg_id,
+                    role:      m.role,
+                    content:   m.content,
+                    timestamp: m.ts,
+                    payload:   m.payload
+                })
+                CREATE (c)-[:CONTAINS {index: m.idx}]->(msg)
+                """,
+                conv_id=req.conversation_id,
+                msgs=msgs_data,
+            )
+
+    try:
+        driver = get_driver()
+        with driver.session(database=NEO4J_DATABASE) as session:
+            session.execute_write(_work)
+        return {"ok": True, "conversation_id": req.conversation_id}
+    except Exception as e:
+        print(f"❌ save_news_conversation error: {e}")
+        raise HTTPException(503, f"Database error: {e}")
+
+
+@router.get("/news-conversations")
+def list_news_conversations(user: Dict = Depends(require_user)):
+    """Return all news chat conversations for the user, newest first."""
+    rows = _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_NEWS_CONVERSATION]->(c:NewsConversation)
+        RETURN c.id AS id, c.title AS title, c.preview AS preview,
+               c.created_at AS created_at, c.updated_at AS updated_at,
+               c.session_id AS session_id
+        ORDER BY c.updated_at DESC
+        """,
+        {"user_id": user["user_id"]},
+    )
+    return rows
+
+
+@router.get("/news-conversations/{conversation_id}")
+def get_news_conversation(conversation_id: str, user: Dict = Depends(require_user)):
+    """Return a single news chat with all messages and their payloads."""
+    import json as _json
+    conv = _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_NEWS_CONVERSATION]->(c:NewsConversation {id: $conv_id})
+        RETURN c.id AS id, c.title AS title, c.session_id AS session_id
+        """,
+        {"user_id": user["user_id"], "conv_id": conversation_id},
+    )
+    if not conv:
+        raise HTTPException(404, "News conversation not found")
+
+    messages = _run(
+        """
+        MATCH (:NewsConversation {id: $conv_id})-[r:CONTAINS]->(m:Message)
+        RETURN m.id AS id, m.role AS role, m.content AS content,
+               m.timestamp AS timestamp, m.payload AS payload
+        ORDER BY r.index ASC
+        """,
+        {"conv_id": conversation_id},
+    )
+    enriched = []
+    for m in messages:
+        msg = dict(m)
+        raw = msg.pop("payload", "") or ""
+        try:
+            msg["payload"] = _json.loads(raw) if raw else {}
+        except Exception:
+            msg["payload"] = {}
+        enriched.append(msg)
+
+    return {**conv[0], "messages": enriched}
+
+
+@router.delete("/news-conversations/{conversation_id}")
+def delete_news_conversation(conversation_id: str, user: Dict = Depends(require_user)):
+    """Delete a news chat conversation and all its messages."""
+    _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_NEWS_CONVERSATION]->(c:NewsConversation {id: $conv_id})
+        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+        DETACH DELETE c, m
+        """,
+        {"user_id": user["user_id"], "conv_id": conversation_id},
+    )
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

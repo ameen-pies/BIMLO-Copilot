@@ -4,6 +4,7 @@ import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
   Radio, Cable, Scale, HardHat, Newspaper, Sun, Moon, Loader2,
   RefreshCcw, X, MessageSquare, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw,
+  Plus, ChevronLeft, Trash2, History,
 } from "lucide-react";
 import TypewriterText from "@/components/TypewriterText";
 import CardNav from "@/components/CardNav";
@@ -332,33 +333,51 @@ function SkeletonCard({ theme, size }: { theme: "light" | "dark"; size: CardSize
 
 // ── News Chat Panel ──────────────────────────────────────────────────────────
 
+interface NewsConversation {
+  id: string;
+  title: string;
+  preview: string;
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
 function NewsChatPanel({
   theme,
   pinnedArticles,
   onRemovePin,
   onClearPins,
   onClose,
+  currentUser,
 }: {
   theme: "light" | "dark";
   pinnedArticles: PinnedArticle[];
   onRemovePin: (id: string) => void;
   onClearPins: () => void;
   onClose: () => void;
+  currentUser: any;
 }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content: "Hey! I'm Bimlo. Tap the 💬 icon on any article to pin it here, then ask me anything — trends, impact, comparisons. What's on your mind?",
-      timestamp: new Date(),
-    },
-  ]);
-  const [input, setInput]                   = useState("");
-  const [sessionId]                         = useState(() => Math.random().toString(36).slice(2));
-  const [isLoading, setIsLoading]           = useState(false);
+  const WELCOME: ChatMessage = {
+    id: "welcome",
+    role: "assistant",
+    content: "Hey! I'm Bimlo. Tap the 💬 icon on any article to pin it here, then ask me anything — trends, impact, comparisons. What's on your mind?",
+    timestamp: new Date(),
+  };
+
+  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME]);
+  const [input, setInput]                     = useState("");
+  const [conversationId, setConversationId]   = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId]             = useState(() => crypto.randomUUID());
+  const [isLoading, setIsLoading]             = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
-  const [copiedMsgId, setCopiedMsgId]       = useState<string | null>(null);
-  const [feedback, setFeedback]             = useState<Record<string, "like" | "dislike" | null>>({});
+  const [copiedMsgId, setCopiedMsgId]         = useState<string | null>(null);
+  const [feedback, setFeedback]               = useState<Record<string, "like" | "dislike" | null>>({});
+
+  // Conversation history sidebar
+  const [pastConvs, setPastConvs]         = useState<NewsConversation[]>([]);
+  const [showHistory, setShowHistory]     = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
   const dark = theme === "dark";
@@ -367,18 +386,135 @@ function NewsChatPanel({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // ── Auth helpers ────────────────────────────────────────────────────────
+  const getAuthHeader = useCallback((): Record<string, string> => {
+    if (!currentUser?.token) return {};
+    return { Authorization: `Bearer ${currentUser.token}` };
+  }, [currentUser]);
+
+  // ── Save conversation to DB ─────────────────────────────────────────────
+  const saveToDB = useCallback(async (
+    convId: string,
+    sid: string,
+    msgs: ChatMessage[],
+  ) => {
+    if (!currentUser) return;
+    // Only save if there are real messages (skip welcome-only state)
+    const realMsgs = msgs.filter(m => m.id !== "welcome");
+    if (realMsgs.length === 0) return;
+
+    const firstUser = realMsgs.find(m => m.role === "user");
+    const title   = firstUser ? firstUser.content.slice(0, 60) : "News Chat";
+    const preview = realMsgs[realMsgs.length - 1]?.content?.slice(0, 120) ?? "";
+
+    try {
+      await fetch(`${API_BASE}/auth/news-conversations/save`, {
+        method: "POST",
+        headers: { ...getAuthHeader(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_id: convId,
+          session_id: sid,
+          title,
+          preview,
+          messages: realMsgs.map(m => ({
+            id:             m.id,
+            role:           m.role,
+            content:        m.rawAnswer ?? m.content,
+            timestamp:      m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
+            pinnedArticles: m.pinnedArticles ?? undefined,
+          })),
+        }),
+      });
+    } catch (e) {
+      console.error("news saveToDB failed:", e);
+    }
+  }, [currentUser, getAuthHeader]);
+
+  // ── Load past conversations list ────────────────────────────────────────
+  const loadHistory = useCallback(async () => {
+    if (!currentUser) return;
+    setLoadingHistory(true);
+    try {
+      const res = await fetch(`${API_BASE}/auth/news-conversations`, {
+        headers: getAuthHeader(),
+      });
+      if (res.ok) {
+        const rows: NewsConversation[] = await res.json();
+        setPastConvs(rows);
+      }
+    } catch (e) {
+      console.error("loadHistory failed:", e);
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [currentUser, getAuthHeader]);
+
+  // Load history when panel opens (if logged in)
+  useEffect(() => {
+    if (currentUser) loadHistory();
+  }, [currentUser, loadHistory]);
+
+  // ── Open a past conversation ────────────────────────────────────────────
+  const openConversation = useCallback(async (conv: NewsConversation) => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/news-conversations/${conv.id}`, {
+        headers: getAuthHeader(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const restored: ChatMessage[] = (data.messages ?? []).map((m: any) => ({
+        id:             m.id ?? Date.now().toString(),
+        role:           m.role as "user" | "assistant",
+        content:        m.content ?? "",
+        timestamp:      new Date(m.timestamp ?? Date.now()),
+        pinnedArticles: m.payload?.pinnedArticles ?? undefined,
+      }));
+      setMessages(restored.length > 0 ? restored : [WELCOME]);
+      setConversationId(conv.id);
+      setSessionId(conv.session_id ?? crypto.randomUUID());
+      setShowHistory(false);
+    } catch (e) {
+      console.error("openConversation failed:", e);
+    }
+  }, [getAuthHeader]);
+
+  // ── Delete a past conversation ──────────────────────────────────────────
+  const deleteConversation = useCallback(async (convId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!currentUser) return;
+    try {
+      await fetch(`${API_BASE}/auth/news-conversations/${convId}`, {
+        method: "DELETE",
+        headers: getAuthHeader(),
+      });
+      setPastConvs(prev => prev.filter(c => c.id !== convId));
+    } catch (e) {
+      console.error("deleteConversation failed:", e);
+    }
+  }, [currentUser, getAuthHeader]);
+
+  // ── Start a fresh chat ──────────────────────────────────────────────────
+  const startNewChat = useCallback(() => {
+    setMessages([WELCOME]);
+    setConversationId(crypto.randomUUID());
+    setSessionId(crypto.randomUUID());
+    setShowHistory(false);
+    onClearPins();
+  }, [onClearPins]);
+
+  // ── Send query ──────────────────────────────────────────────────────────
   const sendQuery = useCallback(async (text: string, currentPinned: typeof pinnedArticles) => {
-    const loadingId   = Date.now().toString() + "-l";
+    const loadingId  = Date.now().toString() + "-l";
     const loadingMsg: ChatMessage = { id: loadingId, role: "assistant", content: "", loading: true, timestamp: new Date() };
     setMessages(prev => [...prev, loadingMsg]);
     setIsLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/news/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAuthHeader() },
         body: JSON.stringify({
-          query: text,
-          session_id: sessionId,
+          query:           text,
+          session_id:      sessionId,
           pinned_articles: currentPinned.map(a => ({
             id:         a.id,
             title:      a.title,
@@ -392,14 +528,19 @@ function NewsChatPanel({
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data     = await res.json();
-      const answer   = data.answer ?? "Sorry, no response received.";
+      const data      = await res.json();
+      const answer    = data.answer ?? "Sorry, no response received.";
       const assistantId = loadingId + "-done";
-      setMessages(prev => prev.map(m =>
-        m.id === loadingId
-          ? { ...m, id: assistantId, content: "", rawAnswer: answer, loading: false, timestamp: new Date() }
-          : m
-      ));
+      setMessages(prev => {
+        const updated = prev.map(m =>
+          m.id === loadingId
+            ? { ...m, id: assistantId, content: "", rawAnswer: answer, loading: false, timestamp: new Date() }
+            : m
+        );
+        // Save to DB after state is resolved
+        saveToDB(conversationId, sessionId, updated);
+        return updated;
+      });
       setTypingMessageId(assistantId);
     } catch {
       setMessages(prev => prev.map(m =>
@@ -408,7 +549,7 @@ function NewsChatPanel({
     } finally {
       setIsLoading(false);
     }
-  }, [sessionId]);
+  }, [sessionId, conversationId, getAuthHeader, saveToDB]);
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -429,12 +570,10 @@ function NewsChatPanel({
 
   const handleRedo = useCallback(async (msgId: string) => {
     if (isLoading) return;
-    // Find the user message that preceded this assistant message
     setMessages(prev => {
       const idx = prev.findIndex(m => m.id === msgId);
       const userMsg = idx > 0 ? prev[idx - 1] : null;
       if (!userMsg || userMsg.role !== "user") return prev;
-      // Remove the old assistant message
       const trimmed = prev.filter((_, i) => i !== idx);
       sendQuery(userMsg.content, userMsg.pinnedArticles ?? []);
       return trimmed;
@@ -481,38 +620,156 @@ function NewsChatPanel({
               <div style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.38)" : "rgba(0,0,0,0.38)" }}>News Intelligence</div>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              width: 26, height: 26, borderRadius: 7, border: "none",
-              background: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)",
-              color: dark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.4)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer",
-            }}
-          ><X size={12} /></button>
+          {/* Right controls: history + new chat + close */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+            {currentUser && (
+              <>
+                <button
+                  onClick={() => { setShowHistory(h => !h); if (!showHistory) loadHistory(); }}
+                  title="Chat history"
+                  style={{
+                    width: 26, height: 26, borderRadius: 7, border: "none",
+                    background: showHistory
+                      ? (dark ? "rgba(29,108,246,0.25)" : "rgba(29,108,246,0.12)")
+                      : (dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)"),
+                    color: showHistory ? "#3b9eff" : (dark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.4)"),
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer",
+                  }}
+                ><History size={11} /></button>
+                <button
+                  onClick={startNewChat}
+                  title="New chat"
+                  style={{
+                    width: 26, height: 26, borderRadius: 7, border: "none",
+                    background: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)",
+                    color: dark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.4)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer",
+                  }}
+                ><Plus size={11} /></button>
+              </>
+            )}
+            <button
+              onClick={onClose}
+              style={{
+                width: 26, height: 26, borderRadius: 7, border: "none",
+                background: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)",
+                color: dark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.4)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}
+            ><X size={12} /></button>
+          </div>
         </div>
-
-
       </div>
 
+      {/* ── History Drawer ────────────────────────────────────────────── */}
+      {showHistory && (
+        <div style={{
+          flex: 1, overflowY: "auto", display: "flex", flexDirection: "column",
+          background: dark ? "#0c0d18" : "#f0f1f8",
+        }}>
+          <div style={{
+            padding: "0.6rem 0.9rem 0.4rem",
+            fontSize: "0.65rem", fontWeight: 700,
+            color: dark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.35)",
+            letterSpacing: "0.05em", textTransform: "uppercase",
+            borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}`,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <span>Past news chats</span>
+            <button
+              onClick={() => setShowHistory(false)}
+              style={{
+                background: "none", border: "none", cursor: "pointer", padding: 2,
+                color: dark ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)",
+                display: "flex", alignItems: "center",
+              }}
+            ><ChevronLeft size={11} /></button>
+          </div>
+          {loadingHistory ? (
+            <div style={{ padding: "1.5rem", display: "flex", justifyContent: "center" }}>
+              <Loader2 size={16} color="#3b9eff" style={{ animation: "spin 1s linear infinite" }} />
+            </div>
+          ) : pastConvs.length === 0 ? (
+            <div style={{
+              padding: "2rem 1rem", textAlign: "center",
+              fontSize: "0.68rem", color: dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.28)",
+            }}>
+              No past news chats yet.<br />Start a conversation above!
+            </div>
+          ) : (
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              {pastConvs.map(conv => (
+                <div
+                  key={conv.id}
+                  onClick={() => openConversation(conv)}
+                  style={{
+                    padding: "0.55rem 0.9rem",
+                    cursor: "pointer",
+                    borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.04)"}`,
+                    display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "0.4rem",
+                    transition: "background 0.12s",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = dark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: "0.7rem", fontWeight: 600,
+                      color: dark ? "rgba(255,255,255,0.8)" : "rgba(0,0,0,0.75)",
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>{conv.title}</div>
+                    {conv.preview && (
+                      <div style={{
+                        fontSize: "0.6rem", marginTop: 2,
+                        color: dark ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.35)",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>{conv.preview}</div>
+                    )}
+                    <div style={{
+                      fontSize: "0.55rem", marginTop: 3,
+                      color: dark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.25)",
+                    }}>
+                      {conv.updated_at ? new Date(conv.updated_at).toLocaleDateString([], { month: "short", day: "numeric" }) : ""}
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => deleteConversation(conv.id, e)}
+                    title="Delete"
+                    style={{
+                      background: "none", border: "none", cursor: "pointer", padding: "0.2rem",
+                      color: dark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.25)",
+                      display: "flex", alignItems: "center", flexShrink: 0,
+                      transition: "color 0.12s",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+                    onMouseLeave={e => (e.currentTarget.style.color = dark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.25)")}
+                  ><Trash2 size={10} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Messages ──────────────────────────────────────────────────── */}
-      <div style={{
-        flex: 1, overflowY: "auto",
-        padding: "0.85rem 0.9rem",
-        display: "flex", flexDirection: "column", gap: "0.65rem",
-        scrollbarWidth: "thin",
-        scrollbarColor: dark ? "rgba(255,255,255,0.08) transparent" : "rgba(0,0,0,0.08) transparent",
-      }}>
-        {messages.map(msg => {
-          const hasRef = msg.role === "user" && msg.pinnedArticles && msg.pinnedArticles.length > 0;
-          return (
-            <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", gap: "0.18rem" }}>
-              {/* Pinned chips ABOVE bubble, right-aligned — nudge on bubble points up-right toward page edge */}
-              {hasRef && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.22rem", justifyContent: "flex-end", maxWidth: "90%" }}>
-                  {msg.pinnedArticles!.map(a => {
-                    return (
+      {!showHistory && (
+        <div style={{
+          flex: 1, overflowY: "auto",
+          padding: "0.85rem 0.9rem",
+          display: "flex", flexDirection: "column", gap: "0.65rem",
+          scrollbarWidth: "thin",
+          scrollbarColor: dark ? "rgba(255,255,255,0.08) transparent" : "rgba(0,0,0,0.08) transparent",
+        }}>
+          {messages.map(msg => {
+            const hasRef = msg.role === "user" && msg.pinnedArticles && msg.pinnedArticles.length > 0;
+            return (
+              <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", gap: "0.18rem" }}>
+                {hasRef && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.22rem", justifyContent: "flex-end", maxWidth: "90%" }}>
+                    {msg.pinnedArticles!.map(a => (
                       <span key={a.id} style={{
                         fontSize: "0.54rem", fontWeight: 600,
                         color: dark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.5)",
@@ -521,254 +778,246 @@ function NewsChatPanel({
                         padding: "0.1rem 0.38rem",
                         maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                       }}>{a.title}</span>
-                    );
-                  })}
-                </div>
-              )}
-              <div style={{
-                maxWidth: "90%",
-                padding: msg.role === "user" ? "0.5rem 0.72rem" : "0.6rem 0.78rem",
-                // user + ref: nudge top-right (toward page border, chips above)
-                // user no ref: fully round
-                // assistant: nudge top-left
-                borderRadius: msg.role === "user"
-                  ? (hasRef ? "13px 3px 13px 13px" : "13px")
-                  : "3px 13px 13px 13px",
-                background: msg.role === "user"
-                  ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
-                  : dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
-                border: msg.role === "assistant"
-                  ? `1px solid ${dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`
-                  : "none",
-                fontSize: "0.73rem", lineHeight: 1.55,
-                color: msg.role === "user" ? "#fff" : dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)",
-                whiteSpace: "pre-wrap",
-              }}>
-                {msg.loading ? (
-                  <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                    {[0, 1, 2].map(i => (
-                      <span key={i} style={{
-                        width: 5, height: 5, borderRadius: "50%",
-                        background: "#3b9eff", display: "inline-block",
-                        animation: `dotBounce 1.2s ease-in-out ${i * 0.18}s infinite`,
-                      }} />
                     ))}
-                  </span>
-                ) : msg.role === "assistant" && msg.id === typingMessageId && msg.rawAnswer ? (
-                  <TypewriterText
-                    text={msg.rawAnswer}
-                    speed={10}
-                    onComplete={() => {
-                      setTypingMessageId(null);
-                      setMessages(prev => prev.map(m =>
-                        m.id === msg.id ? { ...m, content: m.rawAnswer ?? m.content } : m
-                      ));
-                    }}
-                    render={(partial: string) => (
-                      <span style={{ whiteSpace: "pre-wrap" }}>{partial}</span>
-                    )}
-                  />
-                ) : msg.content}
-              </div>
-
-              {/* ── Timestamp + action row ──────────────────────────── */}
-              {!msg.loading && (
+                  </div>
+                )}
                 <div style={{
-                  display: "flex", alignItems: "center", gap: "0.25rem",
-                  marginTop: "0.22rem",
-                  justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "90%",
+                  padding: msg.role === "user" ? "0.5rem 0.72rem" : "0.6rem 0.78rem",
+                  borderRadius: msg.role === "user"
+                    ? (hasRef ? "13px 3px 13px 13px" : "13px")
+                    : "3px 13px 13px 13px",
+                  background: msg.role === "user"
+                    ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
+                    : dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)",
+                  border: msg.role === "assistant"
+                    ? `1px solid ${dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)"}`
+                    : "none",
+                  fontSize: "0.73rem", lineHeight: 1.55,
+                  color: msg.role === "user" ? "#fff" : dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)",
+                  whiteSpace: "pre-wrap",
                 }}>
-                  <span style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.28)" }}>
-                    {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                  {msg.role === "assistant" && msg.id !== typingMessageId && (
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginLeft: "0.2rem" }}>
-                      {/* Copy */}
-                      <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(msg.rawAnswer ?? msg.content);
-                          setCopiedMsgId(msg.id);
-                          setTimeout(() => setCopiedMsgId(null), 1500);
-                        }}
-                        title="Copy response"
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: "0.2rem",
-                          padding: "0.18rem 0.38rem", borderRadius: 5, border: "none",
-                          fontSize: "0.58rem", fontWeight: 600, cursor: "pointer",
-                          background: copiedMsgId === msg.id
-                            ? (dark ? "rgba(59,158,255,0.18)" : "rgba(59,158,255,0.12)")
-                            : "transparent",
-                          color: copiedMsgId === msg.id
-                            ? "#3b9eff"
-                            : dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.28)",
-                          transition: "all 0.15s",
-                        }}
-                      >
-                        {copiedMsgId === msg.id
-                          ? <><Check size={9} /><span>Copied</span></>
-                          : <><Copy size={9} /><span>Copy</span></>}
-                      </button>
-                      {/* Like */}
-                      <button
-                        onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
-                        title="Good response"
-                        style={{
-                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
-                          border: "none", cursor: "pointer", background: "transparent",
-                          color: feedback[msg.id] === "like" ? "#3b9eff" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
-                          transition: "color 0.15s",
-                        }}
-                      ><ThumbsUp size={9} /></button>
-                      {/* Dislike */}
-                      <button
-                        onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "dislike" ? null : "dislike" }))}
-                        title="Bad response"
-                        style={{
-                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
-                          border: "none", cursor: "pointer", background: "transparent",
-                          color: feedback[msg.id] === "dislike" ? "#ef4444" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
-                          transition: "color 0.15s",
-                        }}
-                      ><ThumbsDown size={9} /></button>
-                      {/* Redo */}
-                      <button
-                        onClick={() => handleRedo(msg.id)}
-                        disabled={isLoading}
-                        title="Regenerate"
-                        style={{
-                          display: "inline-flex", padding: "0.22rem", borderRadius: 5,
-                          border: "none", cursor: isLoading ? "not-allowed" : "pointer",
-                          background: "transparent", opacity: isLoading ? 0.3 : 1,
-                          color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
-                          transition: "color 0.15s",
-                        }}
-                      ><RotateCcw size={9} /></button>
-                    </div>
-                  )}
+                  {msg.loading ? (
+                    <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                      {[0, 1, 2].map(i => (
+                        <span key={i} style={{
+                          width: 5, height: 5, borderRadius: "50%",
+                          background: "#3b9eff", display: "inline-block",
+                          animation: `dotBounce 1.2s ease-in-out ${i * 0.18}s infinite`,
+                        }} />
+                      ))}
+                    </span>
+                  ) : msg.role === "assistant" && msg.id === typingMessageId && msg.rawAnswer ? (
+                    <TypewriterText
+                      text={msg.rawAnswer}
+                      speed={10}
+                      onComplete={() => {
+                        setTypingMessageId(null);
+                        setMessages(prev => prev.map(m =>
+                          m.id === msg.id ? { ...m, content: m.rawAnswer ?? m.content } : m
+                        ));
+                      }}
+                      render={(partial: string) => (
+                        <span style={{ whiteSpace: "pre-wrap" }}>{partial}</span>
+                      )}
+                    />
+                  ) : msg.content}
                 </div>
-              )}
-            </div>
-          );
-        })}
-        <div ref={messagesEndRef} />
-      </div>
+
+                {!msg.loading && (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: "0.25rem",
+                    marginTop: "0.22rem",
+                    justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+                  }}>
+                    <span style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.28)" }}>
+                      {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    {msg.role === "assistant" && msg.id !== typingMessageId && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginLeft: "0.2rem" }}>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.rawAnswer ?? msg.content);
+                            setCopiedMsgId(msg.id);
+                            setTimeout(() => setCopiedMsgId(null), 1500);
+                          }}
+                          title="Copy response"
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: "0.2rem",
+                            padding: "0.18rem 0.38rem", borderRadius: 5, border: "none",
+                            fontSize: "0.58rem", fontWeight: 600, cursor: "pointer",
+                            background: copiedMsgId === msg.id
+                              ? (dark ? "rgba(59,158,255,0.18)" : "rgba(59,158,255,0.12)")
+                              : "transparent",
+                            color: copiedMsgId === msg.id
+                              ? "#3b9eff"
+                              : dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.28)",
+                            transition: "all 0.15s",
+                          }}
+                        >
+                          {copiedMsgId === msg.id
+                            ? <><Check size={9} /><span>Copied</span></>
+                            : <><Copy size={9} /><span>Copy</span></>}
+                        </button>
+                        <button
+                          onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
+                          title="Good response"
+                          style={{
+                            display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                            border: "none", cursor: "pointer", background: "transparent",
+                            color: feedback[msg.id] === "like" ? "#3b9eff" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                            transition: "color 0.15s",
+                          }}
+                        ><ThumbsUp size={9} /></button>
+                        <button
+                          onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "dislike" ? null : "dislike" }))}
+                          title="Bad response"
+                          style={{
+                            display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                            border: "none", cursor: "pointer", background: "transparent",
+                            color: feedback[msg.id] === "dislike" ? "#ef4444" : dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                            transition: "color 0.15s",
+                          }}
+                        ><ThumbsDown size={9} /></button>
+                        <button
+                          onClick={() => handleRedo(msg.id)}
+                          disabled={isLoading}
+                          title="Regenerate"
+                          style={{
+                            display: "inline-flex", padding: "0.22rem", borderRadius: 5,
+                            border: "none", cursor: isLoading ? "not-allowed" : "pointer",
+                            background: "transparent", opacity: isLoading ? 0.3 : 1,
+                            color: dark ? "rgba(255,255,255,0.22)" : "rgba(0,0,0,0.25)",
+                            transition: "color 0.15s",
+                          }}
+                        ><RotateCcw size={9} /></button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div ref={messagesEndRef} />
+        </div>
+      )}
 
       {/* ── Input ─────────────────────────────────────────────────────── */}
-      <div style={{
-        padding: "0.5rem 0.7rem 0.6rem",
-        borderTop: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"}`,
-        background: dark ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.6)",
-        flexShrink: 0,
-      }}>
-        {/* Pinned article chips with thumbnails — horizontal scroll */}
-        {pinnedArticles.length > 0 && (
-          <div className="pinned-chips-scroll" style={{
-            display: "flex", flexWrap: "nowrap", gap: "0.3rem", marginBottom: "0.4rem",
-            overflowX: "auto", paddingBottom: "4px",
-            scrollbarWidth: "thin",
-            scrollbarColor: dark ? "rgba(255,255,255,0.22) transparent" : "rgba(0,0,0,0.18) transparent",
-          }}>
-            {pinnedArticles.map(a => {
-              const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
-              const neutralText = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.6)";
-              const neutralBorder = dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.12)";
-              const neutralThumb = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)";
-              return (
-                <span key={a.id} style={{
-                  display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                  fontSize: "0.6rem", fontWeight: 600, color: neutralText,
-                  background: dark ? "rgba(0,0,0,0.45)" : "rgba(255,255,255,0.92)",
-                  border: `1px solid ${neutralBorder}`, borderRadius: 7,
-                  padding: "0.15rem 0.35rem 0.15rem 0.15rem",
-                  maxWidth: 200, backdropFilter: "blur(4px)", flexShrink: 0,
-                }}>
-                  <span style={{
-                    width: 28, height: 20, borderRadius: 4, overflow: "hidden",
-                    flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    background: neutralThumb, position: "relative",
-                  }}>
-                    {a.imageUrl ? (
-                      <img src={a.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                        onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                    ) : (
-                      <m.Icon size={10} color={neutralText} />
-                    )}
-                  </span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{a.title}</span>
-                  <button onClick={() => onRemovePin(a.id)}
-                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: neutralText, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
-                  ><X size={9} /></button>
-                </span>
-              );
-            })}
-          </div>
-        )}
+      {!showHistory && (
         <div style={{
-          display: "flex", alignItems: "center", gap: "0.45rem",
-          background: dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)",
-          border: `1px solid ${dark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.09)"}`,
-          borderRadius: 12, padding: "0.45rem 0.45rem 0.45rem 0.7rem",
-          minHeight: 42,
+          padding: "0.5rem 0.7rem 0.6rem",
+          borderTop: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"}`,
+          background: dark ? "rgba(0,0,0,0.25)" : "rgba(255,255,255,0.6)",
+          flexShrink: 0,
         }}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={e => !isLoading && setInput(e.target.value)}
-            onKeyDown={handleKey}
-            placeholder={
-              isLoading
-                ? "Waiting for response…"
-                : pinnedArticles.length > 0
-                  ? `Ask about ${pinnedArticles.length === 1 ? "this article" : `these ${pinnedArticles.length} articles`}…`
-                  : "Ask about the news…"
-            }
-            rows={1}
-            disabled={isLoading}
-            style={{
-              flex: 1, background: "transparent", border: "none", outline: "none",
-              resize: "none", fontSize: "0.75rem", lineHeight: 1.5,
-              color: dark ? (isLoading ? "rgba(255,255,255,0.3)" : "#fff") : (isLoading ? "rgba(0,0,0,0.3)" : "#000"),
-              fontFamily: "inherit",
-              maxHeight: 80, overflowY: "auto", scrollbarWidth: "none",
-              padding: 0, margin: 0, alignSelf: "center", minHeight: "1.125rem",
-              cursor: isLoading ? "not-allowed" : "text",
-            }}
-            onInput={e => {
-              const el = e.target as HTMLTextAreaElement;
-              el.style.height = "auto";
-              el.style.height = Math.min(el.scrollHeight, 80) + "px";
-            }}
-          />
-          {/* Send button */}
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isLoading}
-            title="Ask Bimlo"
-            style={{
-              width: 30, height: 30, borderRadius: 9, border: "none", flexShrink: 0,
-              background: input.trim() && !isLoading
-                ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
-                : dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)",
-              cursor: input.trim() && !isLoading ? "pointer" : "not-allowed",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              opacity: input.trim() && !isLoading ? 1 : 0.38,
-              transition: "all 0.15s",
-              boxShadow: input.trim() && !isLoading ? "0 4px 12px rgba(29,108,246,0.4)" : "none",
-            }}
-          >
-            {isLoading
-              ? <Loader2 size={13} color="rgba(255,255,255,0.6)" style={{ animation: "spin 1s linear infinite" }} />
-              : <img src="/favicon.svg" alt="" style={{ width: 13, height: 13, objectFit: "contain", filter: input.trim() ? "brightness(0) invert(1)" : dark ? "brightness(0) invert(0.35)" : "brightness(0) opacity(0.3)" }} />
-            }
-          </button>
+          {pinnedArticles.length > 0 && (
+            <div className="pinned-chips-scroll" style={{
+              display: "flex", flexWrap: "nowrap", gap: "0.3rem", marginBottom: "0.4rem",
+              overflowX: "auto", paddingBottom: "4px",
+              scrollbarWidth: "thin",
+              scrollbarColor: dark ? "rgba(255,255,255,0.22) transparent" : "rgba(0,0,0,0.18) transparent",
+            }}>
+              {pinnedArticles.map(a => {
+                const m = CATEGORY_META[a.category] ?? CATEGORY_META["General"];
+                const neutralText   = dark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.6)";
+                const neutralBorder = dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.12)";
+                const neutralThumb  = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)";
+                return (
+                  <span key={a.id} style={{
+                    display: "inline-flex", alignItems: "center", gap: "0.3rem",
+                    fontSize: "0.6rem", fontWeight: 600, color: neutralText,
+                    background: dark ? "rgba(0,0,0,0.45)" : "rgba(255,255,255,0.92)",
+                    border: `1px solid ${neutralBorder}`, borderRadius: 7,
+                    padding: "0.15rem 0.35rem 0.15rem 0.15rem",
+                    maxWidth: 200, backdropFilter: "blur(4px)", flexShrink: 0,
+                  }}>
+                    <span style={{
+                      width: 28, height: 20, borderRadius: 4, overflow: "hidden",
+                      flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      background: neutralThumb, position: "relative",
+                    }}>
+                      {a.imageUrl ? (
+                        <img src={a.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                          onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                      ) : (
+                        <m.Icon size={10} color={neutralText} />
+                      )}
+                    </span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{a.title}</span>
+                    <button onClick={() => onRemovePin(a.id)}
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: neutralText, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
+                    ><X size={9} /></button>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          <div style={{
+            display: "flex", alignItems: "center", gap: "0.45rem",
+            background: dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)",
+            border: `1px solid ${dark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.09)"}`,
+            borderRadius: 12, padding: "0.45rem 0.45rem 0.45rem 0.7rem",
+            minHeight: 42,
+          }}>
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={e => !isLoading && setInput(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder={
+                isLoading
+                  ? "Waiting for response…"
+                  : pinnedArticles.length > 0
+                    ? `Ask about ${pinnedArticles.length === 1 ? "this article" : `these ${pinnedArticles.length} articles`}…`
+                    : "Ask about the news…"
+              }
+              rows={1}
+              disabled={isLoading}
+              style={{
+                flex: 1, background: "transparent", border: "none", outline: "none",
+                resize: "none", fontSize: "0.75rem", lineHeight: 1.5,
+                color: dark ? (isLoading ? "rgba(255,255,255,0.3)" : "#fff") : (isLoading ? "rgba(0,0,0,0.3)" : "#000"),
+                fontFamily: "inherit",
+                maxHeight: 80, overflowY: "auto", scrollbarWidth: "none",
+                padding: 0, margin: 0, alignSelf: "center", minHeight: "1.125rem",
+                cursor: isLoading ? "not-allowed" : "text",
+              }}
+              onInput={e => {
+                const el = e.target as HTMLTextAreaElement;
+                el.style.height = "auto";
+                el.style.height = Math.min(el.scrollHeight, 80) + "px";
+              }}
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || isLoading}
+              title="Ask Bimlo"
+              style={{
+                width: 30, height: 30, borderRadius: 9, border: "none", flexShrink: 0,
+                background: input.trim() && !isLoading
+                  ? "linear-gradient(135deg, #1d6cf6 0%, #7c3aed 100%)"
+                  : dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)",
+                cursor: input.trim() && !isLoading ? "pointer" : "not-allowed",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                opacity: input.trim() && !isLoading ? 1 : 0.38,
+                transition: "all 0.15s",
+                boxShadow: input.trim() && !isLoading ? "0 4px 12px rgba(29,108,246,0.4)" : "none",
+              }}
+            >
+              {isLoading
+                ? <Loader2 size={13} color="rgba(255,255,255,0.6)" style={{ animation: "spin 1s linear infinite" }} />
+                : <img src="/favicon.svg" alt="" style={{ width: 13, height: 13, objectFit: "contain", filter: input.trim() ? "brightness(0) invert(1)" : dark ? "brightness(0) invert(0.35)" : "brightness(0) opacity(0.3)" }} />
+              }
+            </button>
+          </div>
+          <p style={{
+            margin: "0.28rem 0 0", fontSize: "0.54rem", textAlign: "center",
+            color: dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.22)",
+          }}>
+            Enter · Shift+Enter for new line
+          </p>
         </div>
-        <p style={{
-          margin: "0.28rem 0 0", fontSize: "0.54rem", textAlign: "center",
-          color: dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.22)",
-        }}>
-          Enter · Shift+Enter for new line
-        </p>
-      </div>
+      )}
     </div>
   );
 }
@@ -1241,6 +1490,7 @@ const NewsPage = () => {
               onRemovePin={handleRemovePin}
               onClearPins={() => setPinnedArticles([])}
               onClose={() => setChatOpen(false)}
+              currentUser={currentUser}
             />
           </div>
         )}
