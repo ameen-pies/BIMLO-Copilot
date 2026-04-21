@@ -3356,11 +3356,16 @@ const Chat = () => {
   const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConvId, setActiveConvId] = useState<string>("default");
+  const [activeConvId, setActiveConvId] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  // Keep ref in sync so async callbacks always read the latest value
+  // Keep refs in sync so async callbacks (and loadConversation) always read
+  // the latest values — not stale closure captures from a previous render.
   useEffect(() => { sessionIdRef.current = sessionId; }, [sessionId]);
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const activeConvIdRef = useRef<string>("");
+  useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
@@ -3392,6 +3397,7 @@ const Chat = () => {
   const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
   const bubbleViewerRef = useRef<ViewerState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [convLoading, setConvLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { currentUser, showAuthModal, logout } = useAuth();
   const [feedback, setFeedback] = useState<Record<string, "like" | "dislike" | null>>({});
@@ -3610,6 +3616,7 @@ const Chat = () => {
             setIsLoading(true);
             if (!notifyDismissed) setShowNotifyBanner(true);
             try {
+              const convId = ensureActiveConversationId();
               const assistantMsg = await runStreamingQuery(voiceQuery);
               if (!assistantMsg) return;
               setMessages(prev => {
@@ -3617,12 +3624,12 @@ const Chat = () => {
                 const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
                 const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
                 setConversations(convs => {
-                  const existing = convs.find(c => c.id === activeConvId);
-                  if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-                  return [{ id: activeConvId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
+                  const existing = convs.find(c => c.id === convId);
+                  if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+                  return [{ id: convId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
                 });
                 // Persist voice reply to DB
-                saveConversationToDB(activeConvId, sessionIdRef.current ?? "", title, preview, updated);
+                saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
                 return updated;
               });
               setTypingMessageId(assistantMsg.id);
@@ -4193,6 +4200,14 @@ const Chat = () => {
     loadConversationsFromDB();
   }, []);
 
+  // Retry after a short delay — AuthContext hydrates async, so the first
+  // call above may have no token yet. This ensures conversations load on
+  // the splash screen without requiring the user to click "New Chat" first.
+  useEffect(() => {
+    const t = setTimeout(() => loadConversationsFromDB(), 600);
+    return () => clearTimeout(t);
+  }, []);
+
   // Re-load conversations + docs when user logs in or out
   useEffect(() => {
     if (currentUser) {
@@ -4245,11 +4260,14 @@ const Chat = () => {
   };
 
   const loadConversationsFromDB = async () => {
-    if (!currentUser) return;
+    // Use getAuthHeader() which falls back to localStorage, so this works even
+    // before currentUser has hydrated in the React context.
+    const authH = getAuthHeader();
+    if (!authH.Authorization) return;
     try {
       const base = getApiBase();
       const res = await fetch(`${base}/auth/conversations`, {
-        headers: { ...(getAuthHeader() as any), "Content-Type": "application/json" },
+        headers: { ...(authH as any), "Content-Type": "application/json" },
       });
       if (!res.ok) return;
       const rows: Array<{ id: string; title: string; preview: string; updated_at: string; session_id: string }> = await res.json();
@@ -4803,53 +4821,74 @@ const Chat = () => {
   // ==========================================================================
 
   const startNewConversation = () => {
-    const newId = Date.now().toString();
-    setActiveConvId(newId);
+    setActiveConvId("");
     setSessionId(null);
+    sessionIdRef.current = null;
     setMessages([]);
   };
 
+  const ensureActiveConversationId = () => {
+    if (activeConvId) return activeConvId;
+    const newId = Date.now().toString();
+    setActiveConvId(newId);
+    return newId;
+  };
+
   const loadConversation = async (conv: Conversation) => {
-    if (conv.id === activeConvId) return;
+    // Use refs instead of closure-captured state so we always read the *current*
+    // values. On the splash screen the first click would see stale initial values
+    // (messages=[], activeConvId="") via the closure, causing the guard to
+    // incorrectly no-op when IDs happened to match the empty-string default.
+    const currentMessages = messagesRef.current;
+    const currentActiveConvId = activeConvIdRef.current;
+    if (currentMessages.length > 0 && conv.id === currentActiveConvId) return;
+
     setActiveConvId(conv.id);
     setSessionId(null);
     sessionIdRef.current = null;
+    // Set loading BEFORE wiping messages so the splash never flashes between
+    // the clear and the load — convLoading gates the splash visibility.
+    setConvLoading(true);
+    setMessages([]);
 
     const sid = (conv as any).sessionId ?? null;
 
     // 1. In-memory fast path (already loaded this session)
     if (conv.messages && conv.messages.length > 0) {
       setMessages(conv.messages);
+      setConvLoading(false);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
       return;
     }
 
+
     // 2. Fetch from DB — auth conversations endpoint (has full payload)
     const base = getApiBase();
     const authHeaders = { ...(getAuthHeader() as any), "Content-Type": "application/json" };
 
-    if (currentUser) {
-      try {
-        const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
-        if (res.ok) {
-          const data = await res.json();
-          const restored: Message[] = (data.messages ?? []).map((m: any) => ({
-            id:        m.id ?? Date.now().toString(),
-            role:      m.role as "user" | "assistant",
-            content:   m.content ?? "",
-            timestamp: new Date(m.timestamp ?? Date.now()),
-            // Spread the rich payload back onto the message object
-            ...(m.payload ?? {}),
-          }));
-          setMessages(restored);
-          setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
-          if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
-          setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
-          return;
-        }
-      } catch (e) { console.error("loadConversation from DB failed:", e); }
-    }
+    // Always attempt — getAuthHeader() falls back to localStorage token so this
+    // works even if currentUser hasn't hydrated yet in the React context.
+    try {
+      const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
+      if (res.ok) {
+        const data = await res.json();
+        const restored: Message[] = (data.messages ?? []).map((m: any) => ({
+          id:        m.id ?? Date.now().toString(),
+          role:      m.role as "user" | "assistant",
+          content:   m.content ?? "",
+          timestamp: new Date(m.timestamp ?? Date.now()),
+          // Spread the rich payload back onto the message object
+          ...(m.payload ?? {}),
+        }));
+        setMessages(restored);
+        setConvLoading(false);
+        setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
+        if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
+        setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+        return;
+      }
+    } catch (e) { console.error("loadConversation from DB failed:", e); }
 
     // 3. Fallback — session history endpoint (text-only, no payload)
     if (sid) {
@@ -4873,6 +4912,7 @@ const Chat = () => {
         }
       } catch (e) { console.error("session history fetch failed:", e); }
     }
+    setConvLoading(false);
   };
 
   const deleteConversation = async (convId: string) => {
@@ -5309,6 +5349,7 @@ const Chat = () => {
       // ── Route: CAD/IFC agent if a CAD file is the active context ──────────
       // Priority 1: a CAD doc explicitly attached to this message (pendingDocIds)
       // Priority 2: user mentions the file by name or uses 3D/BIM keywords → use last uploaded CAD file
+      const convId = ensureActiveConversationId();
       const CAD_DOC_TYPES = new Set(["ifc", "cad", "dxf", "dwg", "step", "stp"]);
 
       const CAD_INTENT_KEYWORDS = [
@@ -5356,12 +5397,12 @@ const Chat = () => {
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
       const preview  = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
       setConversations(convs => {
-        const existing = convs.find(c => c.id === activeConvId);
-        if (existing) return convs.map(c => c.id === activeConvId ? { ...c, messages: updatedMessages, preview, timestamp: new Date() } : c);
-        return [{ id: activeConvId, title: rawTitle, preview, timestamp: new Date(), messages: updatedMessages, sessionId } as any, ...convs];
+        const existing = convs.find(c => c.id === convId);
+        if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updatedMessages, preview, timestamp: new Date() } : c);
+        return [{ id: convId, title: rawTitle, preview, timestamp: new Date(), messages: updatedMessages, sessionId } as any, ...convs];
       });
       // Persist to DB (non-blocking)
-      saveConversationToDB(activeConvId, sessionIdRef.current ?? "", rawTitle, preview, updatedMessages);
+      saveConversationToDB(convId, sessionIdRef.current ?? "", rawTitle, preview, updatedMessages);
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
@@ -5369,7 +5410,6 @@ const Chat = () => {
       // • Report route → call /title with the prompt so the sidebar shows
       //   "Telecom Site Survey Field Results" instead of the raw user message.
       // • All other routes → call generateSmartTitle with the first few messages.
-      const convId = activeConvId;
       if (assistantMsg.reportId) {
         try {
           const titleRes = await fetch(`${(typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000"}/title`, {
@@ -5810,7 +5850,11 @@ const Chat = () => {
             {/* ── Conversations bubble ── */}
             <div className="relative" data-convs-panel>
               <button
-                onClick={() => setConvsPanelOpen(p => !p)}
+                onClick={() => {
+                  const next = !convsPanelOpen;
+                  setConvsPanelOpen(next);
+                  if (next) loadConversationsFromDB();
+                }}
                 className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
                   convsPanelOpen
                     ? "bg-primary text-primary-foreground border-primary shadow-sm"
@@ -6672,9 +6716,29 @@ const Chat = () => {
               </motion.div>
             )}
           </AnimatePresence>
-          <WelcomeSplash visible={messages.length === 0} />
-          <div className="max-w-3xl mx-auto space-y-6">
-            {messages.map((msg) => (
+          <WelcomeSplash visible={messages.length === 0 && !convLoading && !activeConvId} />
+          <AnimatePresence mode="wait">
+            {convLoading ? (
+              <motion.div
+                key="conv-loading"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18 }}
+                className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"
+              >
+                <Loader2 className="h-6 w-6 animate-spin text-primary/50" />
+              </motion.div>
+            ) : (
+              <motion.div
+                key={activeConvId || "empty"}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.22, ease: "easeOut" }}
+                className="max-w-3xl mx-auto space-y-6"
+              >
+          {messages.map((msg) => (
               <motion.div
                 key={msg.id}
                 initial={{ opacity: 0, y: 10 }}
@@ -7381,7 +7445,9 @@ const Chat = () => {
             )}
 
             <div ref={messagesEndRef} />
-          </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Notification banner — fixed, always floats above the input area regardless of layout */}
@@ -7704,13 +7770,13 @@ const Chat = () => {
                       rows={1}
                       disabled={isLoading}
                       style={{ maxHeight: "160px" }}
-                      className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-relaxed py-0 pt-[7px] overflow-y-auto scrollbar-thin"
+                      className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 placeholder:align-middle focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-5 py-1.5 overflow-y-auto scrollbar-thin self-center"
                     />
                     {/* Ghost-text suffix — never shown on empty input */}
                     {wordSuffix && input.length > 0 && !autocomplete && (
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute left-0 top-0 w-full text-sm leading-relaxed py-0 pt-[7px] whitespace-pre-wrap break-words select-none"
+                        className="pointer-events-none absolute left-0 top-0 w-full h-full flex items-center text-sm leading-5 whitespace-pre-wrap break-words select-none px-0 py-1.5"
                         style={{ color: "transparent" }}
                       >
                         <span>{input}</span>
