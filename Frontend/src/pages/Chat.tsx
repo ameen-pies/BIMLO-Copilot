@@ -4835,26 +4835,24 @@ const Chat = () => {
   };
 
   const loadConversation = async (conv: Conversation) => {
-    // Use refs instead of closure-captured state so we always read the *current*
-    // values. On the splash screen the first click would see stale initial values
-    // (messages=[], activeConvId="") via the closure, causing the guard to
-    // incorrectly no-op when IDs happened to match the empty-string default.
+    console.log("🔄 loadConversation called for:", conv.id, conv.title);
+    // Deduplicate: skip if already on this conversation and messages are loaded
     const currentMessages = messagesRef.current;
     const currentActiveConvId = activeConvIdRef.current;
-    if (currentMessages.length > 0 && conv.id === currentActiveConvId) return;
-
-    setActiveConvId(conv.id);
-    setSessionId(null);
-    sessionIdRef.current = null;
-    // Set loading BEFORE wiping messages so the splash never flashes between
-    // the clear and the load — convLoading gates the splash visibility.
-    setConvLoading(true);
-    setMessages([]);
+    if (currentMessages.length > 0 && conv.id === currentActiveConvId) {
+      console.log("⏭️ Skipping: already on this conversation with messages loaded");
+      return;
+    }
 
     const sid = (conv as any).sessionId ?? null;
+    console.log("📋 Conversation details:", { id: conv.id, hasMessages: conv.messages?.length ?? 0, hasSessionId: !!sid });
 
     // 1. In-memory fast path (already loaded this session)
     if (conv.messages && conv.messages.length > 0) {
+      console.log("⚡ Using fast path: messages already in memory");
+      setActiveConvId(conv.id);
+      setSessionId(null);
+      sessionIdRef.current = null;
       setMessages(conv.messages);
       setConvLoading(false);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
@@ -4862,24 +4860,58 @@ const Chat = () => {
       return;
     }
 
-
     // 2. Fetch from DB — auth conversations endpoint (has full payload)
     const base = getApiBase();
-    const authHeaders = { ...(getAuthHeader() as any), "Content-Type": "application/json" };
+    // Build auth header: prefer live currentUser token, then bimlo_auth in localStorage,
+    // then fall back to the legacy "token" key so existing sessions survive a page reload.
+    const rawToken = currentUser?.token ?? (() => {
+      try {
+        return (
+          JSON.parse(localStorage.getItem("bimlo_auth") ?? "{}").token ||
+          localStorage.getItem("token") ||
+          ""
+        );
+      } catch { return ""; }
+    })();
+    const authHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(rawToken ? { Authorization: `Bearer ${rawToken}` } : {}),
+    };
 
-    // Always attempt — getAuthHeader() falls back to localStorage token so this
-    // works even if currentUser hasn't hydrated yet in the React context.
+    if (!rawToken) {
+      // No token — can't load, don't change any state
+      return;
+    }
+
+    // Commit to loading this conversation only after we know we have a token
+    setActiveConvId(conv.id);
+    setSessionId(null);
+    sessionIdRef.current = null;
+    setConvLoading(true);
+    setMessages([]);
+
+    // Helper: something went wrong — reset so user isn't stuck on a blank screen
+    const abortLoad = () => {
+      setConvLoading(false);
+      setActiveConvId("");
+      activeConvIdRef.current = "";
+      setMessages([]);
+    };
+
     try {
       const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
       if (res.ok) {
         const data = await res.json();
         const restored: Message[] = (data.messages ?? []).map((m: any) => ({
+          // Spread the raw message first (captures any flat rich fields the backend returns)
+          ...m,
+          // Then spread payload if the backend nests rich fields there
+          ...(m.payload ?? {}),
+          // Always ensure these core fields are correct types and can't be overwritten
           id:        m.id ?? Date.now().toString(),
           role:      m.role as "user" | "assistant",
           content:   m.content ?? "",
-          timestamp: new Date(m.timestamp ?? Date.now()),
-          // Spread the rich payload back onto the message object
-          ...(m.payload ?? {}),
+          timestamp: new Date(m.timestamp ?? (m.payload?.timestamp) ?? Date.now()),
         }));
         setMessages(restored);
         setConvLoading(false);
@@ -4888,7 +4920,18 @@ const Chat = () => {
         setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
         return;
       }
-    } catch (e) { console.error("loadConversation from DB failed:", e); }
+      console.warn("loadConversation DB fetch non-ok:", res.status);
+      // DB fetch failed, try fallback path if available
+      if (!sid) {
+        // No sessionId fallback available, abort
+        abortLoad();
+        return;
+      }
+    } catch (e) {
+      console.error("loadConversation from DB failed:", e);
+      abortLoad();
+      return;
+    }
 
     // 3. Fallback — session history endpoint (text-only, no payload)
     if (sid) {
@@ -4908,11 +4951,15 @@ const Chat = () => {
             setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
             setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid);
             setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
+            setConvLoading(false);
+            return;
           }
         }
       } catch (e) { console.error("session history fetch failed:", e); }
     }
-    setConvLoading(false);
+
+    // All paths exhausted with no messages — reset so user isn't stuck on blank
+    abortLoad();
   };
 
   const deleteConversation = async (convId: string) => {
@@ -7119,7 +7166,7 @@ const Chat = () => {
                       </div>
                     )}
                     <span className="text-[10px] text-muted-foreground/50">
-                      {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      {(msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
                     {msg.role === "assistant" && msg.id !== typingMessageId && !msg.interrupted && (
                       <div className="flex items-center gap-1 ml-1">

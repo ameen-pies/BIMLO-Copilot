@@ -141,6 +141,8 @@ _sessions: Dict[str, deque] = {}
 _session_routes: Dict[str, str] = {}
 # session_id -> list of {route, query} for each turn (capped at 10)
 _session_route_log: Dict[str, list] = {}
+# session_id -> user_id (for linking auto-created conversations to user accounts)
+_session_user_context: Dict[str, str] = {}
 
 def get_history(session_id: str) -> List[dict]:
     # Hot path: already in memory
@@ -170,10 +172,130 @@ def get_history(session_id: str) -> List[dict]:
 def get_route_log(session_id: str) -> list:
     return list(_session_route_log.get(session_id, []))
 
+# ── Auto-persist messages to Neo4j (background) ─────────────────────────────
+# Track which conversations we've already ensured exist, so we don't query
+# Neo4j on every single message append
+_conversation_cache: Dict[str, str] = {}  # session_id -> conversation_id
+
+def _auto_save_to_neo4j(session_id: str, role: str, content: str):
+    """
+    Auto-persist a message to Neo4j without requiring explicit user_id.
+    Creates an anonymous conversation if needed, then appends the message.
+    If the session is linked to a user, also creates the HAS_CONVERSATION relationship.
+    Runs in background to avoid blocking the query response.
+    """
+    try:
+        from neo4j_auth import _run as neo4j_run
+        from datetime import datetime as _dt
+        import uuid as _uuid_mod
+        
+        # Check if we've already cached this conversation
+        conv_id = _conversation_cache.get(session_id)
+        user_id = _session_user_context.get(session_id)
+        
+        if not conv_id:
+            # Try to find existing conversation by session_id
+            rows = neo4j_run(
+                "MATCH (c:Conversation {session_id: $sid}) RETURN c.id LIMIT 1",
+                {"sid": session_id},
+            )
+            if rows:
+                conv_id = rows[0]["c.id"]
+                _conversation_cache[session_id] = conv_id
+            else:
+                # Create new conversation for this session
+                conv_id = str(_uuid_mod.uuid4())
+                now = _dt.utcnow().isoformat()
+                
+                if user_id:
+                    # Logged-in: create conversation and link to user
+                    neo4j_run(
+                        """
+                        MATCH (u:User {id: $user_id})
+                        CREATE (c:Conversation {
+                            id:          $conv_id,
+                            session_id:  $session_id,
+                            title:       "Chat",
+                            preview:     "",
+                            chat_type:   "rag",
+                            created_at:  $now,
+                            updated_at:  $now
+                        })
+                        MERGE (u)-[:HAS_CONVERSATION]->(c)
+                        """,
+                        {"user_id": user_id, "conv_id": conv_id, "session_id": session_id, "now": now},
+                    )
+                    print(f"✅ Auto-created conversation {conv_id} for user {user_id} | session {session_id}")
+                else:
+                    # Anonymous: just create conversation
+                    neo4j_run(
+                        """
+                        CREATE (c:Conversation {
+                            id:          $conv_id,
+                            session_id:  $session_id,
+                            title:       "Chat",
+                            preview:     "",
+                            chat_type:   "rag",
+                            created_at:  $now,
+                            updated_at:  $now
+                        })
+                        """,
+                        {"conv_id": conv_id, "session_id": session_id, "now": now},
+                    )
+                    print(f"✅ Auto-created anonymous conversation {conv_id} for session {session_id}")
+                
+                _conversation_cache[session_id] = conv_id
+        
+        # Now add the message
+        msg_id = str(_uuid_mod.uuid4())
+        ts = _dt.utcnow().isoformat()
+        
+        # Count existing messages to set the index
+        count_rows = neo4j_run(
+            "MATCH (:Conversation {id: $conv_id})-[r:CONTAINS]->(m:Message) RETURN COUNT(r) AS cnt",
+            {"conv_id": conv_id},
+        )
+        index = count_rows[0]["cnt"] if count_rows else 0
+        
+        # Create and link the message
+        neo4j_run(
+            """
+            MATCH (c:Conversation {id: $conv_id})
+            CREATE (msg:Message {
+                id:        $msg_id,
+                role:      $role,
+                content:   $content,
+                timestamp: $ts,
+                payload:   ""
+            })
+            CREATE (c)-[:CONTAINS {index: $index}]->(msg)
+            SET c.updated_at = $ts
+            """,
+            {
+                "conv_id": conv_id,
+                "msg_id": msg_id,
+                "role": role,
+                "content": content,
+                "ts": ts,
+                "index": index,
+            },
+        )
+        print(f"💾 Auto-saved: {role} message to conversation {conv_id}")
+    except Exception as e:
+        print(f"⚠️  Auto-save to Neo4j failed (non-fatal): {e}")
+
 def append_turn(session_id: str, role: str, content: str):
     if session_id not in _sessions:
         _sessions[session_id] = deque(maxlen=MAX_HISTORY_TURNS)
     _sessions[session_id].append({"role": role, "content": content})
+    
+    # Auto-save to Neo4j in background (non-blocking)
+    import threading
+    threading.Thread(
+        target=_auto_save_to_neo4j,
+        args=(session_id, role, content),
+        daemon=True,
+    ).start()
 
 def log_route(session_id: str, route: str, query: str):
     if session_id not in _session_route_log:
@@ -356,16 +478,28 @@ async def upload_document(
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query_documents(request: QueryRequest):
+async def query_documents(
+    request: QueryRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Agentic RAG query — now session-aware.
 
     Pass session_id to continue a conversation; omit it to start a new one.
     The server stores and manages the full conversation history.
+    Include Authorization header to link conversations to your user account.
     """
     try:
         # Resolve or create session
         session_id = request.session_id or str(uuid.uuid4())
+
+        # Try to get user context if they provided auth header
+        from neo4j_auth import optional_user
+        user = optional_user(authorization)
+        
+        # Link session to user in context for auto-save
+        if user:
+            _session_user_context[session_id] = user["user_id"]
 
         # Get history accumulated so far for this session
         history = get_history(session_id)
