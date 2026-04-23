@@ -4286,10 +4286,13 @@ const Chat = () => {
 
   const loadDocuments = async (sid?: string | null) => {
     try {
-      // Pass session_id so the backend returns only this session's documents.
-      // Falls back to full list if session_id is not yet known (first load).
       const effectiveSid = sid ?? sessionIdRef.current;
-      const response = await api.listDocuments(effectiveSid ?? undefined);
+      if (!effectiveSid) {
+        setDocuments([]);
+        return;
+      }
+      // Pass session_id so the backend returns only this session's documents.
+      const response = await api.listDocuments(effectiveSid);
       setDocuments(response.documents);
     } catch (error) {
       console.error("Failed to load documents:", error);
@@ -4908,6 +4911,7 @@ const Chat = () => {
     setSessionId(null);
     sessionIdRef.current = null;
     setMessages([]);
+    setDocuments([]);
   };
 
   const ensureActiveConversationId = () => {
@@ -4938,6 +4942,7 @@ const Chat = () => {
       setSessionId(null);
       sessionIdRef.current = null;
       setMessages(conv.messages);
+      setDocuments([]);
       setConvLoading(false);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
@@ -4974,6 +4979,7 @@ const Chat = () => {
     sessionIdRef.current = null;
     setConvLoading(true);
     setMessages([]);
+    setDocuments([]);
 
     // Helper: something went wrong — reset so user isn't stuck on a blank screen
     const abortLoad = () => {

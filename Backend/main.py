@@ -393,11 +393,11 @@ async def upload_document(
         doc_id = str(_uuid_mod.uuid4())
 
         if _ingestion_graph_available:
-            run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks)
+            run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id)
             print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id})")
         else:
             # Fallback: direct synchronous indexing when ingestion_graph not available
-            vector_store.add_document(file.filename, chunks)
+            vector_store.add_document(file.filename, chunks, session_id=session_id)
             print(f"✅ Indexed (direct fallback): {doc_id}")
             try:
                 from graph_rag import get_engine as _get_graph_engine

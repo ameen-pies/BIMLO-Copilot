@@ -1192,9 +1192,9 @@ Reply with ONE word only — the route name."""
             system_content = (
                 f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
                 f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
-                f"The user asked a question that requires documents, but no documents have been uploaded yet. "
-                f"Let them know naturally — match their tone and language exactly. "
-                f"Be brief, friendly, and encourage them to upload a document so you can help."
+                f"The user asked a question that would normally use uploaded documents, but there are no files uploaded in this chat session yet. "
+                f"Mention this clearly in your answer, and offer to help further once they upload a document. "
+                f"Keep the reply friendly and concise."
             )
         else:
             # Serialize the route log as plain text and give it directly to the LLM.
@@ -1267,7 +1267,18 @@ Reply with ONE word only — the route name."""
 
         # If the query explicitly names a file, restrict search to that file only
         filter_dict = None
-        all_docs = self.vs.list_documents()
+        session_id = state.get("session_id", "")
+        all_docs = self.vs.list_documents(session_id=session_id)
+
+        if state["route"] in ("rag", "iterative_rag", "analytics", "transform", "graph", "report"):
+            if not self.vs.has_documents(session_id):
+                print(f"⚠️  [retrieve_vector] no documents available for session={session_id!r}; skipping retrieval")
+                return {
+                    **state,
+                    "retrieved_chunks": [],
+                    "retrieval_iterations": iteration,
+                }
+
         for doc in all_docs:
             fname = doc.get("filename", "")
             if fname and fname.lower() in query.lower():
@@ -1283,9 +1294,14 @@ Reply with ONE word only — the route name."""
             fetch_k = top_k
 
         try:
-            results = self.vs.search(query, top_k=fetch_k, filter_dict=filter_dict)
+            results = self.vs.search(
+                query,
+                top_k=fetch_k,
+                filter_dict=filter_dict,
+                session_id=session_id,
+            )
         except Exception:
-            results = self.vs.search(query, top_k=fetch_k)
+            results = self.vs.search(query, top_k=fetch_k, session_id=session_id)
 
         print(f"{len(results)} vector chunks")
 
@@ -1430,11 +1446,11 @@ Reply with ONE word only — the route name."""
         is_good = _is_good_retrieval(chunks)
 
         if not chunks:
-            # Distinguish: is the store empty, or did the query just not match anything?
-            # Only flag __NO_DOCS__ if the store itself has nothing — not for bad queries.
-            store_stats = self.vs.get_collection_stats()
-            if store_stats.get("total_chunks", 0) == 0:
-                print("⚠️  Vector store is empty — redirecting to direct answer")
+            # Distinguish: is the current session store empty, or did the query just not match anything?
+            # Only flag __NO_DOCS__ if the session has no documents in scope.
+            session_id = state.get("session_id", "")
+            if not self.vs.has_documents(session_id):
+                print(f"⚠️  No documents available for session={session_id!r} — redirecting to direct answer")
                 return {**state, "query": f"__NO_DOCS__:{state['query']}"}
             else:
                 print("⚠️  Retrieval found nothing for this query — proceeding to synthesis with no context")

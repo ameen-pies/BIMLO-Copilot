@@ -57,7 +57,7 @@ class VectorStoreManager:
 
     # ── CRUD ──────────────────────────────────────────────────────────────
 
-    def add_document(self, filename: str, chunks: List[Dict]) -> str:
+    def add_document(self, filename: str, chunks: List[Dict], session_id: Optional[str] = None) -> str:
         """
         Add document chunks to the vector store. Returns the new doc ID.
 
@@ -86,6 +86,7 @@ class VectorStoreManager:
                 "chunk_index": i,
                 "timestamp":   datetime.now().isoformat(),
                 "filename":    filename,
+                "session_id":  session_id or "",
                 "has_images":  has_images,
                 "has_tables":  has_tables,
             })
@@ -109,7 +110,13 @@ class VectorStoreManager:
         )
         return doc_id
 
-    def search(self, query: str, top_k: int = 5, filter_dict: Optional[Dict] = None) -> List[Dict]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        filter_dict: Optional[Dict] = None,
+        session_id: Optional[str] = None,
+    ) -> List[Dict]:
         """
         Semantic search — returns top_k most relevant chunks.
 
@@ -118,10 +125,14 @@ class VectorStoreManager:
         (e.g. badge on source card, adjusted prompt phrasing).
         """
         query_embedding = self.embedding_model.encode(query).tolist()
+        where = {**(filter_dict or {})}
+        if session_id:
+            where["session_id"] = session_id
+
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            where=filter_dict,
+            where=where if where else None,
         )
         formatted: List[Dict] = []
         if results.get("documents") and results["documents"][0]:
@@ -146,9 +157,12 @@ class VectorStoreManager:
         else:
             print(f"No document found with ID {doc_id}")
 
-    def list_documents(self) -> List[Dict]:
+    def list_documents(self, session_id: Optional[str] = None) -> List[Dict]:
         """Return one entry per unique document in the store."""
-        all_results = self.collection.get()
+        if session_id:
+            all_results = self.collection.get(where={"session_id": session_id})
+        else:
+            all_results = self.collection.get()
         docs: Dict[str, Dict] = {}
         for meta in all_results.get("metadatas", []):
             doc_id = meta.get("document_id")
@@ -168,6 +182,13 @@ class VectorStoreManager:
             if meta.get("has_tables"):
                 docs[doc_id]["table_chunks"] += 1
         return list(docs.values())
+
+    def has_documents(self, session_id: Optional[str]) -> bool:
+        """Return True if the vector store contains any chunks for the session."""
+        if not session_id:
+            return False
+        results = self.collection.get(where={"session_id": session_id})
+        return bool(results.get("ids"))
 
     def get_collection_stats(self) -> Dict:
         all_results = self.collection.get()

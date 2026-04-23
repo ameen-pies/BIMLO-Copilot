@@ -41,9 +41,10 @@ from langgraph.graph import StateGraph, END
 
 class IngestionState(TypedDict):
     # inputs
-    doc_id:   str
-    filename: str
-    chunks:   List[Dict]
+    doc_id:     str
+    filename:   str
+    chunks:     List[Dict]
+    session_id: Optional[str]
 
     # outputs set by each node
     vector_indexed:  bool
@@ -95,7 +96,11 @@ def _make_index_vector_store_node(vector_store):
         t0 = time.time()
         try:
             # add_document returns the same doc_id we passed in
-            vector_store.add_document(filename, chunks)
+            vector_store.add_document(
+                filename,
+                chunks,
+                session_id=state.get("session_id"),
+            )
             print(
                 f"✅ [ingestion:index_vector_store] '{filename}' indexed "
                 f"in {time.time()-t0:.1f}s"
@@ -193,6 +198,7 @@ def run_ingestion_pipeline(
     doc_id:   str,
     filename: str,
     chunks:   List[Dict],
+    session_id: Optional[str] = None,
 ) -> None:
     """
     Submit a document ingestion job to the background thread pool.
@@ -216,6 +222,7 @@ def run_ingestion_pipeline(
         "doc_id":          doc_id,
         "filename":        filename,
         "chunks":          chunks,
+        "session_id":      session_id,
         "vector_indexed":  False,
         "graph_ingested":  False,
         "graph_stats":     None,

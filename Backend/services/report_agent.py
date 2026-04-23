@@ -777,6 +777,7 @@ class SharedContext:
         available_docs: List[str],
         explicit_docs: List[str],
         top_k: int = 25,
+        session_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Direct vector-store retrieval used when SharedContext has no cached chunks
@@ -805,22 +806,37 @@ class SharedContext:
 
         try:
             # Pass 1: semantic search on the full prompt
-            _add(vs.search(prompt, top_k=top_k))
+            _add(vs.search(prompt, top_k=top_k, session_id=session_id))
 
             # Pass 2: file-filtered search for explicitly requested docs
             for doc in (explicit_docs or [])[:5]:
-                _add(vs.search(prompt, top_k=15, filter_dict={"filename": doc}))
+                _add(vs.search(
+                    prompt,
+                    top_k=15,
+                    filter_dict={"filename": doc},
+                    session_id=session_id,
+                ))
 
             # Pass 3: if still thin, broad sweep of each explicit doc
             if len(results) < 8 and explicit_docs:
                 for doc in explicit_docs[:3]:
                     doc_name = doc.replace("_", " ").replace("-", " ").rsplit(".", 1)[0]
-                    _add(vs.search(doc_name, top_k=20, filter_dict={"filename": doc}))
+                    _add(vs.search(
+                        doc_name,
+                        top_k=20,
+                        filter_dict={"filename": doc},
+                        session_id=session_id,
+                    ))
 
             # Pass 4: if we have available_docs but nothing explicit, sweep the first few
             if len(results) < 5 and not explicit_docs and available_docs:
                 for doc in available_docs[:3]:
-                    _add(vs.search(prompt, top_k=10, filter_dict={"filename": doc}))
+                    _add(vs.search(
+                        prompt,
+                        top_k=10,
+                        filter_dict={"filename": doc},
+                        session_id=session_id,
+                    ))
 
             print(f"   📂 SharedContext.fetch_chunks_for_report: {len(results)} chunks retrieved")
         except Exception as e:
@@ -1476,6 +1492,7 @@ async def report_stream(req: GenerateReportRequest):
                     prompt         = req.prompt,
                     available_docs = req.available_docs,
                     explicit_docs  = req.explicit_docs,
+                    session_id     = session_id,
                 )
                 if chunks:
                     SharedContext.set_chunks(session_id, chunks)
@@ -1601,6 +1618,7 @@ async def create_report(req: GenerateReportRequest):
             prompt         = req.prompt,
             available_docs = req.available_docs,
             explicit_docs  = req.explicit_docs,
+            session_id     = session_id,
         )
         if chunks:
             SharedContext.set_chunks(session_id, chunks)

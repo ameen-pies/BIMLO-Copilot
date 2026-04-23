@@ -698,7 +698,17 @@ const CallPage: React.FC = () => {
       if (!ttsBytes.byteLength || stateRef.current === "ended") return;
 
       addTurn("assistant", ragAnswer);
-      const answerB64 = btoa(String.fromCharCode(...new Uint8Array(ttsBytes)));
+      // Convert ArrayBuffer → base64 in 8 KB chunks to avoid
+      // "Maximum call stack size exceeded" from spreading large typed arrays.
+      const answerB64 = (() => {
+        const bytes = new Uint8Array(ttsBytes);
+        let binary  = "";
+        const CHUNK  = 8192;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+        }
+        return btoa(binary);
+      })();
       await speakWavRef.current!(answerB64, ragAnswer, false);
 
     } catch (err: any) {
