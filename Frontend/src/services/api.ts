@@ -34,7 +34,9 @@ export interface UploadResponse {
   status: string;
   filename: string;
   document_id: string;
+  session_id?: string;
   chunks_processed: number;
+  cad_summary?: Record<string, unknown>;
   message: string;
 }
 
@@ -146,8 +148,11 @@ class APIClient {
   /**
    * Delete a document by ID
    */
-  async deleteDocument(documentId: string): Promise<DeleteResponse> {
-    return this.request<DeleteResponse>(`/documents/${documentId}`, {
+  async deleteDocument(documentId: string, sessionId?: string): Promise<DeleteResponse> {
+    const url = sessionId
+      ? `/documents/${documentId}?session_id=${encodeURIComponent(sessionId)}`
+      : `/documents/${documentId}`;
+    return this.request<DeleteResponse>(url, {
       method: 'DELETE',
     });
   }
@@ -155,8 +160,11 @@ class APIClient {
   /**
    * Fetch raw text content of a document for in-app viewing
    */
-  async getDocumentContent(documentId: string): Promise<{ document_id: string; filename: string; content: string }> {
-    return this.request(`/documents/${documentId}/content`);
+  async getDocumentContent(documentId: string, sessionId?: string): Promise<{ document_id: string; filename: string; content: string }> {
+    const url = sessionId
+      ? `/documents/${documentId}/content?session_id=${encodeURIComponent(sessionId)}`
+      : `/documents/${documentId}/content`;
+    return this.request(url);
   }
 
   // ==========================================================================

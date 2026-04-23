@@ -3356,6 +3356,32 @@ const Chat = () => {
   const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+
+  const createPreviewUrlForFile = (file: File) => {
+    const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
+    const isImage = IMAGE_EXTS.includes(ext);
+    const isPdf = ext === '.pdf';
+    const isCad = CAD_EXTS.includes(ext);
+    if (!isImage && !isPdf && !isCad) return null;
+    const url = URL.createObjectURL(file);
+    return {
+      url,
+      type: isPdf ? 'pdf' : isImage ? 'image' : 'cad' as const,
+      ifcBlobUrl: ext === '.ifc' ? url : undefined,
+    };
+  };
+
+  const revokePreviewUrl = (documentId: string) => {
+    const cached = blobUrlMapRef.current.get(documentId);
+    if (!cached) return;
+    if (cached.url) URL.revokeObjectURL(cached.url);
+    if (cached.ifcBlobUrl && cached.ifcBlobUrl !== cached.url) URL.revokeObjectURL(cached.ifcBlobUrl);
+    blobUrlMapRef.current.delete(documentId);
+  };
+
+  const removePendingAttachment = (documentId: string) => {
+    setPendingDocIds(prev => prev.filter(id => id !== documentId));
+  };
   const [activeConvId, setActiveConvId] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -3474,7 +3500,12 @@ const Chat = () => {
   const handleFiles = async (files: FileList | File[]) => {
     const arr = Array.from(files);
     if (!arr.length) return;
-    const sid = sessionIdRef.current ?? sessionId;
+    let sid = sessionIdRef.current ?? sessionId;
+    if (!sid) {
+      sid = crypto.randomUUID?.() ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setSessionId(sid);
+      sessionIdRef.current = sid;
+    }
     setIsUploading(true);
     for (const file of arr) {
       // Optimistic placeholder in docs panel
@@ -3486,7 +3517,30 @@ const Chat = () => {
         timestamp: new Date().toISOString(),
       } as any]);
       try {
-        const res = await api.uploadDocument(file, sid ?? undefined);
+        const res = await api.uploadDocument(file, sid);
+        const returnedSid = res.session_id ?? sid;
+        if (returnedSid !== sid) {
+          sid = returnedSid;
+          setSessionId(returnedSid);
+          sessionIdRef.current = returnedSid;
+          loadDocuments(returnedSid);
+        }
+        const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
+        const preview = createPreviewUrlForFile(file);
+        if (preview) {
+          blobUrlMapRef.current.set(res.document_id, {
+            url: preview.url,
+            type: preview.type,
+            cadSummary: res.cad_summary,
+            ifcBlobUrl: preview.ifcBlobUrl,
+          });
+        } else if (res.cad_summary) {
+          blobUrlMapRef.current.set(res.document_id, {
+            url: blobUrlMapRef.current.get(res.document_id)?.url ?? '',
+            type: 'cad',
+            cadSummary: res.cad_summary,
+          });
+        }
         setPendingDocIds(prev => [...prev, res.document_id]);
         setDocuments(prev => prev
           .filter(d => d.document_id !== placeholderId)
@@ -3954,7 +4008,8 @@ const Chat = () => {
     const type: "pdf" | "image" | "txt" = IMAGE_EXTS.includes(`.${ext}`) ? "image" : ext === "pdf" ? "pdf" : "txt";
 
     const base = getApiBase();
-    const res = await fetch(`${base}/documents/${doc.document_id}/download`);
+    const sessionQuery = sessionIdRef.current ? `?session_id=${encodeURIComponent(sessionIdRef.current)}` : "";
+    const res = await fetch(`${base}/documents/${doc.document_id}/download${sessionQuery}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -4015,7 +4070,7 @@ const Chat = () => {
     } else {
       setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: 'txt' });
       try {
-        const res = await (api as any).getDocumentContent(doc.document_id);
+        const res = await (api as any).getDocumentContent(doc.document_id, sessionIdRef.current ?? undefined);
         setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, content: res.content, loading: false } : p);
       } catch {
         setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, loading: false, error: "Could not load document." } : p);
@@ -4081,7 +4136,7 @@ const Chat = () => {
       if (prev && prev.doc.document_id === doc.document_id && prev.content !== null) return prev;
       (async () => {
         try {
-          const res = await (api as any).getDocumentContent(doc.document_id);
+          const res = await (api as any).getDocumentContent(doc.document_id, sessionIdRef.current ?? undefined);
           const fullContent = res.content as string;
           setViewer(p => {
             if (!p || p.doc.document_id !== doc.document_id) return p;
@@ -4134,7 +4189,7 @@ const Chat = () => {
     setDocsPanelOpen(true);
     setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText: fallbackExcerpt, highlightLines: null, highlightKey: 0, mediaType: 'txt' });
     try {
-      const res = await (api as any).getDocumentContent(doc.document_id);
+      const res = await (api as any).getDocumentContent(doc.document_id, sessionIdRef.current ?? undefined);
       const fullContent = res.content as string;
       const line = findLineForNumber(fullContent, numValue) ?? fallbackExcerpt;
       setBubbleViewer(p => p && p.doc.document_id === doc.document_id
@@ -4885,14 +4940,15 @@ const Chat = () => {
     if (!confirm("Are you sure you want to delete this document?")) return;
 
     try {
-      await api.deleteDocument(documentId);
+      await api.deleteDocument(documentId, sessionIdRef.current ?? undefined);
+      revokePreviewUrl(documentId);
       
       toast({
         title: "Document deleted",
         description: "Document removed successfully",
       });
 
-      await loadDocuments();
+      await loadDocuments(sessionIdRef.current);
     } catch (error) {
       toast({
         title: "Delete failed",
@@ -7794,30 +7850,39 @@ const Chat = () => {
                     const isPdf = ext === 'pdf';
                     const cached = blobUrlMapRef.current.get(doc.document_id);
                     return (
-                      <button
-                        key={doc.document_id}
-                        onClick={() => openBubbleDoc(doc)}
-                        className="group flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
-                        title={doc.filename}
-                      >
-                        {/* mini preview */}
-                        <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
-                          {isImg && cached?.url ? (
-                            <img src={cached.url} alt="" className="w-full h-full object-cover" />
-                          ) : isIfc ? (
-                            <span className="text-[9px] font-bold text-primary">IFC</span>
-                          ) : isCad ? (
-                            <span className="text-[9px] font-bold text-orange-400">{ext.toUpperCase()}</span>
-                          ) : isPdf ? (
-                            <span className="text-[9px] font-bold text-red-400">PDF</span>
-                          ) : (
-                            <FileText className="h-3.5 w-3.5 text-muted-foreground/60" />
-                          )}
-                        </div>
-                        <span className="text-[11px] text-foreground/80 font-medium max-w-[90px] truncate group-hover:text-foreground transition-colors">
-                          {(() => { const base = ext ? doc.filename.slice(0, doc.filename.length - ext.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (ext ? '.' + ext : '') : doc.filename; })()}
-                        </span>
-                      </button>
+                      <div key={doc.document_id} className="relative">
+                        <button
+                          type="button"
+                          onClick={() => openBubbleDoc(doc)}
+                          className="group flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                          title={doc.filename}
+                        >
+                          <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
+                            {isImg && cached?.url ? (
+                              <img src={cached.url} alt="" className="w-full h-full object-cover" />
+                            ) : isIfc ? (
+                              <span className="text-[9px] font-bold text-primary">IFC</span>
+                            ) : isCad ? (
+                              <span className="text-[9px] font-bold text-orange-400">{ext.toUpperCase()}</span>
+                            ) : isPdf ? (
+                              <span className="text-[9px] font-bold text-red-400">PDF</span>
+                            ) : (
+                              <FileText className="h-3.5 w-3.5 text-muted-foreground/60" />
+                            )}
+                          </div>
+                          <span className="text-[11px] text-foreground/80 font-medium max-w-[90px] truncate group-hover:text-foreground transition-colors">
+                            {(() => { const base = ext ? doc.filename.slice(0, doc.filename.length - ext.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (ext ? '.' + ext : '') : doc.filename; })()}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); removePendingAttachment(doc.document_id); }}
+                          className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-muted border border-border text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors flex items-center justify-center"
+                          title="Remove attachment"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
                     );
                   })}
                   {pendingDocIds.length > 8 && (

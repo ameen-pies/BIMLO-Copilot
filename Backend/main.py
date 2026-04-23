@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
+from io import BytesIO
 import os, mimetypes, uuid, json, asyncio, threading, queue
 from datetime import datetime
 from dotenv import load_dotenv
@@ -87,6 +88,27 @@ app = FastAPI(
     version="3.0.0",
     description="Agentic RAG API powered by LangGraph — routes, retrieves, iterates, analyses."
 )
+
+# In-memory cache of uploaded files for preview/download during the current server session.
+# This is session-scoped via Neo4j checks in the document endpoints.
+DOCUMENT_FILE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+def _guess_mime_type(filename: str) -> str:
+    mime, _ = mimetypes.guess_type(filename)
+    if mime:
+        return mime
+    ext = os.path.splitext(filename)[1].lower()
+    return {
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.doc':  'application/msword',
+        '.txt':  'text/plain',
+        '.ifc':  'application/octet-stream',
+        '.ifczip': 'application/octet-stream',
+        '.dxf':  'application/octet-stream',
+        '.dwg':  'application/octet-stream',
+        '.step': 'application/octet-stream',
+        '.stp':  'application/octet-stream',
+    }.get(ext, 'application/octet-stream')
 
 app.include_router(auth_router)
 
@@ -363,52 +385,75 @@ async def upload_document(
     conversation node AND the user node in Neo4j (for audit / billing later).
     """
     try:
-        allowed = ['.pdf', '.docx', '.doc', '.txt']
+        text_allowed = ['.pdf', '.docx', '.doc', '.txt']
+        cad_allowed = {'.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'}
         ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in allowed:
-            raise HTTPException(400, f"Unsupported type. Allowed: {', '.join(allowed)}")
+        is_cad = ext in cad_allowed
+        if ext not in text_allowed and not is_cad:
+            raise HTTPException(400, f"Unsupported type. Allowed: {', '.join(text_allowed + list(cad_allowed))}")
 
         # Read file bytes — no disk write, pass directly to processor
         content = await file.read()
         print(f"📄 Received: {file.filename} ({len(content)} bytes)")
 
-        # Write to a temp file so DocumentProcessor (which expects a path) can read it
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-
-        try:
-            chunks = doc_processor.process_document(tmp_path)
-        finally:
-            os.unlink(tmp_path)  # delete temp file immediately
-
-        print(f"✂️  {len(chunks)} chunks created")
-
-        # ── Ingestion pipeline (LangGraph — background, non-blocking) ──────
-        # Generates a UUID for this document, then submits a 3-node LangGraph
-        # pipeline that handles:  chunk_document → index_vector_store → ingest_graph_rag
-        # The pipeline owns the vector_store.add_document() call; we just supply the UUID.
         import uuid as _uuid_mod
         doc_id = str(_uuid_mod.uuid4())
+        session_id = session_id or str(_uuid_mod.uuid4())
+        DOCUMENT_FILE_CACHE[doc_id] = {
+            'filename': file.filename,
+            'bytes': content,
+            'content_type': _guess_mime_type(file.filename),
+            'session_id': session_id,
+            'doc_type': ext,
+        }
+        chunks = []
+        cad_summary = None
 
-        if _ingestion_graph_available:
-            run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id)
-            print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id})")
-        else:
-            # Fallback: direct synchronous indexing when ingestion_graph not available
-            vector_store.add_document(file.filename, chunks, session_id=session_id)
-            print(f"✅ Indexed (direct fallback): {doc_id}")
+        if is_cad:
+            if not _cad_ifc_available:
+                raise HTTPException(400, f"CAD/IFC support is not available on this server.")
             try:
-                from graph_rag import get_engine as _get_graph_engine
-                import threading as _threading
-                _graph_engine = _get_graph_engine()
-                if _graph_engine.available:
-                    def _ingest_fallback():
-                        _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
-                    _threading.Thread(target=_ingest_fallback, daemon=True).start()
-            except Exception as _ge:
-                print(f"⚠️  graph_rag ingestion skipped (fallback): {_ge}")
+                from cad_ifc_agent import _parse_file, CadSharedContext
+
+                summary = _parse_file(file.filename, content)
+                summary['file_id'] = doc_id
+                CadSharedContext.cache_file(doc_id, summary)
+                cad_summary = summary
+                print(f"✅ CAD/IFC parsed: {file.filename} (doc_id={doc_id})")
+            except Exception as cad_err:
+                print(f"❌ CAD upload error: {cad_err}")
+                raise HTTPException(500, f"Error processing CAD/IFC document: {cad_err}")
+        else:
+            # Write to a temp file so DocumentProcessor (which expects a path) can read it
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            try:
+                chunks = doc_processor.process_document(tmp_path)
+            finally:
+                os.unlink(tmp_path)  # delete temp file immediately
+
+            print(f"✂️  {len(chunks)} chunks created")
+
+            if _ingestion_graph_available:
+                run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id)
+                print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id})")
+            else:
+                # Fallback: direct synchronous indexing when ingestion_graph not available
+                vector_store.add_document(file.filename, chunks, session_id=session_id)
+                print(f"✅ Indexed (direct fallback): {doc_id}")
+                try:
+                    from graph_rag import get_engine as _get_graph_engine
+                    import threading as _threading
+                    _graph_engine = _get_graph_engine()
+                    if _graph_engine.available:
+                        def _ingest_fallback():
+                            _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
+                        _threading.Thread(target=_ingest_fallback, daemon=True).start()
+                except Exception as _ge:
+                    print(f"⚠️  graph_rag ingestion skipped (fallback): {_ge}")
 
         # ── Persist to Neo4j — scoped to session + optionally user ─────────
         from neo4j_auth import optional_user, _run as neo4j_run
@@ -465,7 +510,9 @@ async def upload_document(
             "status":           "success",
             "filename":         file.filename,
             "document_id":      doc_id,
+            "session_id":       session_id,
             "chunks_processed": len(chunks),
+            "cad_summary":      cad_summary,
             "message":          f"'{file.filename}' processed and indexed successfully",
         }
     except HTTPException:
@@ -998,23 +1045,78 @@ async def list_documents(
 
 
 @app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, session_id: Optional[str] = None):
+    if not session_id:
+        raise HTTPException(status_code=403, detail="Session ID required")
+
     try:
-        vector_store.delete_document(doc_id)
+        from neo4j_auth import _run as neo4j_run
+        rows = neo4j_run(
+            """
+            MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
+            RETURN d.doc_type AS doc_type
+            """,
+            {"sid": session_id, "doc_id": doc_id},
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        doc_type = (rows[0].get("doc_type") or "").lower()
+        if _cad_ifc_available and doc_type in {'.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'}:
+            try:
+                from cad_ifc_agent import CadSharedContext
+                CadSharedContext.delete_file(doc_id)
+            except Exception:
+                pass
+
+        try:
+            vector_store.delete_document(doc_id)
+        except Exception:
+            pass
+
+        neo4j_run(
+            """
+            MATCH (c:Conversation {session_id: $sid})-[r:USED_DOCUMENT]->(d:Document {id: $doc_id})
+            DELETE r
+            """,
+            {"sid": session_id, "doc_id": doc_id},
+        )
+        DOCUMENT_FILE_CACHE.pop(doc_id, None)
+        neo4j_run(
+            "MATCH (d:Document {id: $doc_id}) DETACH DELETE d",
+            {"doc_id": doc_id},
+        )
+
         return {"status": "success", "message": f"Document {doc_id} deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error deleting document: {e}")
 
 
 @app.get("/documents/{doc_id}/content")
-async def get_document_content(doc_id: str):
+async def get_document_content(doc_id: str, session_id: Optional[str] = None):
     """Return the raw text content of a stored document by reassembling its chunks from ChromaDB."""
+    if not session_id:
+        raise HTTPException(status_code=403, detail="Session ID required")
+
     try:
         # ── CAD/IFC files live in CadSharedContext, not the vector store ──
         if _cad_ifc_available:
             from cad_ifc_agent import CadSharedContext
             cad_file = CadSharedContext.get_file(doc_id)
             if cad_file:
+                from neo4j_auth import _run as neo4j_run
+                rows = neo4j_run(
+                    """
+                    MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
+                    RETURN d.id AS id
+                    """,
+                    {"sid": session_id, "doc_id": doc_id},
+                )
+                if not rows:
+                    raise HTTPException(status_code=404, detail="Document not found")
+
                 import json as _json
                 summary_text = _json.dumps(cad_file, indent=2, default=str)
                 return {"document_id": doc_id, "filename": cad_file.get("filename", doc_id), "content": summary_text}
@@ -1022,6 +1124,10 @@ async def get_document_content(doc_id: str):
         # Reassemble text from ChromaDB chunks (ordered by chunk_index)
         results = vector_store.collection.get(where={"document_id": doc_id})
         if not results or not results.get("ids"):
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        metadata = results["metadatas"][0] if results.get("metadatas") else {}
+        if metadata.get("session_id") != session_id:
             raise HTTPException(status_code=404, detail="Document not found")
 
         # Sort chunks by chunk_index and join
@@ -1041,19 +1147,47 @@ async def get_document_content(doc_id: str):
 
 
 @app.get("/documents/{doc_id}/download")
-async def download_document(doc_id: str):
+async def download_document(doc_id: str, session_id: Optional[str] = None):
     """Return the document text reconstructed from ChromaDB chunks as a downloadable .txt file."""
+    if not session_id:
+        raise HTTPException(status_code=403, detail="Session ID required")
+
     try:
         if _cad_ifc_available:
             from cad_ifc_agent import CadSharedContext
             if CadSharedContext.get_file(doc_id):
+                from neo4j_auth import _run as neo4j_run
+                rows = neo4j_run(
+                    """
+                    MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
+                    RETURN d.id AS id
+                    """,
+                    {"sid": session_id, "doc_id": doc_id},
+                )
+                if not rows:
+                    raise HTTPException(status_code=404, detail="Document not found")
                 raise HTTPException(
                     status_code=404,
                     detail="CAD/IFC files are streamed from the browser blob URL, not re-downloaded from the server."
                 )
 
+        cached_file = DOCUMENT_FILE_CACHE.get(doc_id)
+        if cached_file and cached_file.get('session_id') == session_id:
+            if cached_file.get('content_type') in {'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/gif'}:
+                return StreamingResponse(
+                    BytesIO(cached_file['bytes']),
+                    media_type=cached_file['content_type'],
+                    headers={
+                        'Content-Disposition': f'inline; filename="{cached_file["filename"]}"',
+                    },
+                )
+
         results = vector_store.collection.get(where={"document_id": doc_id})
         if not results or not results.get("ids"):
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        metadata = results["metadatas"][0] if results.get("metadatas") else {}
+        if metadata.get("session_id") != session_id:
             raise HTTPException(status_code=404, detail="Document not found")
 
         pairs = sorted(
