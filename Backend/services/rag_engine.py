@@ -1165,17 +1165,32 @@ Reply with ONE word only — the route name."""
         query    = state["query"]
         history  = state.get("conversation_history", [])
         route_log = state.get("_route_log", [])
+        session_id = state.get("session_id", "")
 
         # Detect no-docs redirect from check_retrieval
         no_docs = query.startswith("__NO_DOCS__:")
         if no_docs:
             query = query[len("__NO_DOCS__:"):]
 
+        # Even if no_docs flag isn't set, double-check actual session state.
+        # This prevents the LLM from being misled by a stale route_log entry
+        # that shows a failed RAG attempt from before any documents were uploaded.
+        if not no_docs:
+            try:
+                has_docs = self.vs.has_documents(session_id)
+            except Exception:
+                has_docs = True  # safe default — don't claim no docs if we can't check
+
         plan = self.judge._fallback_plan(query)
 
         print(f"💬 Direct answer (language: {plan.target_language}, tone: {plan.target_tone}, no_docs={no_docs})")
 
-        answer = self._generate_direct_answer(query, plan, history, no_docs=no_docs, route_log=route_log)
+        answer = self._generate_direct_answer(
+            query, plan, history,
+            no_docs=no_docs,
+            route_log=route_log,
+            session_has_docs=has_docs if not no_docs else False,
+        )
 
         return {
             **state,
@@ -1185,7 +1200,7 @@ Reply with ONE word only — the route name."""
             "confidence": 1.0,
         }
     
-    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False, route_log: Optional[List[Dict]] = None) -> str:
+    def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False, route_log: Optional[List[Dict]] = None, session_has_docs: bool = True) -> str:
         """Generate a direct answer using conversation history as the primary context."""
 
         if no_docs:
@@ -1210,6 +1225,19 @@ Reply with ONE word only — the route name."""
                     f"regardless of which internal mechanism produced each answer."
                 )
 
+            # Inject current document availability so the LLM isn't misled by a
+            # stale route_log entry showing a failed RAG attempt from before upload.
+            if session_has_docs:
+                doc_status_note = (
+                    "\n\nIMPORTANT: The user HAS already uploaded documents to this chat session. "
+                    "If the action log shows a previous failed document search, that happened "
+                    "before the upload — documents ARE now available in this session."
+                )
+            else:
+                doc_status_note = (
+                    "\n\nNote: No documents have been uploaded to this chat session yet."
+                )
+
             system_content = (
                 f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
                 f"You help professionals in construction, BTP, and telecom industries with technical questions and document analysis. "
@@ -1218,6 +1246,7 @@ Reply with ONE word only — the route name."""
                 f"are all yours. Use them freely to answer follow-up questions, recall what was "
                 f"said or done, and modify previous answers when asked."
                 f"{session_context}"
+                f"{doc_status_note}"
             )
 
         messages: List[Dict] = [{"role": "system", "content": system_content}]
