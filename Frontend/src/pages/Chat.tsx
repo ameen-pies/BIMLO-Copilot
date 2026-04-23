@@ -3366,6 +3366,53 @@ const Chat = () => {
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const activeConvIdRef = useRef<string>("");
   useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+  const [pendingConvIds, setPendingConvIds] = useState<Record<string, boolean>>({});
+  const markPendingConversation = useCallback((convId: string) => {
+    setPendingConvIds(prev => ({ ...prev, [convId]: true }));
+  }, []);
+  const clearPendingConversation = useCallback((convId: string) => {
+    setPendingConvIds(prev => {
+      if (!prev[convId]) return prev;
+      const next = { ...prev };
+      delete next[convId];
+      return next;
+    });
+  }, []);
+  const updateConversationMessages = useCallback(
+    (convId: string, updatedMessages: Message[], preview: string, title?: string) => {
+      setConversations(prev => {
+        const existing = prev.find(c => c.id === convId);
+        if (existing) {
+          return prev.map(c =>
+            c.id === convId
+              ? {
+                  ...c,
+                  messages: updatedMessages,
+                  preview: preview || c.preview,
+                  timestamp: new Date(),
+                  title: title || c.title,
+                }
+              : c
+          );
+        }
+        return [
+          {
+            id: convId,
+            title: title || "Untitled",
+            preview,
+            timestamp: new Date(),
+            messages: updatedMessages,
+            sessionId: sessionIdRef.current,
+          } as any,
+          ...prev,
+        ];
+      });
+      if (activeConvIdRef.current === convId) {
+        setMessages(updatedMessages);
+      }
+    },
+    []
+  );
   const [historySearch, setHistorySearch] = useState("");
   const [historySort, setHistorySort] = useState<"newest" | "oldest">("newest");
   const [docsPanelOpen, setDocsPanelOpen] = useState(false);
@@ -3407,6 +3454,9 @@ const Chat = () => {
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
+  const [typingConvId, setTypingConvId] = useState<string | null>(null);
+  const typingConvIdRef = useRef<string | null>(null);
+  useEffect(() => { typingConvIdRef.current = typingConvId; }, [typingConvId]);
   const [openSourceKey, setOpenSourceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   // Map document_id → local object URL (for PDF/image preview without re-downloading)
@@ -3605,11 +3655,11 @@ const Chat = () => {
 
           if (transcript) {
             // Update the voice bubble with transcript and set content for RAG
-            setMessages(prev => prev.map(m =>
-              m.id === voiceMsgId
-                ? { ...m, content: transcript, voiceTranscript: transcript }
-                : m
-            ));
+            const updatedVoiceMsg: Message = { ...voiceMsg, content: transcript, voiceTranscript: transcript };
+            const voiceMessages = messages.some(m => m.id === voiceMsgId)
+              ? messages.map(m => m.id === voiceMsgId ? updatedVoiceMsg : m)
+              : [...messages, updatedVoiceMsg];
+            setMessages(voiceMessages);
             // Wrap the transcript so the agent knows this was spoken, not typed
             const voiceQuery = `[Voice message — the user said this aloud, not typed it]\n\n${transcript}`;
             // Now run the RAG query using the transcript as the question
@@ -3619,19 +3669,17 @@ const Chat = () => {
               const convId = ensureActiveConversationId();
               const assistantMsg = await runStreamingQuery(voiceQuery);
               if (!assistantMsg) return;
-              setMessages(prev => {
-                const updated = [...prev, assistantMsg];
-                const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
-                const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-                setConversations(convs => {
-                  const existing = convs.find(c => c.id === convId);
-                  if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-                  return [{ id: convId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
-                });
-                // Persist voice reply to DB
-                saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
-                return updated;
+              const updated = [...voiceMessages, assistantMsg];
+              const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
+              const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
+              setMessages(updated);
+              setConversations(convs => {
+                const existing = convs.find(c => c.id === convId);
+                if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
+                return [{ id: convId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
               });
+              // Persist voice reply to DB
+              saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
               setTypingMessageId(assistantMsg.id);
               fetchSuggestions(transcript, assistantMsg.content);
               fireNotification();
@@ -3886,7 +3934,12 @@ const Chat = () => {
       setConversations(convs => convs.map(c => c.id === convId ? { ...c, title: smartTitle } : c));
       // Update title in DB
       const _conv = conversations.find(c => c.id === convId);
-      if (_conv) saveConversationToDB(convId, (_conv as any).sessionId ?? sessionIdRef.current ?? "", smartTitle, _conv.preview, _conv.messages);
+      if (_conv) {
+        const messagesToSave = (_conv.messages && _conv.messages.length > 0)
+          ? _conv.messages
+          : messages;
+        saveConversationToDB(convId, (_conv as any).sessionId ?? sessionIdRef.current ?? "", smartTitle, _conv.preview, messagesToSave);
+      }
     } catch {
       // Silent fail — title stays as-is
     }
@@ -4263,24 +4316,42 @@ const Chat = () => {
     // Use getAuthHeader() which falls back to localStorage, so this works even
     // before currentUser has hydrated in the React context.
     const authH = getAuthHeader();
-    if (!authH.Authorization) return;
+    if (!authH.Authorization) {
+      console.warn("loadConversationsFromDB skipped: no auth token available");
+      return;
+    }
     try {
       const base = getApiBase();
       const res = await fetch(`${base}/auth/conversations`, {
         headers: { ...(authH as any), "Content-Type": "application/json" },
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "<no body>");
+        console.warn("loadConversationsFromDB failed:", res.status, errorText);
+        return;
+      }
       const rows: Array<{ id: string; title: string; preview: string; updated_at: string; session_id: string }> = await res.json();
-      // We only restore sidebar entries (id/title/preview/timestamp).
-      // Full messages are fetched lazily when user clicks a conversation.
-      setConversations(rows.map(r => ({
-        id: r.id,
-        title: r.title || "Untitled",
-        preview: r.preview || "",
-        timestamp: new Date(r.updated_at || Date.now()),
-        messages: [],
-        sessionId: r.session_id,
-      } as any)));
+      console.log(`✅ loadConversationsFromDB loaded ${rows.length} conversations`, rows.map(r => ({ id: r.id, session_id: r.session_id })));
+      // Keep any in-memory conversation state (messages/pending typing) while
+      // refreshing the sidebar list. This prevents the user from losing a
+      // pending message when the DB list is reloaded mid-generation.
+      setConversations(prev => {
+        const existingById = new Map(prev.map(c => [c.id, c]));
+        const refreshed = rows.map(r => {
+          const existing = existingById.get(r.id);
+          return {
+            id: r.id,
+            title: r.title || "Untitled",
+            preview: r.preview || "",
+            timestamp: new Date(r.updated_at || Date.now()),
+            messages: existing?.messages?.length ? existing.messages : [],
+            sessionId: r.session_id,
+          } as any;
+        });
+        // Preserve any local-only conversations that have not yet been synced.
+        const localOnly = prev.filter(c => !rows.some(r => r.id === c.id));
+        return [...localOnly, ...refreshed];
+      });
     } catch (e) {
       console.error("loadConversationsFromDB failed:", e);
     }
@@ -4293,12 +4364,18 @@ const Chat = () => {
     preview: string,
     msgs: Message[],
   ) => {
-    if (!currentUser) return;
+    const authHeader = getAuthHeader();
+    if (!authHeader.Authorization) {
+      console.warn("saveConversationToDB skipped: no auth token available", { convId, title, preview, messageCount: msgs.length });
+      return;
+    }
+
     try {
       const base = getApiBase();
-      await fetch(`${base}/auth/conversations/save`, {
+      console.log("💾 saveConversationToDB", { convId, sessionId: sid, title, preview, messageCount: msgs.length, currentUser: !!currentUser });
+      const res = await fetch(`${base}/auth/conversations/save`, {
         method: "POST",
-        headers: { ...(getAuthHeader() as any), "Content-Type": "application/json" },
+        headers: { ...(authHeader as any), "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_id: convId,
           session_id: sid,
@@ -4326,6 +4403,12 @@ const Chat = () => {
           })),
         }),
       });
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "<no body>");
+        console.error("saveConversationToDB failed response:", res.status, errorText);
+      } else {
+        console.log("✅ saveConversationToDB succeeded", { convId, messageCount: msgs.length });
+      }
     } catch (e) {
       console.error("saveConversationToDB failed:", e);
     }
@@ -4831,6 +4914,7 @@ const Chat = () => {
     if (activeConvId) return activeConvId;
     const newId = Date.now().toString();
     setActiveConvId(newId);
+    activeConvIdRef.current = newId;  // sync update so runStreamingQuery reads it immediately
     return newId;
   };
 
@@ -4879,9 +4963,10 @@ const Chat = () => {
     };
 
     if (!rawToken) {
-      // No token — can't load, don't change any state
+      console.warn("loadConversation skipped: no auth token available", { convId: conv.id, title: conv.title, sessionId: sid });
       return;
     }
+    console.log("🔐 loadConversation auth info", { hasToken: !!rawToken, currentUser: !!currentUser, sessionId: sid });
 
     // Commit to loading this conversation only after we know we have a token
     setActiveConvId(conv.id);
@@ -4902,6 +4987,7 @@ const Chat = () => {
       const res = await fetch(`${base}/auth/conversations/${conv.id}`, { headers: authHeaders });
       if (res.ok) {
         const data = await res.json();
+        console.log("✅ loadConversation DB response", { conversationId: conv.id, messageCount: (data.messages ?? []).length, sessionId: data.session_id });
         const restored: Message[] = (data.messages ?? []).map((m: any) => ({
           // Spread the raw message first (captures any flat rich fields the backend returns)
           ...m,
@@ -4920,7 +5006,8 @@ const Chat = () => {
         setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
         return;
       }
-      console.warn("loadConversation DB fetch non-ok:", res.status);
+      const errorText = await res.text().catch(() => "<no body>");
+      console.warn("loadConversation DB fetch non-ok:", res.status, errorText);
       // DB fetch failed, try fallback path if available
       if (!sid) {
         // No sessionId fallback available, abort
@@ -4991,14 +5078,24 @@ const Chat = () => {
 
       abortControllerRef.current = new AbortController();
 
+      // Build auth header so the backend links auto-saved messages to the user account
+      const rawToken = currentUser?.token ?? (() => {
+        try { return JSON.parse(localStorage.getItem("bimlo_auth") ?? "{}").token ?? ""; } catch { return ""; }
+      })();
+      const streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (rawToken) streamHeaders["Authorization"] = `Bearer ${rawToken}`;
+
       const res = await fetch(`${base}/query-stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: streamHeaders,
         body: JSON.stringify({
           query,
           top_k: 5,
           ...(sessionId ? { session_id: sessionId } : {}),
           ...(forceRoute ? { force_route: forceRoute } : {}),
+          // Tell the backend to save messages under the frontend's conversation ID
+          // so loadConversation finds them without a mismatch.
+          ...(activeConvIdRef.current ? { conversation_id: activeConvIdRef.current } : {}),
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -5380,6 +5477,8 @@ const Chat = () => {
     setSuggestions([]);
     setShowSilenceWarning(false);
 
+    const convId = ensureActiveConversationId();
+    const originMessages = messages;
     const userMsg: Message = {
       id: Date.now().toString(),
       role: "user",
@@ -5387,16 +5486,20 @@ const Chat = () => {
       timestamp: new Date(),
       attachedDocIds: pendingDocIds.length > 0 ? [...pendingDocIds] : undefined,
     };
+    const userRawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+    const updatedUserMessages = [...originMessages, userMsg];
     setMessages(prev => [...prev, userMsg]);
+    updateConversationMessages(convId, updatedUserMessages, "", userRawTitle);
     setInput("");
     setPendingDocIds([]);
     if (!notifyDismissed) setShowNotifyBanner(true);
+    markPendingConversation(convId);
+    setTypingConvId(convId);
 
     try {
       // ── Route: CAD/IFC agent if a CAD file is the active context ──────────
       // Priority 1: a CAD doc explicitly attached to this message (pendingDocIds)
       // Priority 2: user mentions the file by name or uses 3D/BIM keywords → use last uploaded CAD file
-      const convId = ensureActiveConversationId();
       const CAD_DOC_TYPES = new Set(["ifc", "cad", "dxf", "dwg", "step", "stp"]);
 
       const CAD_INTENT_KEYWORDS = [
@@ -5436,23 +5539,18 @@ const Chat = () => {
         ? await runCadQuery(trimmedInput, activeCadFileId)
         : await runStreamingQuery(trimmedInput);
       if (!assistantMsg) return;
-      let updatedMessages: Message[] = [];
-      setMessages(prev => {
-        updatedMessages = [...prev, assistantMsg];
-        return updatedMessages;
-      });
+      const updatedMessages: Message[] = [...originMessages, userMsg, assistantMsg];
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
       const preview  = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-      setConversations(convs => {
-        const existing = convs.find(c => c.id === convId);
-        if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updatedMessages, preview, timestamp: new Date() } : c);
-        return [{ id: convId, title: rawTitle, preview, timestamp: new Date(), messages: updatedMessages, sessionId } as any, ...convs];
-      });
+      updateConversationMessages(convId, updatedMessages, preview, rawTitle);
       // Persist to DB (non-blocking)
       saveConversationToDB(convId, sessionIdRef.current ?? "", rawTitle, preview, updatedMessages);
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
+      if (activeConvIdRef.current !== convId) {
+        toast({ title: "Response complete", description: "A response finished in another conversation.", });
+      }
       // Smart conversation title:
       // • Report route → call /title with the prompt so the sidebar shows
       //   "Telecom Site Survey Field Results" instead of the raw user message.
@@ -5486,23 +5584,25 @@ const Chat = () => {
       };
       setMessages(prev => [...prev, errorMsg]);
       toast({ title: "Query failed", description: msg, variant: "destructive" });
+    } finally {
+      clearPendingConversation(convId);
+      if (typingConvIdRef.current === convId) {
+        setTypingConvId(null);
+      }
     }
   };
-
-  // Keep the stable ref up-to-date so handleSendWithText can call handleSend
-  handleSendDirectRef.current = handleSend;
 
   const handleStop = () => {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);
     setTypingMessageId(null);
+    setTypingConvId(null);
     setThinkingSteps([]);
     // Add a subtle interrupted indicator as an assistant message
     setMessages(prev => {
-      // Only add if the last message is from the user (i.e. no partial answer came through)
       const last = prev[prev.length - 1];
-      if (last?.role === "assistant") return prev; // partial answer already exists, don't override
+      if (last?.role === "assistant") return prev;
       return [...prev, {
         id: Date.now().toString(),
         role: "assistant" as const,
@@ -5709,6 +5809,9 @@ const Chat = () => {
     const newContent = editDraft.trim();
     if (!newContent) return;
 
+    const originConvId = activeConvIdRef.current;
+    const originMessages = messages;
+
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);
@@ -5716,45 +5819,81 @@ const Chat = () => {
     setEditingMsgId(null);
     setEditDraft("");
 
-    const msgIndex = messages.findIndex(m => m.id === msgId);
+    const msgIndex = originMessages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
 
-    const updatedUserMsg: Message = { ...messages[msgIndex], content: newContent, timestamp: new Date() };
-    setMessages(prev => [...prev.slice(0, msgIndex), updatedUserMsg]);
+    const updatedUserMsg: Message = { ...originMessages[msgIndex], content: newContent, timestamp: new Date() };
+    if (activeConvIdRef.current === originConvId) {
+      setMessages(prev => [...prev.slice(0, msgIndex), updatedUserMsg]);
+    }
 
     try {
+      setTypingConvId(originConvId);
       const assistantMsg = await runStreamingQuery(newContent);
       if (!assistantMsg) return;
-      setMessages(prev => [...prev, assistantMsg]);
+      const existingConv = conversations.find(c => c.id === originConvId);
+      const updatedMessages = [...originMessages.slice(0, msgIndex), updatedUserMsg, assistantMsg];
+      updateConversationMessages(
+        originConvId,
+        updatedMessages,
+        existingConv?.preview ?? "",
+        existingConv?.title
+      );
       setTypingMessageId(assistantMsg.id);
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = { id: Date.now().toString(), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };
-      setMessages(prev => [...prev, errorMsg]);
+      if (activeConvIdRef.current === originConvId) {
+        setMessages(prev => [...prev, errorMsg]);
+      }
       toast({ title: "Query failed", description: msg, variant: "destructive" });
+    } finally {
+      if (typingConvIdRef.current === originConvId) {
+        setTypingConvId(null);
+      }
     }
   };
 
   const handleRedo = async (msgId: string) => {
-    const msgIndex = messages.findIndex(m => m.id === msgId);
+    const originConvId = activeConvIdRef.current;
+    const originMessages = messages;
+
+    const msgIndex = originMessages.findIndex(m => m.id === msgId);
     if (msgIndex < 1) return;
-    const prevUserMsg = [...messages].slice(0, msgIndex).reverse().find(m => m.role === "user");
+    const prevUserMsg = [...originMessages].slice(0, msgIndex).reverse().find(m => m.role === "user");
     if (!prevUserMsg) return;
 
     setThinkingSteps([]);
     setThinkingExpanded(true);
-    setMessages(prev => prev.filter(m => m.id !== msgId));
+    const cleanedMessages = originMessages.filter(m => m.id !== msgId);
+    if (activeConvIdRef.current === originConvId) {
+      setMessages(cleanedMessages);
+    }
 
     try {
+      setTypingConvId(originConvId);
+      const existingConv = conversations.find(c => c.id === originConvId);
       const redoMsg = await runStreamingQuery(prevUserMsg.content);
       if (!redoMsg) return;
-      setMessages(prev => [...prev, redoMsg]);
-      setTypingMessageId(redoMsg.id);
+      const updatedMessages = [...cleanedMessages, redoMsg];
+      updateConversationMessages(
+        originConvId,
+        updatedMessages,
+        existingConv?.preview ?? "",
+        existingConv?.title
+      );
+      if (activeConvIdRef.current === originConvId) {
+        setTypingMessageId(redoMsg.id);
+      }
       fireNotification();
     } catch (error) {
       if (!(error instanceof Error && error.name === "AbortError")) {
         const msg = serializeError(error);
         toast({ title: "Regeneration failed", description: msg, variant: "destructive" });
+      }
+    } finally {
+      if (typingConvIdRef.current === originConvId) {
+        setTypingConvId(null);
       }
     }
   };
@@ -6000,16 +6139,19 @@ const Chat = () => {
                                 <div className="flex items-start justify-between gap-2">
                                   <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
                                   <div className="shrink-0 flex items-center mt-0.5">
-                                    <span className="text-[10px] text-muted-foreground/60 tabular-nums group-hover:hidden">
-                                      {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
-                                    </span>
-                                    <button
-                                      onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
-                                      className="hidden group-hover:flex items-center justify-center p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all"
-                                    >
-                                      <Trash2 className="h-3 w-3" />
-                                    </button>
-                                  </div>
+                                  {pendingConvIds[conv.id] && conv.id !== activeConvId ? (
+                                    <span className="mr-2 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                                  ) : null}
+                                  <span className="text-[10px] text-muted-foreground/60 tabular-nums group-hover:hidden">
+                                    {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
+                                  </span>
+                                  <button
+                                    onClick={e => { e.stopPropagation(); deleteConversation(conv.id); }}
+                                    className="hidden group-hover:flex items-center justify-center p-1 rounded-md text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-all"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </div>
                                 </div>
                                 <p className="text-[11px] text-muted-foreground leading-snug line-clamp-2">{conv.preview}</p>
                               </div>
@@ -7401,7 +7543,7 @@ const Chat = () => {
               </motion.div>
             ))}
 
-            {isLoading && (
+            {isLoading && typingConvId === activeConvId && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}

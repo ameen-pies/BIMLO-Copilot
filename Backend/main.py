@@ -177,87 +177,90 @@ def get_route_log(session_id: str) -> list:
 # Neo4j on every single message append
 _conversation_cache: Dict[str, str] = {}  # session_id -> conversation_id
 
-def _auto_save_to_neo4j(session_id: str, role: str, content: str):
+def _auto_save_to_neo4j(session_id: str, role: str, content: str, frontend_conv_id: str = None):
     """
-    Auto-persist a message to Neo4j without requiring explicit user_id.
-    Creates an anonymous conversation if needed, then appends the message.
-    If the session is linked to a user, also creates the HAS_CONVERSATION relationship.
-    Runs in background to avoid blocking the query response.
+    Auto-persist a message to Neo4j.
+
+    For LOGGED-IN users: the frontend calls /auth/conversations/save after every
+    reply with the full rich payload (sources, analytics, reportId, etc.).
+    We only ensure the Conversation node exists and is linked to the user so
+    that /auth/conversations can list it.  We do NOT write Message nodes here
+    to avoid a race condition that would overwrite the richer frontend save.
+
+    For ANONYMOUS sessions: we own the full persistence (node + messages)
+    since the frontend's saveConversationToDB skips saves for guests.
     """
     try:
         from neo4j_auth import _run as neo4j_run
         from datetime import datetime as _dt
         import uuid as _uuid_mod
-        
-        # Check if we've already cached this conversation
-        conv_id = _conversation_cache.get(session_id)
+
         user_id = _session_user_context.get(session_id)
-        
+        now     = _dt.utcnow().isoformat()
+
+        # ── Logged-in user: ensure conv node + user link, skip message write ──
+        if user_id:
+            conv_id = frontend_conv_id
+            if not conv_id:
+                return  # nothing to do without an ID to MERGE on
+            neo4j_run(
+                """
+                MATCH (u:User {id: $user_id})
+                MERGE (c:Conversation {id: $conv_id})
+                ON CREATE SET c.session_id = $session_id,
+                              c.title      = "Chat",
+                              c.preview    = "",
+                              c.chat_type  = "rag",
+                              c.created_at = $now,
+                              c.updated_at = $now
+                ON MATCH  SET c.session_id = $session_id
+                MERGE (u)-[:HAS_CONVERSATION]->(c)
+                """,
+                {"user_id": user_id, "conv_id": conv_id, "session_id": session_id, "now": now},
+            )
+            # Messages will be written by frontend's saveConversationToDB — done.
+            return
+
+        # ── Anonymous session: full persistence ───────────────────────────────
+        conv_id = frontend_conv_id or _conversation_cache.get(session_id)
+
         if not conv_id:
-            # Try to find existing conversation by session_id
             rows = neo4j_run(
-                "MATCH (c:Conversation {session_id: $sid}) RETURN c.id LIMIT 1",
+                "MATCH (c:Conversation {session_id: $sid}) RETURN c.id AS id LIMIT 1",
                 {"sid": session_id},
             )
             if rows:
-                conv_id = rows[0]["c.id"]
-                _conversation_cache[session_id] = conv_id
-            else:
-                # Create new conversation for this session
-                conv_id = str(_uuid_mod.uuid4())
-                now = _dt.utcnow().isoformat()
-                
-                if user_id:
-                    # Logged-in: create conversation and link to user
-                    neo4j_run(
-                        """
-                        MATCH (u:User {id: $user_id})
-                        CREATE (c:Conversation {
-                            id:          $conv_id,
-                            session_id:  $session_id,
-                            title:       "Chat",
-                            preview:     "",
-                            chat_type:   "rag",
-                            created_at:  $now,
-                            updated_at:  $now
-                        })
-                        MERGE (u)-[:HAS_CONVERSATION]->(c)
-                        """,
-                        {"user_id": user_id, "conv_id": conv_id, "session_id": session_id, "now": now},
-                    )
-                    print(f"✅ Auto-created conversation {conv_id} for user {user_id} | session {session_id}")
-                else:
-                    # Anonymous: just create conversation
-                    neo4j_run(
-                        """
-                        CREATE (c:Conversation {
-                            id:          $conv_id,
-                            session_id:  $session_id,
-                            title:       "Chat",
-                            preview:     "",
-                            chat_type:   "rag",
-                            created_at:  $now,
-                            updated_at:  $now
-                        })
-                        """,
-                        {"conv_id": conv_id, "session_id": session_id, "now": now},
-                    )
-                    print(f"✅ Auto-created anonymous conversation {conv_id} for session {session_id}")
-                
-                _conversation_cache[session_id] = conv_id
-        
-        # Now add the message
-        msg_id = str(_uuid_mod.uuid4())
-        ts = _dt.utcnow().isoformat()
-        
-        # Count existing messages to set the index
+                conv_id = rows[0]["id"]
+
+        if not conv_id:
+            conv_id = str(_uuid_mod.uuid4())
+
+        _conversation_cache[session_id] = conv_id
+
+        # Upsert anonymous conversation node
+        neo4j_run(
+            """
+            MERGE (c:Conversation {id: $conv_id})
+            ON CREATE SET c.session_id = $session_id,
+                          c.title      = "Chat",
+                          c.preview    = "",
+                          c.chat_type  = "rag",
+                          c.created_at = $now,
+                          c.updated_at = $now
+            ON MATCH  SET c.session_id = $session_id,
+                          c.updated_at = $now
+            """,
+            {"conv_id": conv_id, "session_id": session_id, "now": now},
+        )
+
+        # Append the message
+        msg_id     = str(_uuid_mod.uuid4())
+        ts         = _dt.utcnow().isoformat()
         count_rows = neo4j_run(
             "MATCH (:Conversation {id: $conv_id})-[r:CONTAINS]->(m:Message) RETURN COUNT(r) AS cnt",
             {"conv_id": conv_id},
         )
         index = count_rows[0]["cnt"] if count_rows else 0
-        
-        # Create and link the message
         neo4j_run(
             """
             MATCH (c:Conversation {id: $conv_id})
@@ -271,29 +274,23 @@ def _auto_save_to_neo4j(session_id: str, role: str, content: str):
             CREATE (c)-[:CONTAINS {index: $index}]->(msg)
             SET c.updated_at = $ts
             """,
-            {
-                "conv_id": conv_id,
-                "msg_id": msg_id,
-                "role": role,
-                "content": content,
-                "ts": ts,
-                "index": index,
-            },
+            {"conv_id": conv_id, "msg_id": msg_id, "role": role,
+             "content": content, "ts": ts, "index": index},
         )
-        print(f"💾 Auto-saved: {role} message to conversation {conv_id}")
+        print(f"💾 Auto-saved (anon): {role} message to conversation {conv_id}")
     except Exception as e:
         print(f"⚠️  Auto-save to Neo4j failed (non-fatal): {e}")
 
-def append_turn(session_id: str, role: str, content: str):
+def append_turn(session_id: str, role: str, content: str, frontend_conv_id: str = None):
     if session_id not in _sessions:
         _sessions[session_id] = deque(maxlen=MAX_HISTORY_TURNS)
     _sessions[session_id].append({"role": role, "content": content})
-    
+
     # Auto-save to Neo4j in background (non-blocking)
     import threading
     threading.Thread(
         target=_auto_save_to_neo4j,
-        args=(session_id, role, content),
+        args=(session_id, role, content, frontend_conv_id),
         daemon=True,
     ).start()
 
@@ -316,11 +313,12 @@ def clear_history(session_id: str):
 # ============================================================================
 
 class QueryRequest(BaseModel):
-    query:       str
-    top_k:       Optional[int]  = 5
-    session_id:  Optional[str]  = None   # omit → new session created automatically
-    force_route: Optional[str]  = None   # e.g. "graph" — bypasses the LLM router
-    voice_mode:  Optional[bool] = False  # True → skip citation check, source formatting, iterative loops
+    query:           str
+    top_k:           Optional[int]  = 5
+    session_id:      Optional[str]  = None   # omit → new session created automatically
+    force_route:     Optional[str]  = None   # e.g. "graph" — bypasses the LLM router
+    voice_mode:      Optional[bool] = False  # True → skip citation check, source formatting, iterative loops
+    conversation_id: Optional[str]  = None   # frontend conv ID — auto-save writes under this node
 
 
 class QueryResponse(BaseModel):
@@ -567,7 +565,10 @@ async def query_documents(
 
 
 @app.post("/query-stream")
-async def query_stream(request: QueryRequest):
+async def query_stream(
+    request: QueryRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     """
     Streaming version of /query using Server-Sent Events.
 
@@ -577,6 +578,17 @@ async def query_stream(request: QueryRequest):
       { "type": "error",    "message": "..." }
     """
     session_id = request.session_id or str(uuid.uuid4())
+
+    # Resolve user from auth header so auto-saved convs are linked to the account
+    from neo4j_auth import optional_user
+    user = optional_user(authorization)
+    if user:
+        _session_user_context[session_id] = user["user_id"]
+
+    # The frontend's own conversation_id (Date.now() string) — we write messages
+    # under this node so loadConversation finds them without a separate save call.
+    frontend_conv_id = request.conversation_id or None
+
     history    = get_history(session_id)
     prev_route = _session_routes.get(session_id, "")
     route_log  = get_route_log(session_id)
@@ -604,7 +616,7 @@ async def query_stream(request: QueryRequest):
             # Persist session
             import re as _re
             clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()
-            append_turn(session_id, "user", request.query)
+            append_turn(session_id, "user", request.query, frontend_conv_id)
 
             # If a report was generated, write a structured memory note into history
             # so every future node (direct, rag, etc.) knows what was produced.
@@ -624,9 +636,9 @@ async def query_stream(request: QueryRequest):
                     f"Size: {_section_count} sections, {_word_count} words\n"
                     f"Opening: {_preview}"
                 )
-                append_turn(session_id, "assistant", memory_note)
+                append_turn(session_id, "assistant", memory_note, frontend_conv_id)
             else:
-                append_turn(session_id, "assistant", clean_answer)
+                append_turn(session_id, "assistant", clean_answer, frontend_conv_id)
 
             if result.get("route"):
                 _session_routes[session_id] = result["route"]

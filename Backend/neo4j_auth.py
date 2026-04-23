@@ -588,6 +588,7 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
         driver = get_driver()
         with driver.session(database=NEO4J_DATABASE) as session:
             session.execute_write(_work)
+        print(f"✅ save_conversation for user={user['user_id']} conv={req.conversation_id} messages={len(msgs_data)} session_id={req.session_id}")
         return {"ok": True, "conversation_id": req.conversation_id}
     except Exception as e:
         print(f"❌ save_conversation error: {e}")
@@ -634,6 +635,7 @@ def get_conversation(conversation_id: str, user: Dict = Depends(require_user)):
         """,
         {"conv_id": conversation_id},
     )
+    print(f"🔄 get_conversation for user={user['user_id']} conv={conversation_id} found_messages={len(messages)}")
 
     enriched = []
     for m in messages:
