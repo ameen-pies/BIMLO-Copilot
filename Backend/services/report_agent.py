@@ -1672,19 +1672,31 @@ async def create_report(req: GenerateReportRequest):
 
 
 @router.get("/reports")
-async def list_reports():
-    """List all report summaries (no content body to keep payload small)."""
+async def list_reports(session_id: Optional[str] = None):
+    """
+    List report summaries scoped to a session.
+
+    session_id is required — returns [] when omitted so the frontend
+    pill never shows stale reports from a different chat.
+    """
+    if not session_id:
+        return []
+
     summaries = []
     for r in sorted(_reports_store.values(), key=lambda x: x.get("updated_at", ""), reverse=True):
+        if r.get("session_id") != session_id:
+            continue
         summaries.append({
             "report_id":   r["report_id"],
             "title":       r["title"],
+            "content":     r.get("content", ""),
+            "summary":     r.get("summary", ""),
+            "charts":      r.get("charts", []),
             "source_docs": r.get("source_docs", []),
             "created_at":  r.get("created_at"),
             "updated_at":  r.get("updated_at"),
             "version":     r.get("version", 1),
             "versions":    r.get("versions", []),
-            "preview":     r["content"][:200].replace("\n", " ").strip(),
         })
     return summaries
 

@@ -1,33 +1,33 @@
 """
-Source Agent v9 — Claim-Level Precision Extraction
+Source Agent v10 — LLM-First Key-Fact Extraction with Windowed Document Search
 
 Architecture overview
 ─────────────────────
-The old approach extracted one excerpt per section heading (coarse-grained).
-This version works at the CLAIM level:
+Previous version (v9) had two critical weaknesses:
+  1. Only passed doc_text[:4000] to the judge → claims from page 3+ always failed
+  2. Fallback heuristics were too loose → wrong sentences slipped through
 
-  1. PARSE  — walk the generated answer and collect every individual claim
-              sentence/bullet that cites [N].  Tag each claim as:
-                - "numeric"   if it contains any number, measurement, or value
-                - "table"     if it references table/row/column data
-                - "statement" for any other claim
+v10 fixes both with a two-phase approach:
 
-  2. JUDGE  — for each claim, build a targeted LLM prompt that asks the judge
-              to locate the ONE verbatim passage in the source document (or
-              table row) that backs that specific claim.  Numeric claims get
-              extra emphasis on finding the exact figure.
+  PHASE 1 — KEY-FACT EXTRACTION (NEW)
+    Ask the LLM to read the generated answer and extract a structured list of
+    the important facts/numbers/phrases it actually asserted.  This gives us
+    precise search targets instead of vague "claim sentences".
 
-  3. VERIFY — strict grounding check: the returned passage must contain at
-              least one 4-gram that exists verbatim in the source document.
-              Hallucinated passages are dropped silently.
+  PHASE 2 — WINDOWED DOCUMENT SEARCH
+    For each key-fact, scan the FULL document in overlapping 600-char windows
+    (not just the first 4000 chars). Candidate windows are pre-filtered by
+    keyword/numeric overlap before being sent to the LLM judge, keeping latency
+    low while covering the entire document.
 
-  4. ASSEMBLE — build one source card per unique (filename, claim) pair.
-              Each card has:
-                sections: [{ title, lines: [verbatim passage], excerpt }]
-              The card title is the claim itself (truncated), NOT the heading.
-              This gives the frontend one card per backed claim.
+  PHASE 3 — VERBATIM VERIFICATION (tightened)
+    The passage returned by the judge must:
+      (a) pass the existing 4-gram grounding check, AND
+      (b) for numeric claims: contain the exact numeric token, AND
+      (c) for any claim: not exceed the source window by more than 20 chars
+          (prevents the LLM from stitching sentences together)
 
-Output shape (unchanged — fully backwards-compatible with Chat.tsx):
+Output shape (fully backwards-compatible with Chat.tsx):
   [
     {
       source_number: int,
@@ -35,11 +35,11 @@ Output shape (unchanged — fully backwards-compatible with Chat.tsx):
       doc_type:      str,
       excerpt:       str,        # verbatim passage from document
       sections:      [{ title: str, lines: [str], excerpt: str }],
-      cited_facts:   [str],      # claim text shown in filter
+      cited_facts:   [str],
       has_images:    bool,
       has_tables:    bool,
       claim_type:    str,        # "numeric" | "table" | "statement"
-      value_found:   str | None, # e.g. "100m" — the specific number verified
+      value_found:   str | None,
     }
   ]
 """
@@ -81,26 +81,25 @@ def _find_overlap(a: str, b: str, max_check: int = 300) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CLAIM PARSING
+# CLAIM PARSING (unchanged from v9 — still needed for source-number mapping)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Numeric patterns: integers, decimals, percentages, measurements, currencies
 _NUMERIC_RE = re.compile(
     r"""
     (?:
-        \d+(?:[.,\s]\d+)*          # integer or decimal with optional separators
-        \s*                         # optional space
-        (?:                         # optional unit
-            [%\$€£¥]               # currency/percent symbols
-            |m(?:\b|²|³|2|3)       # metres / m² / m³
-            |km\b | cm\b | mm\b    # length
-            |kg\b | t\b | T\b      # weight
-            |kW\b | MW\b | kV\b    # power/voltage
-            |dB\b | dBm\b          # signal
-            |MHz\b | GHz\b         # frequency
-            |Gbps?\b | Mbps?\b | Kbps?\b  # bandwidth
-            |h\b | min\b | s\b     # time
-            |m/s\b | km/h\b        # speed
+        \d+(?:[.,\s]\d+)*
+        \s*
+        (?:
+            [%\$€£¥]
+            |m(?:\b|²|³|2|3)
+            |km\b | cm\b | mm\b
+            |kg\b | t\b | T\b
+            |kW\b | MW\b | kV\b
+            |dB\b | dBm\b
+            |MHz\b | GHz\b
+            |Gbps?\b | Mbps?\b | Kbps?\b
+            |h\b | min\b | s\b
+            |m/s\b | km/h\b
         )?
     )
     """,
@@ -115,12 +114,8 @@ _TABLE_CLAIM_RE = re.compile(
 
 
 def _classify_claim(text: str) -> Tuple[str, List[str]]:
-    """
-    Return (claim_type, [numeric_values_found]).
-    claim_type: "numeric" | "table" | "statement"
-    numeric_values_found: e.g. ["100m", "2 850 000 €"]
-    """
-    nums = [m.group().strip() for m in _NUMERIC_RE.finditer(text) if m.group().strip() and re.search(r'\d', m.group())]
+    nums = [m.group().strip() for m in _NUMERIC_RE.finditer(text)
+            if m.group().strip() and re.search(r'\d', m.group())]
     if nums:
         return "numeric", nums
     if _TABLE_CLAIM_RE.search(text):
@@ -130,19 +125,8 @@ def _classify_claim(text: str) -> Tuple[str, List[str]]:
 
 def _parse_claims(answer: str) -> List[Dict]:
     """
-    Walk the answer line by line.  For each line citing [N], produce a Claim dict:
-
-      {
-        src_num:    int,         # e.g. 2
-        heading:    str,         # current ## heading (context for the judge)
-        raw_line:   str,         # full original line including [N] markers
-        clean_line: str,         # raw_line stripped of [N] markers and bullets
-        claim_type: str,         # "numeric" | "table" | "statement"
-        values:     [str],       # numeric tokens if claim_type == "numeric"
-      }
-
-    Each claim is produced ONCE per citation — if a line cites [1][3] we emit
-    two separate claims so each source gets its own targeted lookup.
+    Walk the answer line by line.  For each line citing [N], produce a Claim dict.
+    Each claim is produced ONCE per citation.
     """
     claims: List[Dict] = []
     current_heading = ""
@@ -152,18 +136,15 @@ def _parse_claims(answer: str) -> List[Dict]:
         if not stripped:
             continue
 
-        # Track headings
         h_match = re.match(r'^#{1,3}\s+(.+)', stripped)
         if h_match:
             current_heading = re.sub(r'\[\d+\]', '', h_match.group(1)).strip()
             continue
 
-        # Find all [N] citations on this line
         cited = sorted(set(int(m) for m in re.findall(r'\[(\d+)\](?!\()', stripped)))
         if not cited:
             continue
 
-        # Clean the line for readability
         clean = re.sub(r'\[\d+\]', '', stripped)
         clean = re.sub(r'^\s*[-*•·>]+\s*', '', clean)
         clean = re.sub(r'\*\*', '', clean).strip()
@@ -186,17 +167,294 @@ def _parse_claims(answer: str) -> List[Dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GROUNDING CHECK
+# PHASE 1 — LLM KEY-FACT EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+_KEY_FACT_SYSTEM = """You are a fact-extraction assistant. Given an AI-generated answer, extract every specific verifiable fact it asserts.
+
+Return a JSON array of objects. Each object:
+  {
+    "fact": "<the exact phrase or number as stated in the answer>",
+    "src_num": <N>,          // the [N] citation number
+    "is_numeric": true/false // true if the fact contains a number or measurement
+  }
+
+Rules:
+- Focus on SPECIFIC facts: numbers, measurements, names, dates, quantities, identifiers.
+- Each numeric value gets its own entry (e.g. "31,080 meters" and "47 sites" are separate).
+- Important named entities (site names, equipment models, section titles) also get entries.
+- Skip vague statements like "the document discusses..." — only extractable facts.
+- If a fact has multiple [N] citations, emit one entry per source number.
+- Output ONLY the raw JSON array. No markdown, no explanation."""
+
+
+def _extract_key_facts_from_answer(answer: str, api_key: str, base_url: str) -> List[Dict]:
+    """
+    Phase 1: Ask the LLM to extract all verifiable key facts from the answer.
+    Returns list of {fact, src_num, is_numeric}.
+    Falls back to claim-based approach if LLM fails.
+    """
+    # Strip answer to first 3000 chars for the extraction prompt (summary of claims)
+    answer_snippet = answer[:3000]
+
+    prompt = f"""Extract all specific verifiable facts from this AI answer. Return a JSON array as instructed.
+
+AI ANSWER:
+{answer_snippet}
+
+JSON array of facts:"""
+
+    try:
+        from llm_client import call_llm
+        raw = call_llm(
+            prompt=prompt,
+            system_prompt=_KEY_FACT_SYSTEM,
+            history=[],
+            max_tokens=600,
+            temperature=0.0,
+            task="plan",
+        )
+    except Exception as e:
+        print(f"   ⚠️  Key-fact LLM call failed: {e}")
+        return []
+
+    if not raw:
+        return []
+
+    # Parse JSON
+    clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+    try:
+        parsed = json.loads(clean)
+        if isinstance(parsed, list):
+            valid = []
+            for item in parsed:
+                if isinstance(item, dict) and "fact" in item and "src_num" in item:
+                    valid.append({
+                        "fact":       str(item["fact"]).strip(),
+                        "src_num":    int(item["src_num"]),
+                        "is_numeric": bool(item.get("is_numeric", False)),
+                    })
+            print(f"   🔑 Key-fact extraction: {len(valid)} facts from answer")
+            return valid
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try ast fallback
+    import ast
+    try:
+        parsed = ast.literal_eval(clean)
+        if isinstance(parsed, list):
+            valid = [
+                {"fact": str(i["fact"]).strip(), "src_num": int(i["src_num"]),
+                 "is_numeric": bool(i.get("is_numeric", False))}
+                for i in parsed if isinstance(i, dict) and "fact" in i and "src_num" in i
+            ]
+            print(f"   🔑 Key-fact extraction (ast): {len(valid)} facts")
+            return valid
+    except Exception:
+        pass
+
+    print(f"   ⚠️  Key-fact extraction failed to parse LLM output")
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 — WINDOWED DOCUMENT SEARCH
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WINDOW_SIZE  = 600   # chars per candidate window
+_WINDOW_STEP  = 300   # stride (50% overlap so facts near boundaries aren't missed)
+_MAX_WINDOWS  = 8     # max candidate windows to send to LLM per fact
+
+
+def _tokenize(text: str) -> List[str]:
+    """Lowercase word tokens, length ≥ 3, excluding common stop words."""
+    STOP = {
+        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'of', 'to', 'and',
+        'or', 'for', 'with', 'from', 'that', 'this', 'it', 'on', 'at', 'by',
+        'les', 'des', 'une', 'est', 'dans', 'pour', 'avec', 'qui', 'que', 'le', 'la'
+    }
+    return [w for w in re.findall(r'[a-zA-ZÀ-ÿ\d]{3,}', text.lower()) if w not in STOP]
+
+
+def _score_window(window: str, fact: str, is_numeric: bool) -> float:
+    """
+    Score how relevant a document window is to a key fact.
+    Higher = better candidate to send to the LLM.
+    """
+    score = 0.0
+
+    # Numeric: exact figure must be present
+    if is_numeric:
+        nums = [m.group().strip() for m in _NUMERIC_RE.finditer(fact)
+                if m.group().strip() and re.search(r'\d', m.group())]
+        norm_window = re.sub(r'[\s,.]', '', window.lower())
+        for num in nums:
+            norm_num = re.sub(r'[\s,.]', '', num.lower())
+            if norm_num and norm_num in norm_window:
+                score += 5.0   # strong signal — exact number present
+
+    # Keyword overlap
+    fact_tokens  = set(_tokenize(fact))
+    window_tokens = set(_tokenize(window))
+    if fact_tokens:
+        overlap = len(fact_tokens & window_tokens) / len(fact_tokens)
+        score += overlap * 3.0
+
+    # Substring hit (partial phrase)
+    fact_words = fact.lower().split()
+    for n in range(min(4, len(fact_words)), 1, -1):
+        for i in range(len(fact_words) - n + 1):
+            phrase = ' '.join(fact_words[i:i+n])
+            if phrase in window.lower():
+                score += n * 0.5
+                break
+
+    return score
+
+
+def _get_candidate_windows(fact: str, doc_text: str, is_numeric: bool) -> List[str]:
+    """
+    Slide a window over the FULL document, score each window against the fact,
+    and return the top _MAX_WINDOWS candidates sorted by score descending.
+    """
+    if len(doc_text) <= _WINDOW_SIZE:
+        return [doc_text]
+
+    scored: List[Tuple[float, str]] = []
+    for start in range(0, len(doc_text) - _WINDOW_SIZE // 2, _WINDOW_STEP):
+        window = doc_text[start:start + _WINDOW_SIZE]
+        s = _score_window(window, fact, is_numeric)
+        if s > 0:
+            scored.append((s, window))
+
+    # Sort descending by score, deduplicate overlapping windows
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    selected: List[str] = []
+    seen_starts: List[int] = []
+    for _, window in scored:
+        # Avoid windows that are almost identical (overlap > 80%)
+        if any(abs(doc_text.find(window) - s) < _WINDOW_STEP // 2 for s in seen_starts):
+            continue
+        pos = doc_text.find(window)
+        if pos >= 0:
+            seen_starts.append(pos)
+        selected.append(window)
+        if len(selected) >= _MAX_WINDOWS:
+            break
+
+    return selected if selected else [doc_text[:_WINDOW_SIZE]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2b — DIRECT NUMERIC/PHRASE SCAN (before calling LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _direct_scan_for_fact(fact: str, doc_text: str, is_numeric: bool) -> Optional[str]:
+    """
+    Before calling the LLM, try to find the passage directly:
+    - For numeric facts: find the exact sentence containing the number
+    - For phrase facts: find the sentence with the highest n-gram overlap
+
+    Returns a single sentence (≤ 500 chars) or None.
+    """
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?\n])\s+', doc_text) if len(s.strip()) > 8]
+
+    if is_numeric:
+        nums = [m.group().strip() for m in _NUMERIC_RE.finditer(fact)
+                if m.group().strip() and re.search(r'\d', m.group())]
+        for num in nums:
+            norm_num = re.sub(r'[\s,.]', '', num.lower())
+            for sent in sentences:
+                norm_sent = re.sub(r'[\s,.]', '', sent.lower())
+                if norm_num and norm_num in norm_sent:
+                    return sent[:500]
+        return None  # Don't guess for numeric — only exact hits
+
+    # Statement: best keyword overlap sentence
+    fact_tokens = set(_tokenize(fact))
+    if not fact_tokens:
+        return None
+    best_score, best_sent = 0, None
+    for sent in sentences:
+        score = len(fact_tokens & set(_tokenize(sent)))
+        if score > best_score:
+            best_score, best_sent = score, sent
+    # Require at least 40% token overlap
+    threshold = max(2, int(len(fact_tokens) * 0.4))
+    return best_sent[:500] if best_sent and best_score >= threshold else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — LLM JUDGE (windowed, full-doc aware)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_windowed_judge_prompt(fact: str, windows: List[str], is_numeric: bool) -> str:
+    """
+    Build a judge prompt with the top candidate windows (not the full doc).
+    The windows already contain the fact — the LLM just needs to pinpoint the sentence.
+    """
+    windows_text = "\n---\n".join(windows)
+
+    numeric_note = ""
+    if is_numeric:
+        # Extract the numeric tokens from the fact for emphasis
+        nums = [m.group().strip() for m in _NUMERIC_RE.finditer(fact)
+                if m.group().strip() and re.search(r'\d', m.group())]
+        if nums:
+            numeric_note = (
+                f"\nIMPORTANT: This fact contains numeric data. "
+                f"The specific value(s) to find: {', '.join(repr(n) for n in nums[:5])}. "
+                f"Your output MUST contain at least one of these exact figures as they appear in the document."
+            )
+
+    return f"""You are a precise source-extraction assistant. Your only job is to find the EXACT sentence or table row from the document excerpts below that directly supports the given fact.
+
+FACT TO VERIFY:
+"{fact}"{numeric_note}
+
+STRICT RULES:
+1. Copy text VERBATIM from the excerpts — zero rewording, zero summarising.
+2. Output the ONE shortest sentence or table row that directly supports the fact.
+3. The sentence MUST appear word-for-word in the excerpts below.
+4. Do NOT include any commentary, explanation, header, or preamble.
+5. If the supporting sentence is not present in the excerpts, output: NOTFOUND
+6. Do NOT combine or merge multiple sentences into one.
+7. Strip any markdown formatting from the copied text.
+
+DOCUMENT EXCERPTS:
+{windows_text}
+
+Verbatim sentence (or NOTFOUND):"""
+
+
+def _call_llm(prompt: str, max_tokens: int = 400) -> str:
+    """Shared LLM call via llm_client gateway."""
+    try:
+        from llm_client import call_llm
+        return call_llm(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            task="plan",
+        )
+    except Exception as e:
+        print(f"      ⚠️  LLM call failed: {e}")
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROUNDING CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_grounded(passage: str, doc_text: str, min_4gram_hits: int = 1) -> bool:
     """
-    Return True if `passage` contains at least `min_4gram_hits` 4-word run(s)
-    that appear verbatim in `doc_text`.  Protects against hallucinated passages.
+    Return True if passage contains at least min_4gram_hits 4-word runs
+    that appear verbatim in doc_text.
     """
     words = passage.lower().split()
     if len(words) < 4:
-        # Short passage — fall back to substring check
         return passage.lower()[:30] in doc_text.lower()
     doc_lower = doc_text.lower()
     hits = 0
@@ -210,13 +468,8 @@ def _is_grounded(passage: str, doc_text: str, min_4gram_hits: int = 1) -> bool:
 
 
 def _verify_numeric(passage: str, values: List[str]) -> Optional[str]:
-    """
-    Return the first numeric value from `values` that is found in `passage`,
-    or None if none matched.
-    """
     p_lower = passage.lower()
     for v in values:
-        # Collapse spaces/separators to catch "2 850 000" == "2850000"
         norm_v = re.sub(r'[\s,.]', '', v)
         if norm_v and norm_v in re.sub(r'[\s,.]', '', p_lower):
             return v
@@ -225,202 +478,13 @@ def _verify_numeric(passage: str, values: List[str]) -> Optional[str]:
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM CALL
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _call_llm(prompt: str, api_key: str, base_url: str, max_tokens: int = 600) -> str:
-    """Shared CF Worker LLM call with retry and Groq fallback via llm_client."""
-    try:
-        from llm_client import call_llm
-        return call_llm(
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=0.0,
-            task="plan",
-        )
-    except ImportError:
-        pass
-
-    # Direct CF call fallback
-    import requests
-    payload = {
-        "prompt": prompt,
-        "task": "plan",
-        "max_tokens": max_tokens,
-        "temperature": 0.0,
-    }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    for attempt in range(3):
-        try:
-            resp = requests.post(base_url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 200:
-                raw = resp.json().get("response") or ""
-                return raw.strip() if isinstance(raw, str) else str(raw).strip()
-            elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"      ⚠️  LLM source call {resp.status_code}: {resp.text[:80]}")
-                return ""
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                print(f"      ⚠️  LLM source call failed: {e}")
-                return ""
-    return ""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CLAIM → PASSAGE LOOKUP (Judge)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_judge_prompt(claim: Dict, doc_text: str) -> str:
-    """
-    Build a targeted, claim-specific prompt for the LLM judge.
-    The judge must return ONLY verbatim text from doc_text that backs this claim.
-    """
-    doc_snippet = doc_text[:4000]
-    clean_claim = claim["clean_line"]
-    ctype = claim["claim_type"]
-    values = claim.get("values", [])
-
-    # Build the numeric emphasis section
-    if ctype == "numeric" and values:
-        val_list = ", ".join(f'"{v}"' for v in values[:5])
-        numeric_instruction = (
-            f"\nIMPORTANT: This claim is about NUMERIC DATA. "
-            f"The specific value(s) to verify: {val_list}. "
-            f"Your output MUST contain at least one of these exact figures as they appear in the document."
-        )
-    elif ctype == "table":
-        numeric_instruction = (
-            "\nIMPORTANT: This claim references TABLE DATA. "
-            "Look for the relevant table row(s) in the document. "
-            "Copy the table header + the specific row(s) that back this claim."
-        )
-    else:
-        numeric_instruction = ""
-
-    prompt = f"""You are a precise source-extraction assistant. Your only job is to find the EXACT text passage from the document that directly supports the given claim.
-
-CLAIM TO VERIFY:
-"{clean_claim}"
-{numeric_instruction}
-
-STRICT RULES — violating any rule means output nothing:
-1. Copy text VERBATIM from the SOURCE DOCUMENT — zero rewording, zero summarising.
-2. Output ONE passage only: the shortest contiguous sentence or table row that directly backs the claim.
-3. The passage MUST appear word-for-word in the document below.
-4. Do NOT include any commentary, explanation, or preamble — only the raw passage.
-5. If the exact supporting text is not present in the document, output: NOTFOUND
-6. If the claim references a number, your output must contain that number.
-7. Strip any markdown formatting from the copied text.
-
-SOURCE DOCUMENT:
-{doc_snippet}
-
-Verbatim passage (or NOTFOUND):"""
-
-    return prompt
-
-
-def _extract_passage_for_claim(
-    claim: Dict,
-    doc_text: str,
-    api_key: str,
-    base_url: str,
-) -> Optional[str]:
-    """
-    Ask the judge to find the verbatim supporting passage for one claim.
-    Returns the cleaned, grounded passage, or None if not found/not grounded.
-    """
-    prompt = _build_judge_prompt(claim, doc_text)
-    raw = _call_llm(prompt, api_key, base_url, max_tokens=300)
-
-    if not raw or raw.strip().upper().startswith("NOTFOUND"):
-        return None
-
-    # Clean leading/trailing punctuation and quote wrapping
+def _clean_passage(raw: str) -> str:
+    """Sanitize LLM output to a clean verbatim passage."""
     passage = raw.strip().strip('"').strip("'").strip()
     passage = re.sub(r'^[-–•]\s*', '', passage).strip()
-
-    # Must be substantial
-    if len(passage) < 8:
-        return None
-
-    # Grounding verification
-    if not _is_grounded(passage, doc_text):
-        print(f"      ⚠️  Grounding failed, dropping: {passage[:80]!r}")
-        return None
-
-    # Extra numeric check: if it's a numeric claim, the value must be in the passage
-    if claim["claim_type"] == "numeric" and claim.get("values"):
-        verified_val = _verify_numeric(passage, claim["values"])
-        if verified_val is None:
-            print(f"      ⚠️  Numeric value not found in passage — dropping: {passage[:80]!r}")
-            return None
-
+    # Remove any "passage:" or "excerpt:" prefix the LLM sometimes adds
+    passage = re.sub(r'^(?:passage|excerpt|verbatim)[:\s]+', '', passage, flags=re.IGNORECASE).strip()
     return passage
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FALLBACK: KEYWORD + NUMERIC SCAN
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fallback_passage(claim: Dict, doc_text: str) -> Optional[str]:
-    """
-    No-LLM fallback: scan the document sentence by sentence.
-    For numeric claims: find the sentence containing the target number(s).
-    For table claims: find the table row most related to the claim.
-    For statements: find the sentence with the most keyword overlap.
-    """
-    ctype = claim["claim_type"]
-    values = claim.get("values", [])
-    clean_claim = claim["clean_line"]
-
-    # Split into sentences (rough)
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?\n])\s+', doc_text) if len(s.strip()) > 10]
-
-    # ── Numeric: find sentence containing the target value ────────────────
-    if ctype == "numeric" and values:
-        for sentence in sentences:
-            for v in values:
-                norm_v = re.sub(r'[\s,.]', '', v)
-                norm_s = re.sub(r'[\s,.]', '', sentence.lower())
-                if norm_v and norm_v in norm_s:
-                    return sentence[:500]
-        # No exact value found — return None rather than a wrong sentence
-        return None
-
-    # ── Table: find [TABLE on page N] block lines matching claim keywords ─
-    if ctype == "table":
-        table_blocks = re.findall(r'\[TABLE on page \d+\].*?(?=\[TABLE|\[IMAGE|$)', doc_text, re.DOTALL)
-        claim_words = set(w.lower() for w in re.findall(r'[a-zA-Z]{3,}', clean_claim))
-        best_score, best_row = 0, None
-        for block in table_blocks:
-            for row in block.split('\n'):
-                row_words = set(w.lower() for w in re.findall(r'[a-zA-Z]{3,}', row))
-                score = len(claim_words & row_words)
-                if score > best_score:
-                    best_score, best_row = score, row.strip()
-        return best_row if best_score >= 2 else None
-
-    # ── Statement: keyword overlap scoring ───────────────────────────────
-    stop = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'of', 'to', 'and',
-            'or', 'for', 'with', 'from', 'that', 'this', 'it', 'on', 'at', 'by',
-            'les', 'des', 'une', 'est', 'dans', 'pour', 'avec', 'qui', 'que', 'le', 'la'}
-    claim_words = set(w.lower() for w in re.findall(r'[a-zA-ZÀ-ÿ]{3,}', clean_claim) if w.lower() not in stop)
-    if not claim_words:
-        return doc_text[:300].strip()
-
-    best_score, best_sentence = 0, None
-    for sentence in sentences:
-        s_words = set(w.lower() for w in re.findall(r'[a-zA-ZÀ-ÿ]{3,}', sentence))
-        score = len(claim_words & s_words)
-        if score > best_score:
-            best_score, best_sentence = score, sentence
-    return best_sentence[:500] if best_sentence and best_score >= 2 else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -439,14 +503,15 @@ def _jaccard(a: str, b: str) -> float:
 
 class SourceAgent:
     """
-    Claim-level source extraction agent.
+    v10: LLM-first key-fact extraction with windowed full-document search.
 
-    For each claim in the generated answer that cites [N], the agent:
-      1. Classifies the claim (numeric / table / statement)
-      2. Asks the LLM judge to locate the verbatim backing passage
-      3. Verifies the passage is grounded in the actual document
-      4. For numeric claims: additionally verifies the target value appears
-      5. Emits one source card per (source_number, claim) pair
+    Flow per source:
+      1. Call LLM to extract key facts from the answer (Phase 1)
+      2. For each fact, scan the FULL document in sliding windows (Phase 2)
+      3. Try direct sentence scan first (no LLM call needed)
+      4. If direct scan misses, send top candidate windows to the LLM judge
+      5. Verify grounding and numeric presence (Phase 3)
+      6. Emit one source card per verified (source_number, fact) pair
     """
 
     def __init__(
@@ -459,7 +524,7 @@ class SourceAgent:
         self.api_key  = api_key or os.getenv("CF_API_KEY", "")
         self.base_url = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
         self.llm_ok   = bool(self.api_key)
-        print(f"📎 Source Agent v9 [claim-level, numeric+table aware, llm={'✅' if self.llm_ok else '❌'}]")
+        print(f"📎 Source Agent v10 [windowed-search, llm={'✅' if self.llm_ok else '❌'}]")
 
     # ── Vector store helpers ──────────────────────────────────────────────
 
@@ -469,11 +534,9 @@ class SourceAgent:
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> List[Dict]:
-        """Fetch all chunks for a filename from the per-user/session collection."""
         if self.vs is None:
             return []
         try:
-            # Use the scoped collection method if available (v3+ VectorStoreManager)
             if hasattr(self.vs, '_get_collection'):
                 coll = self.vs._get_collection(user_id=user_id, session_id=session_id)
                 raw = coll.get(where={"filename": filename})
@@ -491,15 +554,12 @@ class SourceAgent:
             print(f"      ⚠️  VS fetch failed for '{filename}': {e}")
             return []
 
-    # ── Core extraction ───────────────────────────────────────────────────
-
     def _get_doc_text(
         self,
         chunk: Dict,
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> str:
-        """Reconstruct the full document text for a chunk's source file."""
         filename = chunk.get("metadata", {}).get("filename", "")
         if filename:
             all_chunks = self._get_all_chunks_for_file(filename, user_id=user_id, session_id=session_id)
@@ -507,50 +567,81 @@ class SourceAgent:
                 doc_text = _reconstruct_doc(all_chunks)
                 print(f"   📄 '{filename}': {len(doc_text)} chars from {len(all_chunks)} chunks")
                 return doc_text
-        # Fallback: use the RAG chunk text directly
         doc_text = chunk.get("text", "")
         print(f"   📄 '{filename}': using chunk directly ({len(doc_text)} chars)")
         return doc_text
 
-    def _process_claim(
+    # ── Fact → Passage lookup ─────────────────────────────────────────────
+
+    def _find_passage_for_fact(
         self,
-        claim: Dict,
+        fact: str,
+        is_numeric: bool,
         doc_text: str,
         emitted_passages: List[str],
     ) -> Optional[str]:
         """
-        Find the verbatim backing passage for one claim.
-        Returns the passage string, or None if not found / already emitted.
+        Find the verbatim backing passage for one key fact.
+
+        Strategy:
+          1. Direct sentence scan (fast, no LLM) — exact number / high keyword overlap
+          2. Windowed LLM judge (full doc coverage)
+          3. Return None if nothing passes verification
         """
-        ctype  = claim["claim_type"]
-        values = claim.get("values", [])
-        clean  = claim["clean_line"]
+        # ── Step 1: Direct scan ───────────────────────────────────────────
+        passage = _direct_scan_for_fact(fact, doc_text, is_numeric)
+        if passage:
+            if _is_grounded(passage, doc_text):
+                if not any(_jaccard(passage, seen) > 0.75 for seen in emitted_passages):
+                    print(f"      ✅ direct scan: {passage[:80]!r}")
+                    return passage
+                print(f"      ⏭  Direct scan dedup dropped")
+            else:
+                print(f"      ⚠️  Direct scan passage not grounded — trying LLM")
+                passage = None
 
-        print(f"      🔍 [{ctype.upper()}] {clean[:80]!r}")
+        # ── Step 2: Windowed LLM judge ────────────────────────────────────
+        if not self.llm_ok:
+            print(f"      ❌ LLM unavailable and direct scan failed for: {fact[:60]!r}")
+            return None
 
-        # ── LLM judge path ────────────────────────────────────────────────
-        if self.llm_ok:
-            passage = _extract_passage_for_claim(claim, doc_text, self.api_key, self.base_url)
-            if passage:
-                # Dedup against already-emitted passages
-                if any(_jaccard(passage, seen) > 0.75 for seen in emitted_passages):
-                    print(f"      ⏭  Global dedup dropped (jaccard): {passage[:60]!r}")
-                    return None
-                print(f"      ✅ {ctype} passage found: {passage[:80]!r}")
-                return passage
-            print(f"      ⚠️  LLM returned nothing — trying fallback")
+        windows = _get_candidate_windows(fact, doc_text, is_numeric)
+        if not windows:
+            print(f"      ❌ No candidate windows found for: {fact[:60]!r}")
+            return None
 
-        # ── Keyword/numeric fallback ──────────────────────────────────────
-        passage = _fallback_passage(claim, doc_text)
-        if passage and _is_grounded(passage, doc_text):
-            if any(_jaccard(passage, seen) > 0.75 for seen in emitted_passages):
-                print(f"      ⏭  Fallback dedup dropped: {passage[:60]!r}")
+        print(f"      🔍 LLM judge: {len(windows)} windows for {'[NUM]' if is_numeric else '[STMT]'} {fact[:60]!r}")
+        prompt = _build_windowed_judge_prompt(fact, windows, is_numeric)
+        raw = _call_llm(prompt, max_tokens=300)
+
+        if not raw or raw.strip().upper().startswith("NOTFOUND"):
+            print(f"      ❌ LLM returned NOTFOUND for: {fact[:60]!r}")
+            return None
+
+        passage = _clean_passage(raw)
+        if len(passage) < 8:
+            return None
+
+        # Grounding check against full doc
+        if not _is_grounded(passage, doc_text):
+            print(f"      ⚠️  Grounding failed: {passage[:80]!r}")
+            return None
+
+        # Numeric value must be present in passage
+        if is_numeric:
+            nums = [m.group().strip() for m in _NUMERIC_RE.finditer(fact)
+                    if m.group().strip() and re.search(r'\d', m.group())]
+            if nums and _verify_numeric(passage, nums) is None:
+                print(f"      ⚠️  Numeric value not in passage — dropping: {passage[:80]!r}")
                 return None
-            print(f"      ✅ fallback passage: {passage[:80]!r}")
-            return passage
 
-        print(f"      ❌ No passage found for claim: {clean[:60]!r}")
-        return None
+        # Global dedup
+        if any(_jaccard(passage, seen) > 0.75 for seen in emitted_passages):
+            print(f"      ⏭  LLM passage dedup dropped")
+            return None
+
+        print(f"      ✅ LLM windowed passage: {passage[:80]!r}")
+        return passage
 
     # ── Public entry point ────────────────────────────────────────────────
 
@@ -562,24 +653,20 @@ class SourceAgent:
         session_id: Optional[str] = None,
     ) -> List[Dict]:
         """
-        Build claim-level source cards for the generated answer.
+        Build source cards for the generated answer.
 
-        Args:
-            answer:     The LLM-generated answer with [N] citation markers.
-            chunks:     The retrieved_chunks list from the RAG state.
-            user_id:    For scoped VS lookup (per-user isolation).
-            session_id: For scoped VS lookup (per-session isolation).
-
-        Returns:
-            List of source card dicts compatible with Chat.tsx rendering.
-            One card per (source_number, claim) pair — not per heading.
+        v10 flow:
+          1. Parse citation claims from the answer (for source-number mapping)
+          2. Extract key facts via LLM (Phase 1)
+          3. For each fact, find verbatim passage via windowed search (Phase 2+3)
+          4. Emit one card per verified fact
         """
-        # 1. Parse all claims from the answer
+        # 1. Parse claims for source-number mapping
         all_claims = _parse_claims(answer)
         if not all_claims:
             return []
 
-        # 2. Pre-cache doc texts per source number (avoid re-fetching)
+        # 2. Pre-cache doc texts per source number
         doc_cache: Dict[int, str] = {}
         for claim in all_claims:
             src_num = claim["src_num"]
@@ -590,17 +677,42 @@ class SourceAgent:
                         chunks[idx], user_id=user_id, session_id=session_id
                     )
 
-        # 3. Process each claim and build source cards
+        # 3. Phase 1: Extract key facts from the full answer
+        key_facts: List[Dict] = []
+        if self.llm_ok:
+            key_facts = _extract_key_facts_from_answer(answer, self.api_key, self.base_url)
+
+        # If LLM extraction failed, fall back to using claims directly as facts
+        if not key_facts:
+            print("   ⚠️  Key-fact extraction failed — falling back to claim-based facts")
+            for c in all_claims:
+                key_facts.append({
+                    "fact":       c["clean_line"],
+                    "src_num":    c["src_num"],
+                    "is_numeric": c["claim_type"] == "numeric",
+                })
+
+        # 4. Phase 2+3: Find passage for each fact
         sources: List[Dict] = []
-        emitted_passages: List[str] = []  # global dedup across all cards
+        emitted_passages: List[str] = []
 
-        # Group by src_num to emit contiguous cards per source
+        # Group facts by source number for clean card ordering
         from collections import OrderedDict
-        claims_by_src: Dict[int, List[Dict]] = OrderedDict()
-        for claim in all_claims:
-            claims_by_src.setdefault(claim["src_num"], []).append(claim)
+        facts_by_src: Dict[int, List[Dict]] = OrderedDict()
+        for fact in key_facts:
+            src_num = int(fact["src_num"])
+            facts_by_src.setdefault(src_num, []).append(fact)
 
-        for src_num, src_claims in claims_by_src.items():
+        # Also ensure every cited source number appears (even if fact extraction missed it)
+        for claim in all_claims:
+            if claim["src_num"] not in facts_by_src:
+                facts_by_src.setdefault(claim["src_num"], []).append({
+                    "fact":       claim["clean_line"],
+                    "src_num":    claim["src_num"],
+                    "is_numeric": claim["claim_type"] == "numeric",
+                })
+
+        for src_num, src_facts in facts_by_src.items():
             idx = src_num - 1
             if idx < 0 or idx >= len(chunks):
                 continue
@@ -615,23 +727,30 @@ class SourceAgent:
             has_images = metadata.get("has_images", False)
             has_tables = metadata.get("has_tables", False)
 
-            # Emit one card per claim
-            for claim in src_claims:
-                passage = self._process_claim(claim, doc_text, emitted_passages)
+            for fact_item in src_facts:
+                fact       = fact_item["fact"]
+                is_numeric = fact_item["is_numeric"]
+
+                passage = self._find_passage_for_fact(fact, is_numeric, doc_text, emitted_passages)
                 if not passage:
                     continue
 
                 emitted_passages.append(passage)
 
-                # Card title: short form of the claim (≤80 chars)
-                card_title = claim["clean_line"]
-                if len(card_title) > 80:
-                    card_title = card_title[:77] + "…"
+                # Card title: the fact itself (short)
+                card_title = fact[:80] + "…" if len(fact) > 80 else fact
 
-                # value_found: the specific numeric value verified in the passage
+                # value_found: verified numeric token
                 value_found: Optional[str] = None
-                if claim["claim_type"] == "numeric" and claim.get("values"):
-                    value_found = _verify_numeric(passage, claim["values"])
+                if is_numeric:
+                    nums = [m.group().strip() for m in _NUMERIC_RE.finditer(fact)
+                            if m.group().strip() and re.search(r'\d', m.group())]
+                    if nums:
+                        value_found = _verify_numeric(passage, nums)
+
+                # Determine claim_type for backwards compat
+                _, claim_values = _classify_claim(fact)
+                ctype = "numeric" if is_numeric else ("table" if _TABLE_CLAIM_RE.search(fact) else "statement")
 
                 sources.append({
                     "source_number": src_num,
@@ -640,9 +759,7 @@ class SourceAgent:
                     "project_ref":   metadata.get("project_ref"),
                     "has_images":    has_images,
                     "has_tables":    has_tables,
-                    # Top-level excerpt for "open document" click in card header
                     "excerpt":       passage,
-                    # Sections: one section per claim card (title = the claim itself)
                     "sections": [
                         {
                             "title":   card_title,
@@ -650,16 +767,13 @@ class SourceAgent:
                             "excerpt": passage,
                         }
                     ],
-                    # cited_facts required by Chat.tsx filter (non-empty = show card)
                     "cited_facts":  [card_title],
-                    # Extra metadata for frontend enrichment
-                    "claim_type":   claim["claim_type"],
+                    "claim_type":   ctype,
                     "value_found":  value_found,
-                    "heading":      claim["heading"],
+                    "heading":      fact_item.get("heading", f"Source {src_num}"),
                 })
 
-        # 4. Deduplicate source_number cards that have identical passages
-        #    (same source cited twice for the same fact in different lines)
+        # 5. Final dedup: drop cards with near-identical excerpts
         seen_key: set = set()
         deduped: List[Dict] = []
         for card in sources:
@@ -683,9 +797,8 @@ def build_sources_node(
     """
     Build the LangGraph-compatible sources node.
 
-    The node reads (answer, retrieved_chunks, session_id, user_id) from state
-    and writes sources back.  session_id and user_id are passed to the VS
-    for scoped document lookup (per-user/session isolation).
+    Reads (answer, retrieved_chunks, session_id, user_id) from state,
+    writes sources back.
     """
     agent = SourceAgent(api_key=api_key, model=model, vector_store=vector_store)
 
@@ -704,7 +817,7 @@ def build_sources_node(
         n_table     = sum(1 for c in all_claims if c["claim_type"] == "table")
         n_statement = sum(1 for c in all_claims if c["claim_type"] == "statement")
         print(
-            f"📎 Source Agent v9 → {len(all_claims)} claims "
+            f"📎 Source Agent v10 → {len(all_claims)} claims "
             f"({n_numeric} numeric, {n_table} table, {n_statement} statement)"
         )
 

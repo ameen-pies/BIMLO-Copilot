@@ -4506,10 +4506,12 @@ const Chat = () => {
   // REPORT MANAGEMENT
   // ==========================================================================
 
-  const loadReports = async () => {
+  const loadReports = async (sid?: string | null) => {
     try {
       const base = getApiBase();
-      const res = await fetch(`${base}/reports`);
+      const resolvedSid = sid ?? sessionIdRef.current ?? sessionId;
+      if (!resolvedSid) { setReports([]); return; }
+      const res = await fetch(`${base}/reports?session_id=${encodeURIComponent(resolvedSid)}`);
       if (res.ok) {
         const data: ReportRecord[] = await res.json();
         setReports(data);
@@ -4994,6 +4996,7 @@ const Chat = () => {
     sessionIdRef.current = null;
     setMessages([]);
     setDocuments([]);
+    setReports([]);
   };
 
   const ensureActiveConversationId = () => {
@@ -5026,7 +5029,7 @@ const Chat = () => {
       setMessages(conv.messages);
       setDocuments([]);
       setConvLoading(false);
-      if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); }
+      if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); loadReports(sid); }
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
       return;
     }
@@ -5062,7 +5065,7 @@ const Chat = () => {
     setConvLoading(true);
     setMessages([]);
     setDocuments([]);
-
+    setReports([]);
     // Helper: something went wrong — reset so user isn't stuck on a blank screen
     const abortLoad = () => {
       setConvLoading(false);
@@ -5090,7 +5093,7 @@ const Chat = () => {
         setMessages(restored);
         setConvLoading(false);
         setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
-        if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); }
+        if (data.session_id) { setSessionId(data.session_id); sessionIdRef.current = data.session_id; loadDocuments(data.session_id); loadReports(data.session_id); }
         setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
         return;
       }
@@ -5124,7 +5127,7 @@ const Chat = () => {
             }));
             setMessages(restored);
             setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
-            setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid);
+            setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); loadReports(sid);
             setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 80);
             setConvLoading(false);
             return;
@@ -6663,7 +6666,7 @@ const Chat = () => {
                             Edit report
                           </button>
                         ) : (
-                          <div className="flex items-end gap-2 w-full bg-muted/40 rounded-xl border border-border px-3 py-2">
+                          <div className="flex items-center gap-2 w-full bg-muted/40 rounded-xl border border-border px-3 py-2">
                             <textarea
                               ref={reportEditInputRef}
                               value={reportEditInstruction}

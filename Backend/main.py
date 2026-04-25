@@ -593,6 +593,9 @@ async def query_documents(
         if result.get("report_id") and result.get("report_title"):
             from services.report_agent import _reports_store as _rs
             _rpt = _rs.get(result["report_id"], {})
+            # Stamp session_id so in-memory fallback filter in GET /reports works
+            if result["report_id"] in _rs and not _rpt.get("session_id"):
+                _rs[result["report_id"]]["session_id"] = session_id
             _content = _rpt.get("content") or ""
             _source_docs = ", ".join(_rpt.get("source_docs") or []) or "unknown"
             _word_count = len(_content.split())
@@ -692,13 +695,16 @@ async def query_stream(
             # so every future node (direct, rag, etc.) knows what was produced.
             if result.get("report_id") and result.get("report_title"):
                 from services.report_agent import _reports_store as _rs
-                _rpt = _rs.get(result["report_id"], {})
-                _content = _rpt.get("content") or ""
+                _rpt        = _rs.get(result["report_id"], {})
+                # Stamp session_id so in-memory fallback filter in GET /reports works
+                if result["report_id"] in _rs and not _rpt.get("session_id"):
+                    _rs[result["report_id"]]["session_id"] = session_id
+                _content    = _rpt.get("content") or ""
                 _source_docs = ", ".join(_rpt.get("source_docs") or []) or "unknown"
-                _word_count = len(_content.split())
+                _word_count  = len(_content.split())
                 _section_count = len(_re.findall(r'^#{1,2}\s', _content, _re.M))
-                _preview = _content[:400].strip()
-                memory_note = (
+                _preview     = _content[:400].strip()
+                memory_note  = (
                     f"{clean_answer}\n\n"
                     f"[REPORT GENERATED]\n"
                     f"Title: {result['report_title']}\n"
@@ -707,6 +713,50 @@ async def query_stream(
                     f"Opening: {_preview}"
                 )
                 append_turn(session_id, "assistant", memory_note, frontend_conv_id)
+
+                # ── Persist Report node to Neo4j ──────────────────────────
+                try:
+                    from neo4j_auth import _run as _neo4j_run
+                    _now     = datetime.utcnow().isoformat()
+                    _conv_id = frontend_conv_id or _conversation_cache.get(session_id)
+                    if not _conv_id:
+                        _rows = _neo4j_run(
+                            "MATCH (c:Conversation {session_id: $sid}) RETURN c.id AS id LIMIT 1",
+                            {"sid": session_id},
+                        )
+                        _conv_id = _rows[0]["id"] if _rows else None
+                    if _conv_id:
+                        _neo4j_run(
+                            """
+                            MERGE (r:Report {id: $report_id})
+                            SET r.title         = $title,
+                                r.query         = $query,
+                                r.source_docs   = $source_docs,
+                                r.word_count    = $word_count,
+                                r.section_count = $section_count,
+                                r.preview       = $preview,
+                                r.session_id    = $session_id,
+                                r.created_at    = $now
+                            WITH r
+                            MATCH (c:Conversation {id: $conv_id})
+                            MERGE (c)-[:HAS_REPORT]->(r)
+                            """,
+                            {
+                                "report_id":     result["report_id"],
+                                "title":         result["report_title"],
+                                "query":         request.query[:300],
+                                "source_docs":   _source_docs,
+                                "word_count":    _word_count,
+                                "section_count": _section_count,
+                                "preview":       _preview[:400],
+                                "session_id":    session_id,
+                                "conv_id":       _conv_id,
+                                "now":           _now,
+                            },
+                        )
+                        print(f"☁️  Neo4j: inline Report '{result['report_title']}' → Conversation {_conv_id}")
+                except Exception as _ne:
+                    print(f"⚠️  Neo4j inline report save failed (non-fatal): {_ne}")
             else:
                 append_turn(session_id, "assistant", clean_answer, frontend_conv_id)
 
@@ -996,25 +1046,171 @@ async def report_intent_check(request: dict):
 
 
 @app.post("/generate-report")
-async def generate_report(request: QueryRequest):
-    """Generate and persist a structured report."""
+async def generate_report(
+    request: QueryRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Generate a structured report and persist it to:
+      1. Disk (REPORTS_DIR) — unchanged
+      2. Neo4j as a (:Report) node linked to the owning Conversation
+      3. Session history — so future turns in the SAME chat know a report exists
+      4. SharedContext — so the report agent can reference it immediately
+
+    The endpoint is now fully session-aware: pass session_id + conversation_id
+    (same fields as /query) and the report will be scoped to that chat.
+    """
     try:
-        print(f"\n📊 Report: {request.query}")
+        import re as _re
+
+        # ── Session resolution (same pattern as /query) ───────────────────
+        session_id = request.session_id or str(uuid.uuid4())
+
+        from neo4j_auth import optional_user
+        user    = optional_user(authorization)
+        user_id = user["user_id"] if user else None
+        if user:
+            _session_user_context[session_id] = user["user_id"]
+
+        frontend_conv_id = request.conversation_id or None
+
+        print(f"\n📊 Report: {request.query!r} [session={session_id}]")
+
+        # ── Generate ──────────────────────────────────────────────────────
         report_data = rag_engine.generate_report(request.query)
 
+        # Stamp session_id on the in-memory store entry so GET /reports filter works
+        report_id = report_data.get("report_id") or str(uuid.uuid4())
+        try:
+            from services.report_agent import _reports_store as _rs
+            if report_id in _rs and not _rs[report_id].get("session_id"):
+                _rs[report_id]["session_id"] = session_id
+        except Exception:
+            pass
+
+        # ── Disk save (unchanged) ─────────────────────────────────────────
         timestamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_filename = f"report_{timestamp}.json"
         report_path     = os.path.join(REPORTS_DIR, report_filename)
-
-        import json
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report_data, f, ensure_ascii=False, indent=2)
+        print(f"✅ Report saved to disk: {report_filename}")
 
-        print(f"✅ Report saved: {report_filename}")
+        # ── Build a human-readable summary for session history ────────────
+        content      = report_data.get("content") or report_data.get("answer") or ""
+        title        = report_data.get("title")   or request.query[:80]
+        source_docs  = ", ".join(report_data.get("source_docs") or []) or "unknown"
+        word_count   = len(content.split())
+        section_count = len(_re.findall(r'^#{1,2}\s', content, _re.M))
+        preview      = content[:400].strip()
+
+        memory_note = (
+            f"[REPORT GENERATED]\n"
+            f"Title: {title}\n"
+            f"Sources: {source_docs}\n"
+            f"Size: {section_count} sections, {word_count} words\n"
+            f"Opening: {preview}"
+        )
+
+        # ── Append to session history so subsequent turns know about it ───
+        append_turn(session_id, "user",      request.query,  frontend_conv_id)
+        append_turn(session_id, "assistant", memory_note,    frontend_conv_id)
+        SharedContext.set_history(session_id, get_history(session_id))
+
+        # ── Neo4j: persist Report node + link to Conversation ─────────────
+        try:
+            from neo4j_auth import _run as neo4j_run
+            now = datetime.utcnow().isoformat()
+
+            # Resolve (or create) the conversation node for this session
+            conv_id = frontend_conv_id or _conversation_cache.get(session_id)
+            if not conv_id:
+                rows = neo4j_run(
+                    "MATCH (c:Conversation {session_id: $sid}) RETURN c.id AS id LIMIT 1",
+                    {"sid": session_id},
+                )
+                conv_id = rows[0]["id"] if rows else None
+
+            if not conv_id:
+                conv_id = str(uuid.uuid4())
+                _conversation_cache[session_id] = conv_id
+
+            # Upsert Conversation node (same pattern as _auto_save_to_neo4j)
+            if user_id:
+                neo4j_run(
+                    """
+                    MATCH (u:User {id: $user_id})
+                    MERGE (c:Conversation {id: $conv_id})
+                    ON CREATE SET c.session_id = $session_id,
+                                  c.title      = $title,
+                                  c.preview    = $preview,
+                                  c.chat_type  = 'rag',
+                                  c.created_at = $now,
+                                  c.updated_at = $now
+                    ON MATCH  SET c.updated_at  = $now
+                    MERGE (u)-[:HAS_CONVERSATION]->(c)
+                    """,
+                    {"user_id": user_id, "conv_id": conv_id,
+                     "session_id": session_id, "title": title,
+                     "preview": preview[:120], "now": now},
+                )
+            else:
+                neo4j_run(
+                    """
+                    MERGE (c:Conversation {id: $conv_id})
+                    ON CREATE SET c.session_id = $session_id,
+                                  c.title      = $title,
+                                  c.preview    = $preview,
+                                  c.chat_type  = 'rag',
+                                  c.created_at = $now,
+                                  c.updated_at = $now
+                    ON MATCH  SET c.updated_at  = $now
+                    """,
+                    {"conv_id": conv_id, "session_id": session_id,
+                     "title": title, "preview": preview[:120], "now": now},
+                )
+
+            # Create/update the Report node and link it to the Conversation
+            neo4j_run(
+                """
+                MERGE (r:Report {id: $report_id})
+                SET r.title        = $title,
+                    r.query        = $query,
+                    r.source_docs  = $source_docs,
+                    r.word_count   = $word_count,
+                    r.section_count = $section_count,
+                    r.preview      = $preview,
+                    r.filename     = $filename,
+                    r.session_id   = $session_id,
+                    r.created_at   = $now
+                WITH r
+                MATCH (c:Conversation {id: $conv_id})
+                MERGE (c)-[:HAS_REPORT]->(r)
+                """,
+                {
+                    "report_id":     report_id,
+                    "title":         title,
+                    "query":         request.query[:300],
+                    "source_docs":   source_docs,
+                    "word_count":    word_count,
+                    "section_count": section_count,
+                    "preview":       preview[:400],
+                    "filename":      report_filename,
+                    "session_id":    session_id,
+                    "conv_id":       conv_id,
+                    "now":           now,
+                },
+            )
+            print(f"☁️  Neo4j: Report '{title}' → Conversation {conv_id}")
+        except Exception as neo_err:
+            print(f"⚠️  Neo4j report save failed (non-fatal): {neo_err}")
+
         return {
             "status":      "success",
             "report":      report_data,
+            "report_id":   report_id,
             "report_file": report_filename,
+            "session_id":  session_id,
             "timestamp":   timestamp,
         }
     except Exception as e:

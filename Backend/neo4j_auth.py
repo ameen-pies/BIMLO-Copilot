@@ -3,12 +3,15 @@ neo4j_auth.py — User authentication & session persistence via Neo4j
 
 Graph schema:
   (:User {id, email, username, password_hash, created_at, last_seen})
-  (:Conversation {id, title, preview, created_at, updated_at, session_id})
-  (:Message {id, role, content, timestamp})
+  (:Conversation {id, title, preview, created_at, updated_at, session_id, chat_type})
+  (:Message {id, role, content, timestamp, payload})
   (:Document {id, filename, doc_type, uploaded_at, chunk_count})
+  (:Report {id, title, query, source_docs, word_count, section_count,
+            preview, filename, session_id, created_at})
 
   (:User)-[:HAS_CONVERSATION]->(:Conversation)
   (:Conversation)-[:CONTAINS {index}]->(:Message)
+  (:Conversation)-[:HAS_REPORT]->(:Report)
   (:User)-[:UPLOADED]->(:Document)
   (:Conversation)-[:USED_DOCUMENT]->(:Document)
 
@@ -130,6 +133,7 @@ def _setup_constraints():
         "CREATE CONSTRAINT msg_id IF NOT EXISTS FOR (m:Message) REQUIRE m.id IS UNIQUE",
         "CREATE CONSTRAINT doc_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
         "CREATE CONSTRAINT token_val IF NOT EXISTS FOR (t:Token) REQUIRE t.token IS UNIQUE",
+        "CREATE CONSTRAINT report_id IF NOT EXISTS FOR (r:Report) REQUIRE r.id IS UNIQUE",
     ]
     for c in constraints:
         try:
@@ -852,6 +856,110 @@ def delete_news_conversation(conversation_id: str, user: Dict = Depends(require_
         DETACH DELETE c, m
         """,
         {"user_id": user["user_id"], "conv_id": conversation_id},
+    )
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REPORT PERSISTENCE
+#
+# Graph additions:
+#   (:Report {id, title, query, source_docs, word_count, section_count,
+#             preview, filename?, session_id, created_at})
+#   (:Conversation)-[:HAS_REPORT]->(:Report)
+#
+# Reports are scoped to a Conversation so they always belong to the chat
+# that triggered them. Users can list, load, and delete their reports.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/conversations/{conversation_id}/reports")
+def list_reports_for_conversation(
+    conversation_id: str,
+    user: Dict = Depends(require_user),
+):
+    """Return all reports generated inside a specific conversation."""
+    rows = _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation {id: $conv_id})
+        MATCH (c)-[:HAS_REPORT]->(r:Report)
+        RETURN r.id           AS id,
+               r.title        AS title,
+               r.query        AS query,
+               r.source_docs  AS source_docs,
+               r.word_count   AS word_count,
+               r.section_count AS section_count,
+               r.preview      AS preview,
+               r.filename     AS filename,
+               r.created_at   AS created_at
+        ORDER BY r.created_at DESC
+        """,
+        {"user_id": user["user_id"], "conv_id": conversation_id},
+    )
+    return rows
+
+
+@router.get("/reports")
+def list_all_reports(user: Dict = Depends(require_user)):
+    """Return every report across all conversations for the user, newest first."""
+    rows = _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation)
+        MATCH (c)-[:HAS_REPORT]->(r:Report)
+        RETURN r.id            AS id,
+               r.title         AS title,
+               r.query         AS query,
+               r.source_docs   AS source_docs,
+               r.word_count    AS word_count,
+               r.section_count AS section_count,
+               r.preview       AS preview,
+               r.filename      AS filename,
+               r.session_id    AS session_id,
+               r.created_at    AS created_at,
+               c.id            AS conversation_id,
+               c.title         AS conversation_title
+        ORDER BY r.created_at DESC
+        """,
+        {"user_id": user["user_id"]},
+    )
+    return rows
+
+
+@router.get("/reports/{report_id}")
+def get_report(report_id: str, user: Dict = Depends(require_user)):
+    """Return a single report — only if it belongs to a conversation owned by the user."""
+    rows = _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation)
+        MATCH (c)-[:HAS_REPORT]->(r:Report {id: $report_id})
+        RETURN r.id            AS id,
+               r.title         AS title,
+               r.query         AS query,
+               r.source_docs   AS source_docs,
+               r.word_count    AS word_count,
+               r.section_count AS section_count,
+               r.preview       AS preview,
+               r.filename      AS filename,
+               r.session_id    AS session_id,
+               r.created_at    AS created_at,
+               c.id            AS conversation_id
+        """,
+        {"user_id": user["user_id"], "report_id": report_id},
+    )
+    if not rows:
+        raise HTTPException(404, "Report not found")
+    return rows[0]
+
+
+@router.delete("/reports/{report_id}")
+def delete_report(report_id: str, user: Dict = Depends(require_user)):
+    """Delete a report node (does NOT delete the conversation or messages)."""
+    _run(
+        """
+        MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation)
+        MATCH (c)-[:HAS_REPORT]->(r:Report {id: $report_id})
+        DETACH DELETE r
+        """,
+        {"user_id": user["user_id"], "report_id": report_id},
     )
     return {"ok": True}
 
