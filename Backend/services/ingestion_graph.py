@@ -45,6 +45,7 @@ class IngestionState(TypedDict):
     filename:   str
     chunks:     List[Dict]
     session_id: Optional[str]
+    user_id:    Optional[str]
 
     # outputs set by each node
     vector_indexed:  bool
@@ -83,6 +84,7 @@ def _make_index_vector_store_node(vector_store):
     Returns a closure node that indexes chunks into ChromaDB.
     Receives the VectorStoreManager at graph-build time so the node
     is a plain function with no class dependency.
+    Passes user_id and session_id for per-user/session isolation.
     """
     def _node(state: IngestionState) -> IngestionState:
         if state.get("error"):
@@ -91,19 +93,23 @@ def _make_index_vector_store_node(vector_store):
         doc_id   = state["doc_id"]
         filename = state["filename"]
         chunks   = state["chunks"]
+        user_id  = state.get("user_id")
+        session_id = state.get("session_id")
 
-        print(f"💾 [ingestion:index_vector_store] indexing '{filename}' ({len(chunks)} chunks)…")
+        print(f"💾 [ingestion:index_vector_store] indexing '{filename}' ({len(chunks)} chunks) for user_{user_id or 'anon'}_session_{session_id}…")
         t0 = time.time()
         try:
             # add_document returns the same doc_id we passed in
             vector_store.add_document(
                 filename,
                 chunks,
-                session_id=state.get("session_id"),
+                session_id=session_id,
+                user_id=user_id,
+                doc_id=state.get("doc_id"),
             )
             print(
                 f"✅ [ingestion:index_vector_store] '{filename}' indexed "
-                f"in {time.time()-t0:.1f}s"
+                f"in {time.time()-t0:.1f}s to user_{user_id or 'anon'}_session_{session_id}"
             )
             return {**state, "vector_indexed": True}
         except Exception as e:
@@ -199,6 +205,7 @@ def run_ingestion_pipeline(
     filename: str,
     chunks:   List[Dict],
     session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> None:
     """
     Submit a document ingestion job to the background thread pool.
@@ -212,6 +219,8 @@ def run_ingestion_pipeline(
         doc_id:       UUID string assigned to this document
         filename:     Original filename (used for metadata + Neo4j nodes)
         chunks:       List of chunk dicts from DocumentProcessor
+        session_id:   Chat session ID for isolation
+        user_id:      User ID for per-user isolation
 
     NOTE: vector_store.add_document() is called INSIDE the graph now.
           Do NOT call it before run_ingestion_pipeline() — it would double-index.
@@ -223,6 +232,7 @@ def run_ingestion_pipeline(
         "filename":        filename,
         "chunks":          chunks,
         "session_id":      session_id,
+        "user_id":         user_id,
         "vector_indexed":  False,
         "graph_ingested":  False,
         "graph_stats":     None,
@@ -252,4 +262,4 @@ def run_ingestion_pipeline(
             traceback.print_exc()
 
     _executor.submit(_run)
-    print(f"📬 [ingestion_graph] '{filename}' submitted to background pipeline")
+    print(f"📬 [ingestion_graph] '{filename}' submitted to background pipeline (user_{user_id or 'anon'}_session_{session_id})")

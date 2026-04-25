@@ -3354,8 +3354,19 @@ const Chat = () => {
   const [input, setInput] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
   const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  const [duplicateBanner, setDuplicateBanner] = useState<string | null>(null);
+  const duplicateBannerTimeoutRef = useRef<number | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+
+  useEffect(() => {
+    return () => {
+      if (duplicateBannerTimeoutRef.current) {
+        window.clearTimeout(duplicateBannerTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const createPreviewUrlForFile = (file: File) => {
     const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
@@ -3381,6 +3392,7 @@ const Chat = () => {
 
   const removePendingAttachment = (documentId: string) => {
     setPendingDocIds(prev => prev.filter(id => id !== documentId));
+    setConfirmingDeleteId(null);
   };
   const [activeConvId, setActiveConvId] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -3497,6 +3509,14 @@ const Chat = () => {
   const [isChatDragOver, setIsChatDragOver] = useState(false);
   const chatDragCounterRef = useRef(0); // track nested drag enter/leave for chat area
 
+  // Safety reset: if the user drags out of the browser window, clear the overlay
+  useEffect(() => {
+    const reset = () => { dragCounterRef.current = 0; setIsDragOver(false); chatDragCounterRef.current = 0; setIsChatDragOver(false); };
+    window.addEventListener('dragend', reset);
+    document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) reset(); });
+    return () => { window.removeEventListener('dragend', reset); };
+  }, []);
+
   const handleFiles = async (files: FileList | File[]) => {
     const arr = Array.from(files);
     if (!arr.length) return;
@@ -3508,6 +3528,12 @@ const Chat = () => {
     }
     setIsUploading(true);
     for (const file of arr) {
+      if (documents.some(d => d.filename.toLowerCase() === file.name.toLowerCase())) {
+        if (duplicateBannerTimeoutRef.current) window.clearTimeout(duplicateBannerTimeoutRef.current);
+        setDuplicateBanner(`Duplicate file detected 🙂`);
+        duplicateBannerTimeoutRef.current = window.setTimeout(() => setDuplicateBanner(null), 4500);
+        continue;
+      }
       // Optimistic placeholder in docs panel
       const placeholderId = `uploading-${Date.now()}-${file.name}`;
       setDocuments(prev => [...prev, {
@@ -3546,7 +3572,8 @@ const Chat = () => {
           .filter(d => d.document_id !== placeholderId)
           .concat([{ document_id: res.document_id, filename: res.filename, doc_type: file.name.split(".").pop() ?? "doc", timestamp: new Date().toISOString() }])
         );
-        toast({ title: "File uploaded", description: `${res.filename} ready` });
+        // File uploaded successfully, no toast needed
+        // toast({ title: "File uploaded", description: `${res.filename} ready` });
       } catch (err) {
         setDocuments(prev => prev.filter(d => d.document_id !== placeholderId));
         toast({ title: "Upload failed", description: String(err), variant: "destructive" });
@@ -4070,9 +4097,12 @@ const Chat = () => {
     } else {
       setBubbleViewer({ doc, content: null, loading: true, error: null, highlightText, highlightLines, highlightKey: 0, mediaType: 'txt' });
       try {
+        console.log(`[openBubbleDoc] fetching content for doc_id=${doc.document_id} session_id=${sessionIdRef.current}`);
         const res = await (api as any).getDocumentContent(doc.document_id, sessionIdRef.current ?? undefined);
+        console.log(`[openBubbleDoc] success, content length=${res.content?.length}`);
         setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, content: res.content, loading: false } : p);
-      } catch {
+      } catch (err) {
+        console.error(`[openBubbleDoc] FAILED doc_id=${doc.document_id}`, err);
         setBubbleViewer(p => p && p.doc.document_id === doc.document_id ? { ...p, loading: false, error: "Could not load document." } : p);
       }
     }
@@ -4550,7 +4580,7 @@ const Chat = () => {
         }));
         return msgs;
       });
-      toast({ title: "Report ready", description: report.title });
+      // Report generated successfully, no toast needed
     } catch (err) {
       // Clear the loading skeleton on failure
       setMessages(prev => {
@@ -4590,7 +4620,7 @@ const Chat = () => {
       setReports(prev => prev.map(r => r.report_id === updated.report_id ? updated : r));
       setReportEditInstruction("");
       setReportEditMode(false);
-      toast({ title: "Report updated", description: `v${updated.version}` });
+      // Report updated silently - v${updated.version}` });
     } catch (err) {
       console.error("Patch failed:", err);
       toast({ title: "Edit failed", description: serializeError(err), variant: "destructive" });
@@ -4654,7 +4684,7 @@ const Chat = () => {
       setActiveReport(updated);
       setReports(prev => prev.map(r => r.report_id === updated.report_id ? updated : r));
       setShowVersionHistory(false);
-      toast({ title: `Restored to v${version}`, description: `Now at v${updated.version}` });
+      // Version restored successfully, no toast needed
     } catch (err) {
       toast({ title: "Restore failed", description: serializeError(err), variant: "destructive" });
     } finally {
@@ -4937,16 +4967,12 @@ const Chat = () => {
 
 
   const removeDocument = async (documentId: string) => {
-    if (!confirm("Are you sure you want to delete this document?")) return;
+    setConfirmingDeleteId(null);
 
     try {
       await api.deleteDocument(documentId, sessionIdRef.current ?? undefined);
       revokePreviewUrl(documentId);
-      
-      toast({
-        title: "Document deleted",
-        description: "Document removed successfully",
-      });
+      // Document deleted successfully, no toast needed
 
       await loadDocuments(sessionIdRef.current);
     } catch (error) {
@@ -5204,7 +5230,7 @@ const Chat = () => {
                       setActiveReport(report);
                       reportsPanelOpenRef.current = true;
                       setReportsPanelOpen(true);
-                      toast({ title: "Report ready", description: report.title });
+                      // Report generated successfully, no toast needed
                     })
                     .catch(() => { if (attempt < 5) setTimeout(() => _fetchReport(attempt + 1), 3000 * (attempt + 1)); });
                 };
@@ -5318,7 +5344,7 @@ const Chat = () => {
                       setActiveReport(report);
                       reportsPanelOpenRef.current = true;
                       setReportsPanelOpen(true);
-                      toast({ title: "Report ready", description: report.title });
+                      // Report generated successfully, no toast needed
                     })
                     .catch(() => { if (attempt < 5) setTimeout(() => _fetchReport2(attempt + 1), 3000 * (attempt + 1)); });
                 };
@@ -5611,7 +5637,7 @@ const Chat = () => {
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
       if (activeConvIdRef.current !== convId) {
-        toast({ title: "Response complete", description: "A response finished in another conversation.", });
+        // Response arrived from another conversation, description: "A response finished in another conversation.", });
       }
       // Smart conversation title:
       // • Report route → call /title with the prompt so the sidebar shows
@@ -6047,8 +6073,8 @@ const Chat = () => {
     <div 
       className="h-screen flex bg-background relative overflow-hidden"
       style={{ ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}
-      onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; setIsDragOver(true); }}
-      onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current === 0) setIsDragOver(false); }}
+      onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; if (dragCounterRef.current === 1) setIsDragOver(true); }}
+      onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current <= 0) { dragCounterRef.current = 0; setIsDragOver(false); } }}
       onDragOver={e => e.preventDefault()}
       onDrop={e => { e.preventDefault(); dragCounterRef.current = 0; setIsDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
     >
@@ -6082,6 +6108,35 @@ const Chat = () => {
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <AnimatePresence>
+          {duplicateBanner && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="fixed top-4 left-0 right-0 flex justify-center z-50 pointer-events-none"
+            >
+              <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full border border-emerald-500/50 bg-emerald-950 text-emerald-300 text-xs font-medium shadow-sm">
+                <span>😊</span>
+                <span>{duplicateBanner}</span>
+                <button
+                  onClick={() => {
+                    setDuplicateBanner(null);
+                    if (duplicateBannerTimeoutRef.current) {
+                      window.clearTimeout(duplicateBannerTimeoutRef.current);
+                      duplicateBannerTimeoutRef.current = null;
+                    }
+                  }}
+                  className="ml-1 text-emerald-300 hover:text-emerald-100 transition-colors"
+                  aria-label="Dismiss banner"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
         {/* Header */}
         <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0 bg-background">
           <Link to="/">
@@ -6725,17 +6780,37 @@ const Chat = () => {
                                     </div>
                                     <div className="flex-1 min-w-0">
                                       <p className="text-xs font-medium text-foreground truncate">{doc.filename}</p>
-                                      <p className="text-[10px] text-muted-foreground capitalize">{isUploadingDoc ? 'uploading...' : doc.doc_type}</p>
+                                      <p className="text-[10px] text-muted-foreground capitalize group-hover:opacity-0 transition-opacity">{isUploadingDoc ? 'uploading...' : doc.doc_type}</p>
                                     </div>
                                     {!isUploadingDoc && (
                                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
                                         <Eye className="h-3 w-3 text-muted-foreground/50" />
-                                        <button
-                                          onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
-                                          className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
-                                        >
-                                          <X className="h-3 w-3" />
-                                        </button>
+                                        {confirmingDeleteId === doc.document_id ? (
+                                          <div className="flex items-center gap-1">
+                                            <button
+                                              onClick={e => { e.stopPropagation(); removeDocument(doc.document_id); }}
+                                              className="p-0.5 rounded-full bg-emerald-500 text-emerald-50 hover:bg-emerald-400 transition-colors"
+                                              title="Confirm delete"
+                                            >
+                                              <Check className="h-3 w-3" />
+                                            </button>
+                                            <button
+                                              onClick={e => { e.stopPropagation(); setConfirmingDeleteId(null); }}
+                                              className="p-0.5 rounded-full bg-muted border border-border text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors"
+                                              title="Cancel"
+                                            >
+                                              <X className="h-3 w-3" />
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <button
+                                            onClick={e => { e.stopPropagation(); setConfirmingDeleteId(doc.document_id); }}
+                                            className="p-0.5 rounded text-muted-foreground/50 hover:text-destructive transition-colors"
+                                            title="Delete document"
+                                          >
+                                            <X className="h-3 w-3" />
+                                          </button>
+                                        )}
                                       </div>
                                     )}
                                   </div>
@@ -7825,21 +7900,6 @@ const Chat = () => {
                   transition={{ duration: 0.18 }}
                   className="flex items-center gap-1.5 flex-wrap mb-2"
                 >
-                  {/* Loading cards for in-progress uploads */}
-                  {documents.filter(d => d.doc_type === "uploading").map(doc => (
-                    <div
-                      key={doc.document_id}
-                      className="flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-primary/30 text-left shadow-sm opacity-80"
-                      title={doc.filename}
-                    >
-                      <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
-                        <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
-                      </div>
-                      <span className="text-[11px] text-muted-foreground font-medium max-w-[90px] truncate">
-                        {(() => { const e = doc.filename.split('.').pop() ?? ''; const base = e ? doc.filename.slice(0, doc.filename.length - e.length - 1) : doc.filename; return base.length > 8 ? base.slice(0, 8) + '...' + (e ? '.' + e : '') : doc.filename; })()}
-                      </span>
-                    </div>
-                  ))}
                   {pendingDocIds.slice(0, 8).map(docId => {
                     const doc = documents.find(d => d.document_id === docId);
                     if (!doc) return null;
@@ -7876,11 +7936,31 @@ const Chat = () => {
                         </button>
                         <button
                           type="button"
-                          onClick={e => { e.stopPropagation(); removePendingAttachment(doc.document_id); }}
-                          className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-muted border border-border text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-colors flex items-center justify-center"
-                          title="Remove attachment"
+                          onClick={e => {
+                            e.stopPropagation();
+                            if (confirmingDeleteId === doc.document_id) {
+                              removePendingAttachment(doc.document_id);
+                            } else {
+                              setConfirmingDeleteId(doc.document_id);
+                            }
+                          }}
+                          onMouseLeave={() => {
+                            if (confirmingDeleteId === doc.document_id) {
+                              setConfirmingDeleteId(null);
+                            }
+                          }}
+                          className={`absolute -top-1 -right-1 h-5 w-5 rounded-full flex items-center justify-center transition-all ${
+                            confirmingDeleteId === doc.document_id
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-muted border border-border text-muted-foreground hover:text-foreground hover:bg-muted/80"
+                          }`}
+                          title={confirmingDeleteId === doc.document_id ? "Confirm remove" : "Remove attachment"}
                         >
-                          <X className="h-3 w-3" />
+                          {confirmingDeleteId === doc.document_id ? (
+                            <Check className="h-3 w-3" />
+                          ) : (
+                            <X className="h-3 w-3" />
+                          )}
                         </button>
                       </div>
                     );
@@ -8030,7 +8110,11 @@ const Chat = () => {
                       rows={1}
                       disabled={isLoading}
                       style={{ maxHeight: "160px" }}
-                      className="flex-1 resize-none bg-transparent text-sm text-foreground placeholder:text-muted-foreground/60 placeholder:align-middle focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-5 py-1.5 overflow-y-auto scrollbar-thin self-center"
+                      className={`flex-1 resize-none bg-transparent text-sm text-foreground focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed leading-5 py-1.5 overflow-y-auto scrollbar-thin self-center transition-[opacity] duration-200 ${
+                        isChatDragOver 
+                          ? "placeholder:opacity-0" 
+                          : "placeholder:opacity-100 placeholder:text-muted-foreground/60"
+                      } placeholder:align-middle`}
                     />
                     {/* Ghost-text suffix — never shown on empty input */}
                     {wordSuffix && input.length > 0 && !autocomplete && (

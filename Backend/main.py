@@ -432,32 +432,41 @@ async def upload_document(
 
             try:
                 chunks = doc_processor.process_document(tmp_path)
+                # ── Ensure chunk_index is in metadata for ChromaDB retrieval ──
+                for idx, chunk in enumerate(chunks):
+                    if "metadata" not in chunk:
+                        chunk["metadata"] = {}
+                    chunk["metadata"]["chunk_index"] = idx
+                    chunk["metadata"]["document_id"] = doc_id
             finally:
                 os.unlink(tmp_path)  # delete temp file immediately
 
             print(f"✂️  {len(chunks)} chunks created")
 
-            if _ingestion_graph_available:
-                run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id)
-                print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id})")
-            else:
-                # Fallback: direct synchronous indexing when ingestion_graph not available
-                vector_store.add_document(file.filename, chunks, session_id=session_id)
-                print(f"✅ Indexed (direct fallback): {doc_id}")
-                try:
-                    from graph_rag import get_engine as _get_graph_engine
-                    import threading as _threading
-                    _graph_engine = _get_graph_engine()
-                    if _graph_engine.available:
-                        def _ingest_fallback():
-                            _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
-                        _threading.Thread(target=_ingest_fallback, daemon=True).start()
-                except Exception as _ge:
-                    print(f"⚠️  graph_rag ingestion skipped (fallback): {_ge}")
-
-        # ── Persist to Neo4j — scoped to session + optionally user ─────────
+        # ── Extract user_id from auth token for per-user isolation ─────────
         from neo4j_auth import optional_user, _run as neo4j_run
         user = optional_user(authorization)
+        user_id = user["user_id"] if user else None
+
+        if _ingestion_graph_available:
+            run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id, user_id=user_id)
+            print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id}, user={user_id or 'anonymous'}, session={session_id})")
+        else:
+            # Fallback: direct synchronous indexing when ingestion_graph not available
+            vector_store.add_document(file.filename, chunks, session_id=session_id, user_id=user_id)
+            print(f"✅ Indexed (direct fallback): {doc_id} → user_{user_id or 'anon'}_session_{session_id}")
+            try:
+                from graph_rag import get_engine as _get_graph_engine
+                import threading as _threading
+                _graph_engine = _get_graph_engine()
+                if _graph_engine.available:
+                    def _ingest_fallback():
+                        _graph_engine.ingest_chunks(doc_id, file.filename, chunks)
+                    _threading.Thread(target=_ingest_fallback, daemon=True).start()
+            except Exception as _ge:
+                print(f"⚠️  graph_rag ingestion skipped (fallback): {_ge}")
+
+        # ── Persist to Neo4j — scoped to session + optionally user ─────────
         try:
             from datetime import datetime as _dt
             _now = _dt.utcnow().isoformat()
@@ -1045,12 +1054,19 @@ async def list_documents(
 
 
 @app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, session_id: Optional[str] = None):
+async def delete_document(
+    doc_id: str,
+    session_id: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None)
+):
     if not session_id:
         raise HTTPException(status_code=403, detail="Session ID required")
 
     try:
-        from neo4j_auth import _run as neo4j_run
+        from neo4j_auth import optional_user, _run as neo4j_run
+        user = optional_user(authorization)
+        user_id = user["user_id"] if user else None
+
         rows = neo4j_run(
             """
             MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
@@ -1069,10 +1085,8 @@ async def delete_document(doc_id: str, session_id: Optional[str] = None):
             except Exception:
                 pass
 
-        try:
-            vector_store.delete_document(doc_id)
-        except Exception:
-            pass
+        # Delete from vector store with per-user/session isolation
+        vector_store.delete_document(doc_id, user_id=user_id, session_id=session_id)
 
         neo4j_run(
             """
@@ -1095,54 +1109,97 @@ async def delete_document(doc_id: str, session_id: Optional[str] = None):
 
 
 @app.get("/documents/{doc_id}/content")
-async def get_document_content(doc_id: str, session_id: Optional[str] = None):
-    """Return the raw text content of a stored document by reassembling its chunks from ChromaDB."""
+async def get_document_content(
+    doc_id: str,
+    session_id: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None)
+):
+    """Return the raw text content of a stored document by reassembling its chunks from ChromaDB.
+    Per-user/session isolation: only returns content from the user's session."""
     if not session_id:
         raise HTTPException(status_code=403, detail="Session ID required")
 
+    print(f"📄 [content] doc_id={doc_id} session_id={session_id}")
+
     try:
-        # ── CAD/IFC files live in CadSharedContext, not the vector store ──
+        from neo4j_auth import optional_user
+        user = optional_user(authorization)
+        user_id = user["user_id"] if user else None
+
+        # ── CAD/IFC ───────────────────────────────────────────────────────────
         if _cad_ifc_available:
             from cad_ifc_agent import CadSharedContext
             cad_file = CadSharedContext.get_file(doc_id)
             if cad_file:
+                import json as _json
+                return {"document_id": doc_id, "filename": cad_file.get("filename", doc_id), "content": _json.dumps(cad_file, indent=2, default=str)}
+
+        # ── Helper: sort + join pairs ────────────────────────────────────────
+        def _assemble(results, fallback_filename):
+            pairs = sorted(
+                zip(results["metadatas"], results["documents"]),
+                key=lambda x: x[0].get("chunk_index", x[0].get("chunk_id", 0)),
+            )
+            fname = pairs[0][0].get("filename", fallback_filename) if pairs else fallback_filename
+            return fname, "\n\n".join(t for _, t in pairs)
+
+        # ── Search with per-user/session isolation ─────────────────────────────
+        results = vector_store.search(
+            query="",  # Empty query to get all chunks
+            top_k=10000,  # Get all
+            user_id=user_id,
+            session_id=session_id,
+        )
+        
+        # Filter to just this document
+        doc_results = [r for r in results if r["metadata"].get("document_id") == doc_id]
+        if doc_results:
+            print(f"✅ [content] {len(doc_results)} chunks via document_id for user_{user_id or 'anon'}_session_{session_id}")
+            fname = doc_results[0]["metadata"].get("filename", doc_id)
+            content = "\n\n".join(r["text"] for r in doc_results)
+            return {"document_id": doc_id, "filename": fname, "content": content}
+
+        # ── Fallback: check cache ──────────────────────────────────────────────
+        fallback_filename = None
+        cached = DOCUMENT_FILE_CACHE.get(doc_id)
+        if cached:
+            fallback_filename = cached.get("filename")
+            print(f"🔍 [content] DOCUMENT_FILE_CACHE hit: filename={fallback_filename!r}")
+
+        if not fallback_filename:
+            try:
                 from neo4j_auth import _run as neo4j_run
                 rows = neo4j_run(
-                    """
-                    MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
-                    RETURN d.id AS id
-                    """,
-                    {"sid": session_id, "doc_id": doc_id},
+                    "MATCH (d:Document {id:$doc_id}) RETURN d.filename AS filename LIMIT 1",
+                    {"doc_id": doc_id},
                 )
-                if not rows:
-                    raise HTTPException(status_code=404, detail="Document not found")
+                if rows:
+                    fallback_filename = rows[0]["filename"]
+                    print(f"🔍 [content] Neo4j filename lookup: {fallback_filename!r}")
+            except Exception as ne:
+                print(f"⚠️  [content] Neo4j lookup failed: {ne}")
 
-                import json as _json
-                summary_text = _json.dumps(cad_file, indent=2, default=str)
-                return {"document_id": doc_id, "filename": cad_file.get("filename", doc_id), "content": summary_text}
+        if fallback_filename:
+            results2 = vector_store.collection.get(where={"filename": fallback_filename})
+            print(f"🔍 [content] by filename={fallback_filename!r} → {len(results2.get('ids') or [])} chunks")
+            if results2 and results2.get("ids"):
+                meta0 = results2["metadatas"][0] if results2.get("metadatas") else {}
+                stored_sid = meta0.get("session_id", "")
+                print(f"🔍 [content] stored session_id={stored_sid!r} requested={session_id!r}")
+                if stored_sid == session_id:
+                    fname, content = _assemble(results2, fallback_filename)
+                    print(f"✅ [content] {len(results2['ids'])} chunks via filename for '{fname}'")
+                    return {"document_id": doc_id, "filename": fname, "content": content}
+                print(f"⚠️  [content] filename-based session mismatch")
 
-        # Reassemble text from ChromaDB chunks (ordered by chunk_index)
-        results = vector_store.collection.get(where={"document_id": doc_id})
-        if not results or not results.get("ids"):
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        metadata = results["metadatas"][0] if results.get("metadatas") else {}
-        if metadata.get("session_id") != session_id:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        # Sort chunks by chunk_index and join
-        pairs = sorted(
-            zip(results["metadatas"], results["documents"]),
-            key=lambda x: x[0].get("chunk_index", 0),
-        )
-        filename = pairs[0][0].get("filename", doc_id) if pairs else doc_id
-        content  = "\n\n".join(text for _, text in pairs)
-        return {"document_id": doc_id, "filename": filename, "content": content}
+        print(f"❌ [content] no chunks found anywhere for doc_id={doc_id}")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Content fetch error: {e}")
+        print(f"❌ [content] exception: {e}")
+        import traceback; traceback.print_exc()
         raise HTTPException(500, f"Error reading document: {e}")
 
 
