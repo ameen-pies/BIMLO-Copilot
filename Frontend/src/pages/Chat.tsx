@@ -5154,7 +5154,7 @@ const Chat = () => {
   // ── Shared streaming query runner ────────────────────────────────────────
   // Used by handleSend, handleRedo, and handleEditSubmit so they all get
   // thinking steps and the SSE stream.
-  const runStreamingQuery = useCallback(async (query: string, forceRoute?: string) => {
+  const runStreamingQuery = useCallback(async (query: string, forceRoute?: string, pendingDocIdsToCommit: string[] = []) => {
     setThinkingSteps([]);
     setThinkingExpanded(true);
     setIsLoading(true);
@@ -5184,6 +5184,9 @@ const Chat = () => {
           // Tell the backend to save messages under the frontend's conversation ID
           // so loadConversation finds them without a mismatch.
           ...(activeConvIdRef.current ? { conversation_id: activeConvIdRef.current } : {}),
+          // Commit any files uploaded before this message so the backend indexes them
+          // into the user/session collection before running the vector search.
+          pending_doc_ids: pendingDocIdsToCommit,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -5567,12 +5570,14 @@ const Chat = () => {
 
     const convId = ensureActiveConversationId();
     const originMessages = messages;
+    // Snapshot pendingDocIds BEFORE clearing so we can send them with the query request
+    const snapshotDocIds = [...pendingDocIds];
     const userMsg: Message = {
       id: Date.now().toString(),
       role: "user",
       content: trimmedInput,
       timestamp: new Date(),
-      attachedDocIds: pendingDocIds.length > 0 ? [...pendingDocIds] : undefined,
+      attachedDocIds: snapshotDocIds.length > 0 ? snapshotDocIds : undefined,
     };
     const userRawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
     const updatedUserMessages = [...originMessages, userMsg];
@@ -5625,7 +5630,7 @@ const Chat = () => {
 
       const assistantMsg = activeCadFileId
         ? await runCadQuery(trimmedInput, activeCadFileId)
-        : await runStreamingQuery(trimmedInput);
+        : await runStreamingQuery(trimmedInput, undefined, snapshotDocIds);
       if (!assistantMsg) return;
       const updatedMessages: Message[] = [...originMessages, userMsg, assistantMsg];
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;

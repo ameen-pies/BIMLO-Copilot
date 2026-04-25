@@ -137,6 +137,7 @@ class AgentState(TypedDict):
     report_id: Optional[str]    # set by report_node
     report_title: Optional[str] # set by report_node
     session_id: str              # passed in from main.py
+    user_id: Optional[str]       # passed in from main.py — scopes vector search to per-user collection
 
     # routing context from previous turn
     _prev_route: str
@@ -628,7 +629,7 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", voice_mode: bool = False) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
         # Store callback on instance so node wrappers can access it without going through state
@@ -671,6 +672,7 @@ class RAGEngine:
             "report_id": None,
             "report_title": None,
             "session_id": session_id,
+            "user_id": user_id,
             "error": None,
             "voice_mode": voice_mode,
         }
@@ -1175,9 +1177,10 @@ Reply with ONE word only — the route name."""
         # Even if no_docs flag isn't set, double-check actual session state.
         # This prevents the LLM from being misled by a stale route_log entry
         # that shows a failed RAG attempt from before any documents were uploaded.
+        user_id = state.get("user_id")
         if not no_docs:
             try:
-                has_docs = self.vs.has_documents(session_id)
+                has_docs = self.vs.has_documents(user_id=user_id, session_id=session_id)
             except Exception:
                 has_docs = True  # safe default — don't claim no docs if we can't check
 
@@ -1297,11 +1300,12 @@ Reply with ONE word only — the route name."""
         # If the query explicitly names a file, restrict search to that file only
         filter_dict = None
         session_id = state.get("session_id", "")
-        all_docs = self.vs.list_documents(session_id=session_id)
+        user_id = state.get("user_id")
+        all_docs = self.vs.list_documents(user_id=user_id, session_id=session_id)
 
         if state["route"] in ("rag", "iterative_rag", "analytics", "transform", "graph", "report"):
-            if not self.vs.has_documents(session_id):
-                print(f"⚠️  [retrieve_vector] no documents available for session={session_id!r}; skipping retrieval")
+            if not self.vs.has_documents(user_id=user_id, session_id=session_id):
+                print(f"⚠️  [retrieve_vector] no documents available for user={user_id!r} session={session_id!r}; skipping retrieval")
                 return {
                     **state,
                     "retrieved_chunks": [],
@@ -1327,10 +1331,11 @@ Reply with ONE word only — the route name."""
                 query,
                 top_k=fetch_k,
                 filter_dict=filter_dict,
+                user_id=user_id,
                 session_id=session_id,
             )
         except Exception:
-            results = self.vs.search(query, top_k=fetch_k, session_id=session_id)
+            results = self.vs.search(query, top_k=fetch_k, user_id=user_id, session_id=session_id)
 
         print(f"{len(results)} vector chunks")
 

@@ -341,6 +341,7 @@ class QueryRequest(BaseModel):
     force_route:     Optional[str]  = None   # e.g. "graph" — bypasses the LLM router
     voice_mode:      Optional[bool] = False  # True → skip citation check, source formatting, iterative loops
     conversation_id: Optional[str]  = None   # frontend conv ID — auto-save writes under this node
+    pending_doc_ids: Optional[List[str]] = []  # doc IDs uploaded but not yet committed to vector store
 
 
 class QueryResponse(BaseModel):
@@ -550,6 +551,7 @@ async def query_documents(
         # Try to get user context if they provided auth header
         from neo4j_auth import optional_user
         user = optional_user(authorization)
+        user_id = user["user_id"] if user else None
         
         # Link session to user in context for auto-save
         if user:
@@ -557,6 +559,14 @@ async def query_documents(
 
         # Get history accumulated so far for this session
         history = get_history(session_id)
+
+        # Get history accumulated so far for this session
+        history = get_history(session_id)
+
+        # Log any pending doc IDs sent by frontend (already indexed at upload time)
+        pending_doc_ids = request.pending_doc_ids or []
+        if pending_doc_ids:
+            print(f"📎 /query: {len(pending_doc_ids)} doc(s) attached to this message: {pending_doc_ids}")
 
         print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns]")
 
@@ -570,6 +580,8 @@ async def query_documents(
             prev_route=prev_route,
             route_log=route_log,
             force_route=request.force_route,
+            session_id=session_id,
+            user_id=user_id,
             voice_mode=request.voice_mode,
         )
 
@@ -638,6 +650,7 @@ async def query_stream(
     # Resolve user from auth header so auto-saved convs are linked to the account
     from neo4j_auth import optional_user
     user = optional_user(authorization)
+    user_id = user["user_id"] if user else None
     if user:
         _session_user_context[session_id] = user["user_id"]
 
@@ -667,6 +680,7 @@ async def query_stream(
                 status_callback=status_callback,
                 force_route=request.force_route,
                 session_id=session_id,
+                user_id=user_id,
                 voice_mode=request.voice_mode,
             )
             # Persist session
