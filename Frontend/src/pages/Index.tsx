@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit } from "lucide-react";
+import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit, Mail, Send, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
 import RotatingWords from "@/components/RotatingWords";
@@ -184,6 +184,119 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
         </Button>
       </motion.div>
     </section>
+  );
+};
+
+// ── Contact form ─────────────────────────────────────────────────────────────
+const API_CONTACT = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
+const ContactForm = () => {
+  const [name,    setName]    = useState("");
+  const [email,   setEmail]   = useState("");
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent,    setSent]    = useState(false);
+  const [error,   setError]   = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim() || !email.trim() || !subject.trim() || !message.trim()) return;
+    setSending(true); setError(null);
+    try {
+      const res = await fetch(`${API_CONTACT}/auth/contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, subject, message }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail ?? "Failed");
+      setSent(true);
+    } catch (err: any) {
+      setError(err.message ?? "Something went wrong. Please try again.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%", padding: "10px 14px", borderRadius: 10, fontSize: 14,
+    background: "hsl(var(--muted)/0.35)", border: "1px solid hsl(var(--border))",
+    color: "hsl(var(--foreground))", outline: "none", boxSizing: "border-box",
+    transition: "border-color 0.15s",
+    fontFamily: "inherit",
+  };
+
+  if (sent) return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+      className="flex flex-col items-center gap-4 py-16 text-center">
+      <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#22c55e18", border: "1px solid #22c55e40",
+        display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <CheckCircle size={26} color="#22c55e" />
+      </div>
+      <h3 className="font-heading text-xl font-bold text-foreground">Message sent!</h3>
+      <p className="text-muted-foreground text-sm max-w-xs">Thanks for reaching out. We'll get back to you as soon as possible.</p>
+      <button onClick={() => { setSent(false); setName(""); setEmail(""); setSubject(""); setMessage(""); }}
+        className="text-sm text-primary hover:underline mt-2">Send another message</button>
+    </motion.div>
+  );
+
+  return (
+    <motion.form onSubmit={handleSubmit}
+      initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={1}
+      style={{
+        background: "hsl(var(--card))", border: "1px solid hsl(var(--border))",
+        borderRadius: 20, padding: "32px 36px", display: "flex", flexDirection: "column", gap: 18,
+      }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Name</label>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="Your name" required style={inputStyle}
+            onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
+            onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required style={inputStyle}
+            onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
+            onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Subject</label>
+        <input value={subject} onChange={e => setSubject(e.target.value)} placeholder="What's this about?" required style={inputStyle}
+          onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
+          onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Message</label>
+        <textarea value={message} onChange={e => setMessage(e.target.value)} placeholder="Tell us more…" required rows={5}
+          style={{ ...inputStyle, resize: "vertical", lineHeight: 1.7 }}
+          onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
+          onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
+      </div>
+      {error && (
+        <div style={{ fontSize: 13, color: "#ef4444", background: "#ef444412", border: "1px solid #ef444430",
+          borderRadius: 8, padding: "8px 12px" }}>{error}</div>
+      )}
+      <button type="submit" disabled={sending || !name.trim() || !email.trim() || !subject.trim() || !message.trim()}
+        style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+          padding: "11px 24px", borderRadius: 10, fontSize: 14, fontWeight: 700, border: "none",
+          cursor: sending ? "not-allowed" : "pointer",
+          background: "linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary)/0.8))",
+          color: "hsl(var(--primary-foreground))",
+          opacity: (!name.trim() || !email.trim() || !subject.trim() || !message.trim()) ? 0.5 : 1,
+          transition: "opacity 0.15s",
+          boxShadow: "0 4px 14px hsl(var(--primary)/0.3)",
+        }}>
+        {sending
+          ? <><span style={{ width: 14, height: 14, border: "2px solid currentColor", borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite" }} /> Sending…</>
+          : <><Send size={14} /> Send message</>
+        }
+      </button>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </motion.form>
   );
 };
 
@@ -601,6 +714,19 @@ const Index = () => {
                 </motion.div>
               ))}
             </div>
+          </div>
+        </section>
+
+        {/* Contact */}
+        <section className="content-above-bg py-24 px-6">
+          <div id="contact" style={{ position: "relative", top: "-90px" }} />
+          <div className="container mx-auto max-w-2xl">
+            <motion.div className="text-center mb-12"
+              initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={0}>
+              <h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-3">Get in touch</h2>
+              <p className="text-muted-foreground">Have a question or want to learn more? We'd love to hear from you.</p>
+            </motion.div>
+            <ContactForm />
           </div>
         </section>
 

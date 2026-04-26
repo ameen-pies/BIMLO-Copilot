@@ -1383,9 +1383,11 @@ const NewsPage = () => {
             )}
           </button>
 
-          <button onClick={handleRefresh} disabled={isRefreshing || fetchingMore} title="Refresh news" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: theme === "dark" ? "#94a3b8" : "#666", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
-            <RefreshCw size={16} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
-          </button>
+          {currentUser?.role === "admin" && (
+            <button onClick={handleRefresh} disabled={isRefreshing || fetchingMore} title="Refresh news (admin only)" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#7c3aed55" : "#7c3aed44"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: "#7c3aed", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
+              <RefreshCw size={16} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
+            </button>
+          )}
           <button onClick={toggleTheme} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: "pointer", transition: "all 0.15s", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)" }} title="Toggle theme">
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
           </button>

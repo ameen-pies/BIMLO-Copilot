@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
 import Logo from "@/components/Logo";
@@ -265,11 +266,45 @@ const Navbar = () => {
           <a href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Documentation
           </a>
+          <a href="#contact" onClick={scrollTo('contact', 0)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            Contact
+          </a>
         </div>
 
         <div className="flex items-center gap-2">
           {currentUser ? (
             <>
+              {currentUser.role === "admin" && (
+                <Link
+                  to="/admin"
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    fontSize: 12, fontWeight: 600,
+                    padding: "5px 12px", borderRadius: 8,
+                    color: "hsl(var(--muted-foreground))",
+                    background: "transparent",
+                    border: "1px solid hsl(var(--border))",
+                    textDecoration: "none",
+                    transition: "color 0.15s, border-color 0.15s, background 0.15s",
+                  }}
+                  onMouseEnter={e => {
+                    const el = e.currentTarget as HTMLAnchorElement;
+                    el.style.color = "hsl(var(--foreground))";
+                    el.style.borderColor = "rgba(124,58,237,0.4)";
+                    el.style.background = "rgba(124,58,237,0.06)";
+                  }}
+                  onMouseLeave={e => {
+                    const el = e.currentTarget as HTMLAnchorElement;
+                    el.style.color = "hsl(var(--muted-foreground))";
+                    el.style.borderColor = "hsl(var(--border))";
+                    el.style.background = "transparent";
+                  }}
+                >
+                  <Shield size={11} />
+                  Dashboard
+                </Link>
+              )}
               <ProfileBubble user={currentUser} onLogout={logout} onDeleteAccount={deleteAccount} align="right" />
               <ThemeToggle />
             </>

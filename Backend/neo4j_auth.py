@@ -161,10 +161,11 @@ def _verify_password(password: str, stored: str) -> bool:
         return False
 
 
-def _issue_token(user_id: str, username: str, email: str) -> str:
+def _issue_token(user_id: str, username: str, email: str, role: str = "user") -> str:
     token      = secrets.token_urlsafe(32)
     expires_at = time.time() + TOKEN_TTL_HOURS * 3600
-    payload    = {"user_id": user_id, "username": username, "email": email, "expires_at": expires_at}
+    payload    = {"user_id": user_id, "username": username, "email": email, "expires_at": expires_at, "role": role}
+    # role stored in payload for fast auth checks without extra DB round-trip
     # Warm in-memory cache
     _active_tokens[token] = payload
     # Persist to Neo4j so the token survives server restarts
@@ -220,7 +221,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
             """
             MATCH (u:User)-[:HAS_TOKEN]->(t:Token {token: $token})
             RETURN u.id AS user_id, u.username AS username, u.email AS email,
-                   t.expires_at AS expires_at
+                   u.role AS role, t.expires_at AS expires_at
             """,
             {"token": token},
         )
@@ -236,6 +237,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
             "username":   row["username"],
             "email":      row["email"],
             "expires_at": row["expires_at"],
+            "role":       row.get("role") or "user",
         }
         _active_tokens[token] = payload
         return payload
@@ -288,6 +290,7 @@ class AuthResponse(BaseModel):
     email:        str
     avatar_url:   str = ""
     display_name: str = ""
+    role:         str = "user"
 
 class SaveConversationRequest(BaseModel):
     conversation_id: str
@@ -352,6 +355,7 @@ def signup(req: SignupRequest):
             email:         $email,
             username:      $username,
             password_hash: $password_hash,
+            role:          'user',
             created_at:    $now,
             last_seen:     $now
         })
@@ -360,9 +364,9 @@ def signup(req: SignupRequest):
          "password_hash": password_hash, "now": now},
     )
 
-    token = _issue_token(user_id, username, email)
+    token = _issue_token(user_id, username, email, role="user")
     print(f"✅ auth: new user '{username}' ({email})")
-    return AuthResponse(token=token, user_id=user_id, username=username, email=email)
+    return AuthResponse(token=token, user_id=user_id, username=username, email=email, role="user")
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -370,7 +374,7 @@ def login(req: LoginRequest):
     email = req.email.strip().lower()
 
     rows = _run(
-        "MATCH (u:User {email: $email}) RETURN u.id AS id, u.username AS username, u.password_hash AS ph",
+        "MATCH (u:User {email: $email}) RETURN u.id AS id, u.username AS username, u.password_hash AS ph, coalesce(u.role, 'user') AS role",
         {"email": email},
     )
     if not rows:
@@ -386,9 +390,10 @@ def login(req: LoginRequest):
         {"id": row["id"], "now": datetime.utcnow().isoformat()},
     )
 
-    token = _issue_token(row["id"], row["username"], email)
-    print(f"✅ auth: login '{row['username']}'")
-    return AuthResponse(token=token, user_id=row["id"], username=row["username"], email=email)
+    role  = row.get("role") or "user"
+    token = _issue_token(row["id"], row["username"], email, role=role)
+    print(f"✅ auth: login '{row['username']}' (role={role})")
+    return AuthResponse(token=token, user_id=row["id"], username=row["username"], email=email, role=role)
 
 
 @router.post("/logout")
@@ -464,18 +469,20 @@ def google_token_auth(req: GoogleTokenRequest):
     username = "".join(c for c in name if c.isalnum() or c in "_-")[:30] or "user"
 
     rows = _run(
-        "MATCH (u:User {email: $email}) RETURN u.id AS id, u.username AS username",
+        "MATCH (u:User {email: $email}) RETURN u.id AS id, u.username AS username, coalesce(u.role, 'user') AS role",
         {"email": email},
     )
 
     if rows:
         user_id  = rows[0]["id"]
         username = rows[0]["username"]
+        role     = rows[0].get("role") or "user"   # ← preserve existing role (e.g. "admin")
         _run("MATCH (u:User {id: $id}) SET u.last_seen = $now, u.picture = $picture, u.display_name = $display_name",
              {"id": user_id, "now": now, "picture": req.picture, "display_name": req.name})
-        print(f"✅ auth/google-token: existing user '{username}' ({email})")
+        print(f"✅ auth/google-token: existing user '{username}' ({email}) role={role}")
     else:
         user_id = str(uuid.uuid4())
+        role    = "user"
         base = username
         suffix = 0
         while True:
@@ -492,6 +499,7 @@ def google_token_auth(req: GoogleTokenRequest):
                 password_hash: '', google_auth: true,
                 picture: $picture,
                 display_name: $display_name,
+                role: 'user',
                 created_at: $now, last_seen: $now
             })
             """,
@@ -500,19 +508,141 @@ def google_token_auth(req: GoogleTokenRequest):
         )
         print(f"✅ auth/google-token: new user '{username}' ({email})")
 
-    token = _issue_token(user_id, username, email)
-    return AuthResponse(token=token, user_id=user_id, username=username, email=email, avatar_url=req.picture, display_name=req.name)
+    token = _issue_token(user_id, username, email, role=role)   # ← role now always correct
+    return AuthResponse(token=token, user_id=user_id, username=username, email=email, avatar_url=req.picture, display_name=req.name, role=role)
 
 
 @router.get("/me")
 def me(user: Dict = Depends(require_user)):
+    now = datetime.utcnow().isoformat()
     rows = _run(
-        "MATCH (u:User {id: $id}) RETURN u.username AS username, u.email AS email, u.created_at AS created_at",
-        {"id": user["user_id"]},
+        """
+        MATCH (u:User {id: $id})
+        SET u.last_seen = $now
+        RETURN u.username AS username, u.email AS email, u.created_at AS created_at,
+               coalesce(u.role, 'user') AS role,
+               coalesce(u.picture, u.avatar_url, '') AS avatar_url
+        """,
+        {"id": user["user_id"], "now": now},
     )
     if not rows:
         raise HTTPException(404, "User not found")
     return {**rows[0], "user_id": user["user_id"]}
+
+
+@router.post("/heartbeat")
+def heartbeat(user: Dict = Depends(require_user)):
+    """Lightweight ping to keep last_seen fresh. Called every 60s from the frontend."""
+    now = datetime.utcnow().isoformat()
+    _run(
+        "MATCH (u:User {id: $id}) SET u.last_seen = $now",
+        {"id": user["user_id"], "now": now},
+    )
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC CONTACT FORM
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ContactRequest(BaseModel):
+    name:    str
+    email:   str
+    subject: str
+    message: str
+
+@router.post("/contact")
+def contact(req: ContactRequest):
+    """
+    Public contact form — no auth required.
+    Forwards the message to BIMLO's inbox via SMTP.
+    Uses the same SMTP env vars as the admin email sender.
+    """
+    import smtplib, ssl
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.utils import formataddr
+
+    smtp_host  = os.getenv("SMTP_HOST", "")
+    smtp_port  = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user  = os.getenv("SMTP_USER", "")
+    smtp_pass  = os.getenv("SMTP_PASS", "")
+    smtp_from  = os.getenv("SMTP_FROM", smtp_user or "noreply@bimlo.local")
+    bimlo_inbox = os.getenv("CONTACT_TO", smtp_user or smtp_from)
+
+    body_text = (
+        f"Name:    {req.name}\n"
+        f"Email:   {req.email}\n"
+        f"Subject: {req.subject}\n\n"
+        f"{req.message}"
+    )
+
+    body_html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+        <tr>
+          <td style="background:#161b27;border-radius:14px 14px 0 0;padding:24px 28px;border-bottom:1px solid #1e2535;">
+            <div style="font-size:18px;font-weight:800;color:#f1f5f9;letter-spacing:-0.01em;">New Contact Message</div>
+            <div style="font-size:11px;color:#64748b;margin-top:3px;">via BIMLO Copilot contact form</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#161b27;padding:24px 28px;">
+            <table cellpadding="0" cellspacing="0" width="100%">
+              <tr><td style="padding-bottom:12px;">
+                <span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">From</span><br>
+                <span style="font-size:14px;color:#f1f5f9;">{req.name}</span>
+                <span style="font-size:13px;color:#64748b;margin-left:8px;">&lt;{req.email}&gt;</span>
+              </td></tr>
+              <tr><td style="padding-bottom:20px;border-bottom:1px solid #1e2535;">
+                <span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Subject</span><br>
+                <span style="font-size:14px;color:#f1f5f9;">{req.subject}</span>
+              </td></tr>
+              <tr><td style="padding-top:20px;">
+                <span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;">Message</span><br>
+                <div style="font-size:14px;line-height:1.75;color:#cbd5e1;margin-top:8px;">{req.message.replace(chr(10), '<br>')}</div>
+              </td></tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#0d1117;border-radius:0 0 14px 14px;padding:16px 28px;border-top:1px solid #1e2535;">
+            <div style="font-size:11px;color:#334155;">Reply directly to {req.email} to respond.</div>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    try:
+        if smtp_host and smtp_user:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"[Contact] {req.subject}"
+            msg["From"]    = formataddr(("BIMLO Copilot", smtp_from))
+            msg["To"]      = bimlo_inbox
+            msg["Reply-To"] = req.email
+            msg.attach(MIMEText(body_text, "plain"))
+            msg.attach(MIMEText(body_html, "html"))
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.login(smtp_user, smtp_pass)
+                server.sendmail(smtp_from, bimlo_inbox, msg.as_string())
+            print(f"📧 contact: message from {req.email} delivered to {bimlo_inbox}")
+        else:
+            print(f"📧 [SMTP not configured] Contact from {req.email}: {req.subject}")
+    except Exception as e:
+        print(f"⚠️  contact: failed to send: {e}")
+        raise HTTPException(500, "Failed to send message. Please try again later.")
+
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -990,6 +1120,7 @@ def init_neo4j():
         except Exception as e:
             print(f"⚠️  Token cleanup failed (non-fatal): {e}")
         print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
+        _seed_admin()
     except Exception as e:
         print(f"❌ Neo4j connection FAILED: {e}")
         print("─" * 60)
@@ -1001,3 +1132,395 @@ def init_neo4j():
         print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
         print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
         print("─" * 60)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADMIN: seed default admin account + helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seed_admin() -> None:
+    """Create the default admin account (admin / admin) if it doesn't exist."""
+    try:
+        existing = _run(
+            "MATCH (u:User {email: 'admin@bimlo.local'}) RETURN u.id AS id LIMIT 1"
+        )
+        if not existing:
+            admin_id = str(uuid.uuid4())
+            pw_hash  = _hash_password("admin")
+            now      = datetime.utcnow().isoformat()
+            _run(
+                """
+                CREATE (u:User {
+                    id:            $id,
+                    email:         'admin@bimlo.local',
+                    username:      'admin',
+                    password_hash: $ph,
+                    role:          'admin',
+                    created_at:    $now,
+                    last_seen:     $now
+                })
+                """,
+                {"id": admin_id, "ph": pw_hash, "now": now},
+            )
+            print("✅ admin account seeded (email: admin@bimlo.local, password: admin)")
+        else:
+            # Ensure existing admin has role=admin
+            _run(
+                "MATCH (u:User {email: 'admin@bimlo.local'}) SET u.role = 'admin'",
+            )
+    except Exception as e:
+        print(f"⚠️  Admin seed failed (non-fatal): {e}")
+
+
+def require_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
+    user = optional_user(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADMIN ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AdminUpdateUserRequest(BaseModel):
+    username:  Optional[str] = None
+    email:     Optional[str] = None
+    password:  Optional[str] = None
+    role:      Optional[str] = None   # "user" | "admin"
+
+
+class AdminSendEmailRequest(BaseModel):
+    user_ids: List[str]
+    subject:  str
+    body:     str
+
+
+@router.get("/admin/users")
+def admin_list_users(admin: Dict = Depends(require_admin)):
+    """List all users with stats."""
+    rows = _run(
+        """
+        MATCH (u:User)
+        OPTIONAL MATCH (u)-[:HAS_CONVERSATION]->(c:Conversation)
+        OPTIONAL MATCH (u)-[:UPLOADED]->(d:Document)
+        RETURN u.id          AS user_id,
+               u.username    AS username,
+               u.email       AS email,
+               coalesce(u.role, 'user') AS role,
+               u.created_at  AS created_at,
+               u.last_seen   AS last_seen,
+               coalesce(u.picture, u.avatar_url, '') AS avatar_url,
+               count(DISTINCT c) AS conversation_count,
+               count(DISTINCT d) AS document_count
+        ORDER BY u.created_at DESC
+        """
+    )
+    return [
+        {
+            "user_id":            r["user_id"],
+            "username":           r["username"],
+            "email":              r["email"],
+            "role":               r["role"],
+            "created_at":         r["created_at"],
+            "last_seen":          r["last_seen"],
+            "avatar_url":         r.get("avatar_url") or "",
+            "conversation_count": r["conversation_count"] or 0,
+            "document_count":     r["document_count"] or 0,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/admin/stats")
+def admin_stats(admin: Dict = Depends(require_admin)):
+    """KPI stats for the dashboard."""
+    users = _run(
+        """
+        MATCH (u:User)
+        RETURN count(u) AS total,
+               count(CASE WHEN u.role = 'admin' THEN 1 END) AS admins,
+               count(CASE WHEN datetime(u.last_seen) > datetime() - duration({hours: 1}) THEN 1 END) AS active_1h,
+               count(CASE WHEN datetime(u.last_seen) > datetime() - duration({days: 1}) THEN 1 END) AS active_24h,
+               count(CASE WHEN datetime(u.created_at) > datetime() - duration({days: 7}) THEN 1 END) AS new_7d
+        """
+    )
+    convs = _run("MATCH (c:Conversation) RETURN count(c) AS total")
+    docs  = _run("MATCH (d:Document) RETURN count(d) AS total")
+    rpts  = _run("MATCH (r:Report) RETURN count(r) AS total")
+    u = users[0] if users else {}
+    return {
+        "total_users":    u.get("total", 0),
+        "admin_users":    u.get("admins", 0),
+        "active_1h":      u.get("active_1h", 0),
+        "active_24h":     u.get("active_24h", 0),
+        "new_users_7d":   u.get("new_7d", 0),
+        "total_conversations": convs[0]["total"] if convs else 0,
+        "total_documents":     docs[0]["total"] if docs else 0,
+        "total_reports":       rpts[0]["total"] if rpts else 0,
+    }
+
+
+@router.patch("/admin/users/{user_id}")
+def admin_update_user(
+    user_id: str,
+    req: AdminUpdateUserRequest,
+    admin: Dict = Depends(require_admin),
+):
+    """Update any user's credentials or role."""
+    rows = _run("MATCH (u:User {id: $id}) RETURN u.id AS id", {"id": user_id})
+    if not rows:
+        raise HTTPException(404, "User not found")
+
+    sets = []
+    params: Dict[str, Any] = {"id": user_id}
+    if req.username:
+        sets.append("u.username = $username"); params["username"] = req.username.strip()
+    if req.email:
+        sets.append("u.email = $email"); params["email"] = req.email.strip().lower()
+    if req.password:
+        sets.append("u.password_hash = $ph"); params["ph"] = _hash_password(req.password)
+    if req.role in ("user", "admin"):
+        sets.append("u.role = $role"); params["role"] = req.role
+    if not sets:
+        raise HTTPException(400, "Nothing to update")
+
+    _run(f"MATCH (u:User {{id: $id}}) SET {', '.join(sets)}", params)
+
+    # Invalidate all active tokens for this user so next login picks up new creds
+    token_rows = _run(
+        "MATCH (u:User {id: $id})-[:HAS_TOKEN]->(t:Token) RETURN t.token AS token",
+        {"id": user_id},
+    )
+    for tr in token_rows:
+        _active_tokens.pop(tr["token"], None)
+    _run("MATCH (u:User {id: $id})-[:HAS_TOKEN]->(t:Token) DETACH DELETE t", {"id": user_id})
+
+    updated = _run(
+        "MATCH (u:User {id: $id}) RETURN u.username AS username, u.email AS email, coalesce(u.role, 'user') AS role",
+        {"id": user_id},
+    )
+    print(f"✏️  admin: updated user {user_id}")
+    return updated[0] if updated else {"ok": True}
+
+
+@router.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: str, admin: Dict = Depends(require_admin)):
+    """Permanently delete a user and all their data."""
+    if user_id == admin["user_id"]:
+        raise HTTPException(400, "Cannot delete your own account via admin panel")
+    rows = _run("MATCH (u:User {id: $id}) RETURN u.id AS id", {"id": user_id})
+    if not rows:
+        raise HTTPException(404, "User not found")
+
+    # Revoke tokens from memory cache
+    token_rows = _run(
+        "MATCH (u:User {id: $id})-[:HAS_TOKEN]->(t:Token) RETURN t.token AS token",
+        {"id": user_id},
+    )
+    for tr in token_rows:
+        _active_tokens.pop(tr["token"], None)
+
+    _run(
+        """
+        MATCH (u:User {id: $id})
+        OPTIONAL MATCH (u)-[:HAS_TOKEN]->(t:Token)
+        OPTIONAL MATCH (u)-[:HAS_CONVERSATION]->(c:Conversation)
+        OPTIONAL MATCH (c)-[:CONTAINS]->(m:Message)
+        OPTIONAL MATCH (u)-[:UPLOADED]->(d:Document)
+        DETACH DELETE u, t, c, m, d
+        """,
+        {"id": user_id},
+    )
+    print(f"🗑️  admin: deleted user {user_id}")
+    return {"ok": True, "deleted_user_id": user_id}
+
+
+@router.post("/admin/send-email")
+def admin_send_email(req: AdminSendEmailRequest, admin: Dict = Depends(require_admin)):
+    """
+    Send an email to selected users.
+    Uses SMTP settings from env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.
+    Falls back to logging if SMTP is not configured.
+    """
+    import smtplib, ssl
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_pass = os.getenv("SMTP_PASS", "")
+    smtp_from = os.getenv("SMTP_FROM", smtp_user or "noreply@bimlo.local")
+
+    # Fetch emails for target user_ids
+    rows = _run(
+        "MATCH (u:User) WHERE u.id IN $ids RETURN u.email AS email, u.username AS username",
+        {"ids": req.user_ids},
+    )
+    if not rows:
+        raise HTTPException(404, "No users found for the given IDs")
+
+    # Styled HTML email template with BIMLO Copilot branding
+    def build_html(body_text: str, username: str) -> str:
+        escaped = body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+        return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+        <!-- Header -->
+        <tr>
+          <td style="background:#161b27;border-radius:14px 14px 0 0;padding:24px 28px;border-bottom:1px solid #1e2535;">
+            <div style="font-size:18px;font-weight:800;color:#f1f5f9;letter-spacing:-0.01em;">BIMLO Copilot</div>
+            <div style="font-size:11px;color:#64748b;margin-top:3px;">AI-Powered BIM Assistant</div>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="background:#161b27;padding:28px 28px 24px;">
+            <div style="font-size:13px;color:#94a3b8;margin-bottom:16px;">Hi {username},</div>
+            <div style="font-size:14px;line-height:1.75;color:#cbd5e1;">{escaped}</div>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="background:#0d1117;border-radius:0 0 14px 14px;padding:16px 28px;border-top:1px solid #1e2535;">
+            <div style="font-size:11px;color:#334155;">
+              Sent by BIMLO Copilot admin &middot; You're receiving this because you have an account with us.
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    from email.utils import formataddr
+
+    sent, failed = [], []
+    for r in rows:
+        to_email = r["email"]
+        username = r.get("username", "there")
+        try:
+            if smtp_host and smtp_user:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = req.subject
+                msg["From"]    = formataddr(("BIMLO Copilot", smtp_from))
+                msg["To"]      = to_email
+                msg.attach(MIMEText(req.body, "plain"))
+                msg.attach(MIMEText(build_html(req.body, username), "html"))
+                ctx = ssl.create_default_context()
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    server.ehlo()
+                    server.starttls(context=ctx)
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(smtp_from, to_email, msg.as_string())
+                sent.append(to_email)
+                print(f"📧 admin: sent email to {to_email}")
+            else:
+                # SMTP not configured — log instead
+                print(f"📧 [SMTP not configured] Would send to {to_email}: {req.subject}")
+                sent.append(to_email)  # treat as sent for UI purposes
+        except Exception as e:
+            print(f"⚠️  admin: email to {to_email} failed: {e}")
+            failed.append(to_email)
+
+    return {"sent": sent, "failed": failed}
+
+
+@router.get("/admin/logs")
+def admin_logs(admin: Dict = Depends(require_admin), limit: int = 200):
+    """
+    Return recent system log entries collected in memory.
+    The /admin/logs/stream endpoint (SSE) is the live version.
+    """
+    return {"logs": list(_log_buffer)[-limit:]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IN-MEMORY LOG BUFFER (captured from stdout for admin panel)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import sys
+import threading
+from collections import deque
+from datetime import datetime as _dt
+
+_log_buffer: deque = deque(maxlen=500)
+_log_subscribers: list = []   # SSE response queues
+_log_lock = threading.Lock()
+
+
+class _LogCapture(object):
+    """Tee: write to original stdout AND push to _log_buffer + SSE subscribers."""
+    def __init__(self, original):
+        self._orig = original
+
+    def write(self, text):
+        self._orig.write(text)
+        stripped = text.rstrip("\n")
+        if stripped:
+            entry = {"ts": _dt.utcnow().isoformat(), "msg": stripped}
+            with _log_lock:
+                _log_buffer.append(entry)
+                dead = []
+                for q in _log_subscribers:
+                    try:
+                        q.put_nowait(entry)
+                    except Exception:
+                        dead.append(q)
+                for d in dead:
+                    _log_subscribers.remove(d)
+
+    def flush(self):
+        self._orig.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
+
+# Install once
+if not isinstance(sys.stdout, _LogCapture):
+    sys.stdout = _LogCapture(sys.stdout)
+
+
+@router.get("/admin/logs/stream")
+async def admin_logs_stream(admin: Dict = Depends(require_admin)):
+    """SSE stream of live log lines for the admin dashboard."""
+    import asyncio, queue as _queue
+    from fastapi.responses import StreamingResponse as _SR
+
+    q: _queue.Queue = _queue.Queue(maxsize=200)
+    with _log_lock:
+        _log_subscribers.append(q)
+        # Flush last 50 buffered lines immediately so the panel isn't empty
+        for entry in list(_log_buffer)[-50:]:
+            try:
+                q.put_nowait(entry)
+            except Exception:
+                pass
+
+    async def _gen():
+        loop = asyncio.get_event_loop()
+        try:
+            while True:
+                try:
+                    entry = await loop.run_in_executor(None, lambda: q.get(timeout=30))
+                    yield f"data: {json.dumps(entry)}\n\n"
+                except Exception:
+                    yield "data: {}\n\n"  # keepalive ping
+        finally:
+            with _log_lock:
+                try:
+                    _log_subscribers.remove(q)
+                except ValueError:
+                    pass
+
+    return _SR(_gen(), media_type="text/event-stream",
+               headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

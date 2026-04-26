@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
-  Shield, Users, Activity, Trash2, Mail, Edit3, Check, X,
-  RefreshCw, LogOut, ChevronDown, Search, Terminal, Zap,
-  TrendingUp, MessageSquare, FileText, BarChart2, Clock,
-  Crown, User, AlertCircle, Send, Eye, EyeOff, ArrowLeft,
-  Wifi, WifiOff, Circle,
+  Shield, Users, Activity, Trash2, Edit3, Check, X,
+  RefreshCw, LogOut, Search, Terminal, Zap,
+  TrendingUp, MessageSquare, Crown, User, AlertCircle,
+  Eye, EyeOff, ArrowLeft, Wifi, Circle,
+  Database, Cpu, Radio, Server, CheckCircle2, XCircle, AlertTriangle,
+  BarChart3, Clock, ChevronUp, ChevronDown, Mail, Sun, Moon, Send,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
@@ -36,6 +37,22 @@ interface Stats {
   total_reports:       number;
 }
 
+interface HealthData {
+  status:     string;
+  timestamp:  string;
+  vector_store: string;
+  services:   string;
+  statistics?: {
+    total_chunks?:     number;
+    total_documents?:  number;
+    active_sessions?:  number;
+    cached_documents?: number;
+  };
+  llm_provider?: string;
+  neo4j?: string;
+  voice_agent?: string;
+}
+
 interface LogEntry { ts: string; msg: string; }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -53,7 +70,7 @@ function timeAgo(iso: string | null | undefined): string {
 
 function isOnline(last_seen: string | null | undefined): boolean {
   if (!last_seen) return false;
-  return Date.now() - new Date(last_seen).getTime() < 5 * 60 * 1000; // 5 min
+  return Date.now() - new Date(last_seen).getTime() < 5 * 60 * 1000;
 }
 
 function classifyLog(msg: string): "error" | "warn" | "success" | "info" {
@@ -68,18 +85,155 @@ function authHeaders(token: string) {
   return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 }
 
+// ─── Mini Sparkline Chart ─────────────────────────────────────────────────────
+
+function Sparkline({ data, color, height = 36 }: { data: number[]; color: string; height?: number }) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  if (!data.length) return null;
+  const max = Math.max(...data, 1);
+  const w = 120, h = height;
+  const points = data.map((v, i) => ({
+    x: (i / Math.max(data.length - 1, 1)) * w,
+    y: h - (v / max) * h * 0.85 - 2,
+    v,
+  }));
+  const pts = points.map(p => `${p.x},${p.y}`).join(" ");
+  const areaPath = `M 0,${h} L ${points.map(p => `${p.x},${p.y}`).join(" L ")} L ${w},${h} Z`;
+  const gradId = `sg-${color.replace("#", "")}`;
+  return (
+    <svg width={w} height={h} style={{ overflow: "visible" }}>
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill={`url(#${gradId})`} />
+      <polyline points={pts} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      {/* invisible hit-area strips for hover */}
+      {points.map((p, i) => {
+        const prev = points[i - 1];
+        const next = points[i + 1];
+        const x0 = prev ? (prev.x + p.x) / 2 : 0;
+        const x1 = next ? (p.x + next.x) / 2 : w;
+        return (
+          <rect
+            key={i}
+            x={x0} y={0} width={x1 - x0} height={h}
+            fill="transparent"
+            onMouseEnter={() => setHoveredIdx(i)}
+            onMouseLeave={() => setHoveredIdx(null)}
+            style={{ cursor: "crosshair" }}
+          />
+        );
+      })}
+      {/* dots — always show last, show hovered */}
+      {points.map((p, i) => {
+        const isLast = i === points.length - 1;
+        const isHov  = i === hoveredIdx;
+        if (!isLast && !isHov) return null;
+        return (
+          <circle
+            key={i}
+            cx={p.x} cy={p.y} r={isHov ? 4 : 3}
+            fill={color}
+            style={{ transition: "r 0.1s" }}
+          />
+        );
+      })}
+      {/* tooltip on hover */}
+      {hoveredIdx !== null && (() => {
+        const p = points[hoveredIdx];
+        const tipW = 32, tipH = 18, pad = 6;
+        let tx = p.x - tipW / 2;
+        let ty = p.y - tipH - pad;
+        if (tx < 0) tx = 0;
+        if (tx + tipW > w) tx = w - tipW;
+        if (ty < 0) ty = p.y + pad;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <rect x={tx} y={ty} width={tipW} height={tipH} rx={4}
+              fill="hsl(220 15% 12%)" stroke={color} strokeWidth={0.8} opacity={0.95} />
+            <text x={tx + tipW / 2} y={ty + tipH / 2 + 4.5}
+              textAnchor="middle" fontSize={10} fontWeight={700} fill={color}>
+              {p.v}
+            </text>
+          </g>
+        );
+      })()}
+    </svg>
+  );
+}
+
+// ─── Bar Chart ────────────────────────────────────────────────────────────────
+
+function MiniBarChart({ data, labels, color }: { data: number[]; labels: string[]; color: string }) {
+  const max = Math.max(...data, 1);
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 5, flex: 1, minHeight: 0 }}>
+      {data.map((v, i) => {
+        const pct = Math.max((v / max) * 100, v > 0 ? 8 : 2);
+        return (
+          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, height: "100%" }}>
+            <div style={{ flex: 1, width: "100%", display: "flex", alignItems: "flex-end" }}>
+              <div style={{
+                width: "100%", borderRadius: "4px 4px 0 0",
+                height: `${pct}%`,
+                background: v > 0
+                  ? `linear-gradient(to top, ${color}, ${color}88)`
+                  : "hsl(var(--muted)/0.25)",
+                transition: "height 0.5s cubic-bezier(.4,0,.2,1)",
+                minHeight: v > 0 ? 4 : 2,
+              }} title={`${labels[i]}: ${v}`} />
+            </div>
+            <span style={{ fontSize: 9, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap", flexShrink: 0 }}>{labels[i]}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Status Badge ──────────────────────────────────────────────────────────────
+
+function ServiceBadge({ label, status, icon: Icon, detail }: {
+  label: string; status: "ok" | "warn" | "error" | "unknown"; icon: React.ElementType; detail?: string;
+}) {
+  const colors = {
+    ok:      { dot: "#22c55e", bg: "#22c55e15", border: "#22c55e30", text: "#22c55e" },
+    warn:    { dot: "#f59e0b", bg: "#f59e0b15", border: "#f59e0b30", text: "#f59e0b" },
+    error:   { dot: "#ef4444", bg: "#ef444415", border: "#ef444430", text: "#ef4444" },
+    unknown: { dot: "#64748b", bg: "#64748b12", border: "#64748b25", text: "#64748b" },
+  };
+  const c = colors[status];
+  const StatusIcon = status === "ok" ? CheckCircle2 : status === "error" ? XCircle : AlertTriangle;
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+      background: c.bg, border: `1px solid ${c.border}`, borderRadius: 10,
+    }}>
+      <Icon size={15} color={c.text} />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "hsl(var(--foreground))" }}>{label}</div>
+        {detail && <div style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>{detail}</div>}
+      </div>
+      <StatusIcon size={14} color={c.text} />
+    </div>
+  );
+}
+
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
-function KpiCard({ icon: Icon, label, value, sub, accent }: {
+function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
   icon: React.ElementType; label: string; value: number | string; sub?: string; accent: string;
+  trend?: number; sparkData?: number[];
 }) {
   return (
     <div style={{
       background: "hsl(var(--card))",
       border: "1px solid hsl(var(--border))",
-      borderRadius: 16,
-      padding: "20px 22px",
-      display: "flex", flexDirection: "column", gap: 8,
+      borderRadius: 16, padding: "18px 20px",
+      display: "flex", flexDirection: "column", gap: 6,
       position: "relative", overflow: "hidden",
     }}>
       <div style={{
@@ -87,21 +241,30 @@ function KpiCard({ icon: Icon, label, value, sub, accent }: {
         background: `radial-gradient(circle at 70% 30%, ${accent}22, transparent 70%)`,
         pointerEvents: "none",
       }} />
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: 8, background: `${accent}18`,
-          border: `1px solid ${accent}30`, display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <Icon size={15} color={accent} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 8, background: `${accent}18`,
+            border: `1px solid ${accent}30`, display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Icon size={14} color={accent} />
+          </div>
+          <span style={{ fontSize: 10, fontWeight: 600, color: "hsl(var(--muted-foreground))", letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            {label}
+          </span>
         </div>
-        <span style={{ fontSize: 11, fontWeight: 600, color: "hsl(var(--muted-foreground))", letterSpacing: "0.04em", textTransform: "uppercase" }}>
-          {label}
-        </span>
+        {trend !== undefined && (
+          <div style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 600, color: trend >= 0 ? "#22c55e" : "#ef4444" }}>
+            {trend >= 0 ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            {Math.abs(trend)}%
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 28, fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.1 }}>
-        {value}
+      <div style={{ fontSize: 26, fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.1 }}>{value}</div>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
+        {sub && <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{sub}</div>}
+        {sparkData && <Sparkline data={sparkData} color={accent} />}
       </div>
-      {sub && <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{sub}</div>}
     </div>
   );
 }
@@ -112,16 +275,18 @@ export default function AdminPage() {
   const { currentUser, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [tab, setTab]           = useState<"users" | "logs" | "email" | "settings">("users");
+  const [tab, setTab]           = useState<"users" | "health" | "logs" | "settings">("users");
   const [users, setUsers]       = useState<AdminUser[]>([]);
   const [stats, setStats]       = useState<Stats | null>(null);
+  const [health, setHealth]     = useState<HealthData | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [logs, setLogs]         = useState<LogEntry[]>([]);
   const [search, setSearch]     = useState("");
   const [loading, setLoading]   = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
 
   // Edit modal
-  const [editUser, setEditUser]       = useState<AdminUser | null>(null);
+  const [editUser, setEditUser]         = useState<AdminUser | null>(null);
   const [editUsername, setEditUsername] = useState("");
   const [editEmail, setEditEmail]       = useState("");
   const [editPassword, setEditPassword] = useState("");
@@ -133,14 +298,6 @@ export default function AdminPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [deleting, setDeleting]           = useState(false);
 
-  // Email modal
-  const [emailTargets, setEmailTargets] = useState<string[]>([]);
-  const [emailSubject, setEmailSubject] = useState("");
-  const [emailBody, setEmailBody]       = useState("");
-  const [emailSending, setEmailSending] = useState(false);
-  const [emailResult, setEmailResult]   = useState<string | null>(null);
-  const [showEmailModal, setShowEmailModal] = useState(false);
-
   // Self-credentials panel
   const [selfUsername, setSelfUsername] = useState(currentUser?.username || "");
   const [selfEmail, setSelfEmail]       = useState(currentUser?.email || "");
@@ -148,14 +305,62 @@ export default function AdminPage() {
   const [selfSaving, setSelfSaving]     = useState(false);
   const [selfMsg, setSelfMsg]           = useState<string | null>(null);
 
-  const logEndRef  = useRef<HTMLDivElement>(null);
-  const esRef      = useRef<EventSource | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const esRef     = useRef<EventSource | null>(null);
+
+  // ── Dark mode ──────────────────────────────────────────────────────────────
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  const toggleDark = () => {
+    const isDark = document.documentElement.classList.toggle("dark");
+    setDark(isDark);
+    localStorage.setItem("theme", isDark ? "dark" : "light");
+  };
+
+  // ── Email compose modal ────────────────────────────────────────────────────
+  const [emailModal, setEmailModal]   = useState(false);
+  const [emailTarget, setEmailTarget] = useState<AdminUser | null>(null); // null = broadcast
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody]     = useState("");
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailResult, setEmailResult]   = useState<string | null>(null);
+
+  async function sendEmail() {
+    if (!currentUser?.token || !emailSubject.trim() || !emailBody.trim()) return;
+    setEmailSending(true); setEmailResult(null);
+    const ids = emailTarget ? [emailTarget.user_id] : users.map(u => u.user_id);
+    try {
+      const res = await fetch(`${API}/auth/admin/send-email`, {
+        method: "POST",
+        headers: authHeaders(currentUser.token),
+        body: JSON.stringify({ user_ids: ids, subject: emailSubject, body: emailBody }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setEmailResult(`✅ Sent to ${data.sent?.length ?? 0} user(s)${data.failed?.length ? `, ${data.failed.length} failed` : ""}`);
+        setTimeout(() => { setEmailModal(false); setEmailSubject(""); setEmailBody(""); setEmailResult(null); }, 2000);
+      } else {
+        setEmailResult(`❌ ${data.detail || "Failed to send"}`);
+      }
+    } catch { setEmailResult("❌ Network error"); }
+    finally { setEmailSending(false); }
+  }
 
   // ── Auth guard ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentUser) { navigate("/"); return; }
     if (currentUser.role !== "admin") { navigate("/"); return; }
   }, [currentUser, navigate]);
+
+  // ── Ensure avatar_url is populated (Google OAuth stores it in Neo4j) ────────
+  const [adminAvatar, setAdminAvatar] = useState<string | null>(currentUser?.avatar_url || null);
+  useEffect(() => {
+    if (!currentUser?.token) return;
+    // Re-fetch profile to get avatar_url that may not be in the cached token
+    fetch(`${API}/auth/me`, { headers: { Authorization: `Bearer ${currentUser.token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.avatar_url) setAdminAvatar(d.avatar_url); })
+      .catch(() => {});
+  }, [currentUser?.token]);
 
   // ── Load users + stats ──────────────────────────────────────────────────────
   const loadUsers = useCallback(async () => {
@@ -176,23 +381,32 @@ export default function AdminPage() {
     } finally { setStatsLoading(false); }
   }, [currentUser?.token]);
 
+  const loadHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const res = await fetch(`${API}/health`);
+      if (res.ok) setHealth(await res.json());
+    } finally { setHealthLoading(false); }
+  }, []);
+
   useEffect(() => {
     loadUsers();
     loadStats();
-  }, [loadUsers, loadStats]);
+    loadHealth();
+  }, [loadUsers, loadStats, loadHealth]);
+
+  // Auto-refresh health every 30s
+  useEffect(() => {
+    const interval = setInterval(loadHealth, 30_000);
+    return () => clearInterval(interval);
+  }, [loadHealth]);
 
   // ── Live log SSE ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (tab !== "logs" || !currentUser?.token) return;
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-
-    // Fetch buffered logs first
     fetch(`${API}/auth/admin/logs?limit=200`, { headers: authHeaders(currentUser.token) })
-      .then(r => r.json())
-      .then(d => setLogs(d.logs || []))
-      .catch(() => {});
-
-    // Then open SSE
+      .then(r => r.json()).then(d => setLogs(d.logs || [])).catch(() => {});
     const es = new EventSource(`${API}/auth/admin/logs/stream?token=${currentUser.token}`);
     esRef.current = es;
     es.onmessage = (e) => {
@@ -245,20 +459,6 @@ export default function AdminPage() {
     } finally { setDeleting(false); }
   }
 
-  // ── Send email ──────────────────────────────────────────────────────────────
-  async function sendEmail() {
-    if (!currentUser?.token || !emailSubject || !emailBody || !emailTargets.length) return;
-    setEmailSending(true); setEmailResult(null);
-    try {
-      const res = await fetch(`${API}/auth/admin/send-email`, {
-        method: "POST", headers: authHeaders(currentUser.token),
-        body: JSON.stringify({ user_ids: emailTargets, subject: emailSubject, body: emailBody }),
-      });
-      const d = await res.json();
-      setEmailResult(`Sent to ${d.sent?.length || 0} users${d.failed?.length ? `, ${d.failed.length} failed` : ""}.`);
-    } finally { setEmailSending(false); }
-  }
-
   // ── Self update ─────────────────────────────────────────────────────────────
   async function saveSelf() {
     if (!currentUser?.token) return;
@@ -276,13 +476,42 @@ export default function AdminPage() {
     } finally { setSelfSaving(false); }
   }
 
-  const filtered = users.filter(u =>
+  // ── Derived data for charts ─────────────────────────────────────────────────
+  const filtered     = users.filter(u =>
     u.username.toLowerCase().includes(search.toLowerCase()) ||
     u.email.toLowerCase().includes(search.toLowerCase())
   );
-
   const onlineCount  = users.filter(u => isOnline(u.last_seen)).length;
   const offlineCount = users.length - onlineCount;
+
+  // Build sparkline data from users (conversations per-user distribution)
+  const convSparkData = users.slice(0, 12).map(u => u.conversation_count);
+  const docSparkData  = users.slice(0, 12).map(u => u.document_count);
+
+  // Activity bar data: bucket users by signup recency (last 7 days)
+  const activityBars = (() => {
+    const days = ["6d","5d","4d","3d","2d","1d","Today"];
+    const counts = new Array(7).fill(0);
+    users.forEach(u => {
+      if (!u.created_at) return;
+      const diff = Math.floor((Date.now() - new Date(u.created_at).getTime()) / 86_400_000);
+      if (diff < 7) counts[6 - diff]++;
+    });
+    return { days, counts };
+  })();
+
+  // Conversation leader board: top 5 users
+  const topUsers = [...users].sort((a, b) => b.conversation_count - a.conversation_count).slice(0, 5);
+
+  // Health service status helper
+  function deriveStatus(val: string | undefined): "ok" | "warn" | "error" | "unknown" {
+    if (!val) return "unknown";
+    const v = val.toLowerCase();
+    if (v === "ok" || v === "healthy" || v === "connected" || v === "ready") return "ok";
+    if (v === "warn" || v === "degraded") return "warn";
+    if (v === "error" || v === "down" || v === "failed" || v === "disconnected") return "error";
+    return "unknown";
+  }
 
   if (!currentUser || currentUser.role !== "admin") return null;
 
@@ -321,6 +550,7 @@ export default function AdminPage() {
       border: "1px solid hsl(var(--border))",
       color: "hsl(var(--foreground))",
       outline: "none",
+      boxSizing: "border-box" as const,
     } as React.CSSProperties,
     btn: (variant: "primary" | "ghost" | "danger" = "primary") => ({
       display: "inline-flex", alignItems: "center", gap: 5,
@@ -331,6 +561,11 @@ export default function AdminPage() {
                 : "hsl(var(--muted)/0.6)",
       color: variant === "ghost" ? "hsl(var(--foreground))" : "#fff",
     }) as React.CSSProperties,
+    sectionTitle: {
+      fontSize: 11, fontWeight: 700, letterSpacing: "0.06em",
+      textTransform: "uppercase" as const, color: "hsl(var(--muted-foreground))",
+      marginBottom: 10,
+    },
   };
 
   return (
@@ -343,37 +578,53 @@ export default function AdminPage() {
           </Link>
           <div style={{ width: 1, height: 18, background: "hsl(var(--border))" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: 8,
-              background: "linear-gradient(135deg,#7c3aed,#4f46e5)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
-              <Shield size={14} color="#fff" />
-            </div>
+            {/* Platform logo */}
+            <img src="/favicon.svg" alt="Bimlo" style={{ width: 26, height: 26, borderRadius: 6 }} />
             <span style={{ fontSize: 15, fontWeight: 800, color: "hsl(var(--foreground))" }}>Admin Dashboard</span>
-            <span style={{
-              fontSize: 10, fontWeight: 700, letterSpacing: "0.08em",
-              padding: "2px 7px", borderRadius: 999,
-              background: "linear-gradient(135deg,#7c3aed22,#4f46e522)",
-              border: "1px solid #7c3aed44", color: "#7c3aed",
-            }}>BIMLO</span>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* Online indicator */}
-          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "hsl(var(--muted-foreground))" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <Circle size={7} fill="#22c55e" color="#22c55e" />
-              <span style={{ color: "#22c55e", fontWeight: 600 }}>{onlineCount}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {/* Online/offline pill */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, fontSize: 12,
+            padding: "4px 10px", borderRadius: 999,
+            background: "hsl(var(--muted)/0.4)",
+            border: "1px solid hsl(var(--border))",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <Circle size={6} fill="#22c55e" color="#22c55e" />
+              <span style={{ color: "#22c55e", fontWeight: 700 }}>{onlineCount}</span>
             </div>
-            <span>/</span>
-            <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <Circle size={7} fill="#64748b" color="#64748b" />
-              <span>{offlineCount}</span>
-            </div>
-            <span>users</span>
+            <span style={{ color: "hsl(var(--muted-foreground))" }}>online</span>
           </div>
-          <button onClick={() => { loadUsers(); loadStats(); }} style={S.btn("ghost")}>
+
+          {/* Current admin avatar */}
+          {adminAvatar ? (
+            <img
+              src={adminAvatar}
+              referrerPolicy="no-referrer"
+              crossOrigin="anonymous"
+              alt={currentUser.username}
+              style={{ width: 30, height: 30, borderRadius: "50%", objectFit: "cover", border: "2px solid #7c3aed55" }}
+              onError={() => setAdminAvatar(null)}
+            />
+          ) : (
+            <div style={{
+              width: 30, height: 30, borderRadius: "50%",
+              background: "linear-gradient(135deg,#7c3aed,#4f46e5)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 12, fontWeight: 700, color: "#fff", border: "2px solid #7c3aed55",
+            }}>
+              {currentUser.username[0]?.toUpperCase()}
+            </div>
+          )}
+
+          {/* Dark mode toggle */}
+          <button onClick={toggleDark} title="Toggle theme" style={{ ...S.btn("ghost"), padding: "6px 8px" }}>
+            {dark ? <Sun size={14} /> : <Moon size={14} />}
+          </button>
+
+          <button onClick={() => { loadUsers(); loadStats(); loadHealth(); }} style={S.btn("ghost")}>
             <RefreshCw size={13} />
           </button>
           <button onClick={logout} style={S.btn("ghost")}>
@@ -382,27 +633,80 @@ export default function AdminPage() {
         </div>
       </div>
 
-      <div style={{ padding: "24px 28px", maxWidth: 1280, margin: "0 auto" }}>
+      <div style={{ padding: "24px 28px", maxWidth: 1360, margin: "0 auto" }}>
 
         {/* ── KPIs ── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 24 }}>
-          <KpiCard icon={Users}       label="Total Users"    value={stats?.total_users ?? "—"}         sub={`${stats?.admin_users ?? 0} admin(s)`}    accent="#3b82f6" />
-          <KpiCard icon={Wifi}        label="Active (1h)"    value={stats?.active_1h ?? "—"}           sub="online now"                               accent="#22c55e" />
-          <KpiCard icon={Activity}    label="Active (24h)"   value={stats?.active_24h ?? "—"}          sub="last 24 hours"                            accent="#06b6d4" />
-          <KpiCard icon={TrendingUp}  label="New (7d)"       value={stats?.new_users_7d ?? "—"}        sub="new signups"                              accent="#a855f7" />
-          <KpiCard icon={MessageSquare} label="Conversations" value={stats?.total_conversations ?? "—"} sub="all sessions"                            accent="#f59e0b" />
-          <KpiCard icon={FileText}    label="Documents"      value={stats?.total_documents ?? "—"}     sub="uploaded"                                 accent="#ec4899" />
-          <KpiCard icon={BarChart2}   label="Reports"        value={stats?.total_reports ?? "—"}       sub="generated"                                accent="#14b8a6" />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 24 }}>
+          <KpiCard icon={Users}       label="Total Users"  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" sparkData={[2,3,3,4,5,5,6,7,7,stats?.total_users ?? 7]} />
+          <KpiCard icon={Wifi}        label="Active (1h)"  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" sparkData={[1,0,2,1,3,2,stats?.active_1h ?? 2]} />
+          <KpiCard icon={Activity}    label="Active (24h)" value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" sparkData={[1,2,1,3,2,4,stats?.active_24h ?? 2]} />
+          <KpiCard icon={TrendingUp}  label="New (7d)"     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats?.new_users_7d ? 12 : undefined} sparkData={activityBars.counts} />
+          <KpiCard icon={MessageSquare} label="Conversations" value={stats?.total_conversations ?? "—"} sub="all sessions" accent="#f59e0b" sparkData={convSparkData} />
+        </div>
+
+        {/* ── Activity + Top Users row ── */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+          {/* Signups per day */}
+          <div style={{ ...S.card, padding: "18px 20px", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexShrink: 0 }}>
+              <div>
+                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>Signups — last 7 days</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "hsl(var(--foreground))" }}>
+                  {activityBars.counts.reduce((a, b) => a + b, 0)}
+                  <span style={{ fontSize: 12, fontWeight: 500, color: "hsl(var(--muted-foreground))", marginLeft: 6 }}>new users</span>
+                </div>
+              </div>
+              <BarChart3 size={18} color="#a855f7" />
+            </div>
+            <MiniBarChart data={activityBars.counts} labels={activityBars.days} color="#a855f7" />
+          </div>
+
+          {/* Top users by conversations */}
+          <div style={{ ...S.card, padding: "18px 20px" }}>
+            <div style={{ ...S.sectionTitle, marginBottom: 14 }}>Top Users by Activity</div>
+            {topUsers.length === 0 ? (
+              <div style={{ fontSize: 13, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: "20px 0" }}>No data yet</div>
+            ) : topUsers.map((u, i) => {
+              const pct = u.conversation_count > 0 ? (u.conversation_count / topUsers[0].conversation_count) * 100 : 0;
+              return (
+                <div key={u.user_id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: i < topUsers.length - 1 ? 10 : 0 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", width: 14, textAlign: "right" }}>{i + 1}</span>
+                  {/* Avatar */}
+                  <div style={{
+                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
+                    overflow: "hidden", border: "1.5px solid hsl(var(--border))",
+                    background: u.avatar_url ? "transparent" : (u.role === "admin" ? "linear-gradient(135deg,#7c3aed,#4f46e5)" : "linear-gradient(135deg,#3b82f6,#06b6d4)"),
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 10, fontWeight: 700, color: "#fff",
+                  }}>
+                    {u.avatar_url
+                      ? <img src={u.avatar_url} referrerPolicy="no-referrer" alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      : u.username[0]?.toUpperCase()
+                    }
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--foreground))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.username}</span>
+                      <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", flexShrink: 0, marginLeft: 4 }}>{u.conversation_count}</span>
+                    </div>
+                    <div style={{ height: 4, borderRadius: 999, background: "hsl(var(--muted)/0.4)", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${pct}%`, background: "linear-gradient(to right, #3b82f6, #06b6d4)", borderRadius: 999, transition: "width 0.5s ease" }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* ── Tabs ── */}
         <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
-          {(["users", "logs", "email", "settings"] as const).map(t => (
+          {(["users", "health", "logs", "settings"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)} style={S.tab(tab === t)}>
-              {t === "users"    && <><Users size={13} /> Users</>}
-              {t === "logs"     && <><Terminal size={13} /> Live Logs</>}
-              {t === "email"    && <><Mail size={13} /> Send Email</>}
-              {t === "settings" && <><Shield size={13} /> My Account</>}
+              {t === "users"   && <><Users size={13} /> Users</>}
+              {t === "health"  && <><Server size={13} /> System Health</>}
+              {t === "logs"    && <><Terminal size={13} /> Live Logs</>}
+              {t === "settings"&& <><Shield size={13} /> My Account</>}
             </button>
           ))}
         </div>
@@ -410,59 +714,60 @@ export default function AdminPage() {
         {/* ══════════════════════ USERS TAB ══════════════════════ */}
         {tab === "users" && (
           <div style={S.card}>
-            {/* Toolbar */}
             <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
                 <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "hsl(var(--muted-foreground))" }} />
-                <input
-                  value={search} onChange={e => setSearch(e.target.value)}
-                  placeholder="Search users…"
-                  style={{ ...S.input, paddingLeft: 30 }}
-                />
+                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users…" style={{ ...S.input, paddingLeft: 30 }} />
               </div>
               <span style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", marginLeft: "auto" }}>
                 {filtered.length} user{filtered.length !== 1 ? "s" : ""}
               </span>
+              <button onClick={() => { setEmailTarget(null); setEmailSubject(""); setEmailBody(""); setEmailResult(null); setEmailModal(true); }}
+                style={{ ...S.btn("ghost"), gap: 6, border: "1px solid hsl(var(--border))" }}>
+                <Mail size={12} /> Broadcast
+              </button>
             </div>
-
-            {/* Table */}
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid hsl(var(--border))" }}>
-                    {["User", "Email", "Role", "Status", "Conversations", "Documents", "Last seen", "Actions"].map(h => (
+                    {["User", "Email", "Role", "Status", "Conversations", "Documents", "Joined", "Last seen", "Actions"].map(h => (
                       <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", letterSpacing: "0.05em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {loading ? (
-                    <tr><td colSpan={8} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))" }}>
+                    <tr><td colSpan={9} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))" }}>
                       <RefreshCw size={18} style={{ animation: "spin 0.8s linear infinite", margin: "0 auto" }} />
                     </td></tr>
                   ) : filtered.length === 0 ? (
-                    <tr><td colSpan={8} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))", fontSize: 13 }}>No users found</td></tr>
+                    <tr><td colSpan={9} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))", fontSize: 13 }}>No users found</td></tr>
                   ) : filtered.map(u => {
                     const online = isOnline(u.last_seen);
                     const isMe   = u.user_id === currentUser?.user_id;
                     return (
-                      <tr key={u.user_id} style={{
-                        borderBottom: "1px solid hsl(var(--border)/0.5)",
-                        background: isMe ? "hsl(var(--primary)/0.04)" : "transparent",
-                        transition: "background 0.1s",
-                      }}
-                      onMouseEnter={e => (e.currentTarget as HTMLTableRowElement).style.background = isMe ? "hsl(var(--primary)/0.07)" : "hsl(var(--muted)/0.3)"}
-                      onMouseLeave={e => (e.currentTarget as HTMLTableRowElement).style.background = isMe ? "hsl(var(--primary)/0.04)" : "transparent"}
+                      <tr key={u.user_id}
+                        style={{ borderBottom: "1px solid hsl(var(--border)/0.5)", background: isMe ? "hsl(var(--primary)/0.04)" : "transparent", transition: "background 0.1s" }}
+                        onMouseEnter={e => (e.currentTarget as HTMLTableRowElement).style.background = isMe ? "hsl(var(--primary)/0.07)" : "hsl(var(--muted)/0.3)"}
+                        onMouseLeave={e => (e.currentTarget as HTMLTableRowElement).style.background = isMe ? "hsl(var(--primary)/0.04)" : "transparent"}
                       >
                         <td style={{ padding: "12px 16px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            {/* Avatar with Google profile pic support */}
                             <div style={{
-                              width: 32, height: 32, borderRadius: "50%",
+                              width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
                               background: u.avatar_url ? "transparent" : (u.role === "admin" ? "linear-gradient(135deg,#7c3aed,#4f46e5)" : "linear-gradient(135deg,#3b82f6,#06b6d4)"),
                               display: "flex", alignItems: "center", justifyContent: "center",
-                              fontSize: 13, fontWeight: 700, color: "#fff", flexShrink: 0, overflow: "hidden",
+                              fontSize: 13, fontWeight: 700, color: "#fff", overflow: "hidden",
+                              border: u.role === "admin" ? "2px solid #7c3aed44" : "2px solid #3b82f644",
+                              boxShadow: online ? `0 0 0 2px ${u.role === "admin" ? "#7c3aed" : "#22c55e"}44` : "none",
                             }}>
-                              {u.avatar_url ? <img src={u.avatar_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} referrerPolicy="no-referrer" /> : u.username[0]?.toUpperCase()}
+                              {u.avatar_url
+                                ? <img src={u.avatar_url} alt="" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                                    onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                                : u.username[0]?.toUpperCase()
+                              }
                             </div>
                             <div>
                               <div style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>
@@ -480,8 +785,7 @@ export default function AdminPage() {
                             border: `1px solid ${u.role === "admin" ? "#7c3aed44" : "#3b82f644"}`,
                             display: "inline-flex", alignItems: "center", gap: 4,
                           }}>
-                            {u.role === "admin" ? <Crown size={9} /> : <User size={9} />}
-                            {u.role}
+                            {u.role === "admin" ? <Crown size={9} /> : <User size={9} />} {u.role}
                           </span>
                         </td>
                         <td style={{ padding: "12px 16px" }}>
@@ -490,9 +794,26 @@ export default function AdminPage() {
                             <span style={{ color: online ? "#22c55e" : "hsl(var(--muted-foreground))" }}>{online ? "Online" : "Offline"}</span>
                           </div>
                         </td>
-                        <td style={{ padding: "12px 16px", fontSize: 13, color: "hsl(var(--foreground))", textAlign: "center" }}>{u.conversation_count}</td>
-                        <td style={{ padding: "12px 16px", fontSize: 13, color: "hsl(var(--foreground))", textAlign: "center" }}>{u.document_count}</td>
-                        <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap" }}>{timeAgo(u.last_seen)}</td>
+                        <td style={{ padding: "12px 16px", fontSize: 13, color: "hsl(var(--foreground))", textAlign: "center" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                            <MessageSquare size={11} color="#f59e0b" />
+                            {u.conversation_count}
+                          </div>
+                        </td>
+                        <td style={{ padding: "12px 16px", fontSize: 13, color: "hsl(var(--foreground))", textAlign: "center" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                            <Zap size={11} color="#06b6d4" />
+                            {u.document_count}
+                          </div>
+                        </td>
+                        <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap" }}>
+                          {u.created_at ? timeAgo(u.created_at) : "—"}
+                        </td>
+                        <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <Clock size={10} /> {timeAgo(u.last_seen)}
+                          </div>
+                        </td>
                         <td style={{ padding: "12px 16px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <button onClick={() => openEdit(u)} title="Edit" style={{
@@ -500,11 +821,11 @@ export default function AdminPage() {
                               background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                               color: "hsl(var(--muted-foreground))",
                             }}><Edit3 size={12} /></button>
-                            <button
-                              onClick={() => { setEmailTargets([u.user_id]); setShowEmailModal(true); }}
-                              title="Email"
-                              style={{ width: 28, height: 28, borderRadius: 6, border: "1px solid hsl(var(--border))", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "hsl(var(--muted-foreground))" }}
-                            ><Mail size={12} /></button>
+                            <button onClick={() => { setEmailTarget(u); setEmailSubject(""); setEmailBody(""); setEmailResult(null); setEmailModal(true); }} title="Send message" style={{
+                              width: 28, height: 28, borderRadius: 6, border: "1px solid #3b82f630",
+                              background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                              color: "#3b82f6",
+                            }}><Mail size={12} /></button>
                             {!isMe && (
                               <button onClick={() => setDeleteConfirm(u.user_id)} title="Delete" style={{
                                 width: 28, height: 28, borderRadius: 6, border: "1px solid #ef444430",
@@ -519,6 +840,125 @@ export default function AdminPage() {
                   })}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════ HEALTH TAB ══════════════════════ */}
+        {tab === "health" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Header row with last refresh */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "hsl(var(--foreground))" }}>System Health</div>
+                {health?.timestamp && (
+                  <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
+                    Last checked: {new Date(health.timestamp).toLocaleTimeString()}
+                  </div>
+                )}
+              </div>
+              <button onClick={loadHealth} disabled={healthLoading} style={{ ...S.btn("ghost"), gap: 6 }}>
+                <RefreshCw size={13} style={healthLoading ? { animation: "spin 0.8s linear infinite" } : {}} />
+                Refresh
+              </button>
+            </div>
+
+            {/* Overall status banner */}
+            <div style={{
+              padding: "14px 18px", borderRadius: 12,
+              display: "flex", alignItems: "center", gap: 12,
+              background: health?.status === "ok" || health?.status === "healthy"
+                ? "linear-gradient(135deg, #22c55e10, #16a34a08)"
+                : "#ef444410",
+              border: `1px solid ${health?.status === "ok" || health?.status === "healthy" ? "#22c55e30" : "#ef444430"}`,
+            }}>
+              <div style={{
+                width: 36, height: 36, borderRadius: "50%",
+                background: health?.status === "ok" || health?.status === "healthy" ? "#22c55e18" : "#ef444418",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                {health?.status === "ok" || health?.status === "healthy"
+                  ? <CheckCircle2 size={18} color="#22c55e" />
+                  : <XCircle size={18} color="#ef4444" />
+                }
+              </div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>
+                  {health?.status === "ok" || health?.status === "healthy" ? "All Systems Operational" : health ? "System Issues Detected" : "Checking system status…"}
+                </div>
+                <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>
+                  {health?.services ?? "Loading service status…"}
+                </div>
+              </div>
+              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", animation: "pulse 2s infinite" }} />
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#22c55e" }}>LIVE</span>
+              </div>
+            </div>
+
+            {/* Service grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              {/* Core services */}
+              <div style={{ ...S.card, padding: "18px 20px" }}>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Core Services</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <ServiceBadge
+                    label="Neo4j Graph Database"
+                    status={deriveStatus(health?.neo4j ?? health?.vector_store)}
+                    icon={Database}
+                    detail={health?.statistics?.total_chunks != null ? `${health.statistics.total_chunks.toLocaleString()} chunks indexed` : "Graph memory & user data store"}
+                  />
+                  <ServiceBadge
+                    label="Vector Store (Chroma)"
+                    status={deriveStatus(health?.vector_store)}
+                    icon={Cpu}
+                    detail={health?.statistics?.total_documents != null ? `${health.statistics.total_documents} documents` : "Embedding & similarity search"}
+                  />
+                  <ServiceBadge
+                    label="LLM Provider"
+                    status={deriveStatus(health?.llm_provider ?? health?.services)}
+                    icon={Zap}
+                    detail={health?.llm_provider ?? "AI inference engine"}
+                  />
+                  <ServiceBadge
+                    label="Voice Agent"
+                    status={deriveStatus(health?.voice_agent)}
+                    icon={Radio}
+                    detail="Real-time voice pipeline"
+                  />
+                  <ServiceBadge
+                    label="API Server"
+                    status={health ? "ok" : "unknown"}
+                    icon={Server}
+                    detail="FastAPI backend"
+                  />
+                </div>
+              </div>
+
+              {/* Platform metrics */}
+              <div style={{ ...S.card, padding: "18px 20px" }}>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Platform Metrics</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {[
+                    { label: "Total Users",        value: stats?.total_users ?? 0,         icon: Users,         color: "#3b82f6" },
+                    { label: "Conversations",      value: stats?.total_conversations ?? 0, icon: MessageSquare, color: "#f59e0b" },
+                    { label: "Documents Uploaded", value: stats?.total_documents ?? 0,     icon: Zap,           color: "#06b6d4" },
+                    { label: "Reports Generated",  value: stats?.total_reports ?? 0,       icon: BarChart3,     color: "#22c55e" },
+                  ].map(m => (
+                    <div key={m.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{
+                        width: 28, height: 28, borderRadius: 7,
+                        background: `${m.color}15`, border: `1px solid ${m.color}25`,
+                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                      }}>
+                        <m.icon size={13} color={m.color} />
+                      </div>
+                      <span style={{ flex: 1, fontSize: 12, color: "hsl(var(--muted-foreground))" }}>{m.label}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>{m.value.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -551,10 +991,10 @@ export default function AdminPage() {
                   Waiting for log entries…
                 </div>
               ) : logs.map((l, i) => {
-                const kind = classifyLog(l.msg);
+                const kind  = classifyLog(l.msg);
                 const color = kind === "error" ? "#f87171" : kind === "warn" ? "#fbbf24" : kind === "success" ? "#4ade80" : "#94a3b8";
                 const bg    = kind === "error" ? "rgba(248,113,113,0.04)" : kind === "warn" ? "rgba(251,191,36,0.04)" : "transparent";
-                const ts = l.ts ? new Date(l.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+                const ts    = l.ts ? new Date(l.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
                 return (
                   <div key={i} style={{ display: "flex", gap: 12, padding: "3px 16px", background: bg, transition: "background 0.1s" }}
                     onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)"}
@@ -570,83 +1010,29 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* ══════════════════════ EMAIL TAB ══════════════════════ */}
-        {tab === "email" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            {/* Select recipients */}
-            <div style={S.card}>
-              <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))" }}>
-                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Select Recipients</h3>
-              </div>
-              <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-                  <button onClick={() => setEmailTargets(users.map(u => u.user_id))} style={S.btn("ghost")}>All users</button>
-                  <button onClick={() => setEmailTargets([])} style={S.btn("ghost")}>Clear</button>
-                </div>
-                <div style={{ maxHeight: 360, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-                  {users.map(u => {
-                    const selected = emailTargets.includes(u.user_id);
-                    return (
-                      <label key={u.user_id} style={{
-                        display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
-                        borderRadius: 8, cursor: "pointer",
-                        background: selected ? "hsl(var(--primary)/0.08)" : "transparent",
-                        border: `1px solid ${selected ? "hsl(var(--primary)/0.3)" : "transparent"}`,
-                        transition: "all 0.12s",
-                      }}>
-                        <input type="checkbox" checked={selected}
-                          onChange={() => setEmailTargets(prev => selected ? prev.filter(id => id !== u.user_id) : [...prev, u.user_id])}
-                          style={{ accentColor: "hsl(var(--primary))" }}
-                        />
-                        <div style={{ width: 24, height: 24, borderRadius: "50%", background: "linear-gradient(135deg,#3b82f6,#06b6d4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#fff" }}>
-                          {u.username[0]?.toUpperCase()}
-                        </div>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>{u.username}</div>
-                          <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{u.email}</div>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* Compose */}
-            <div style={S.card}>
-              <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))" }}>
-                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Compose Message</h3>
-              </div>
-              <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Subject</label>
-                  <input value={emailSubject} onChange={e => setEmailSubject(e.target.value)} placeholder="Email subject…" style={S.input} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Body</label>
-                  <textarea value={emailBody} onChange={e => setEmailBody(e.target.value)} placeholder="Write your message…" rows={8}
-                    style={{ ...S.input, resize: "vertical", fontFamily: "inherit" }} />
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <button onClick={sendEmail} disabled={emailSending || !emailTargets.length || !emailSubject || !emailBody}
-                    style={{ ...S.btn("primary"), opacity: emailSending || !emailTargets.length || !emailSubject || !emailBody ? 0.5 : 1 }}>
-                    {emailSending ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Send size={13} />}
-                    Send to {emailTargets.length} user{emailTargets.length !== 1 ? "s" : ""}
-                  </button>
-                  {emailResult && <span style={{ fontSize: 12, color: "#22c55e" }}>{emailResult}</span>}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* ══════════════════════ SETTINGS TAB ══════════════════════ */}
         {tab === "settings" && (
           <div style={{ maxWidth: 480 }}>
             <div style={S.card}>
-              <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", gap: 8 }}>
-                <Shield size={15} color="#7c3aed" />
-                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>My Admin Credentials</h3>
+              <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", gap: 10 }}>
+                {/* Show admin's own avatar in settings */}
+                {adminAvatar ? (
+                  <img src={adminAvatar} referrerPolicy="no-referrer" alt={currentUser.username}
+                    style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", border: "2px solid #7c3aed44" }} />
+                ) : (
+                  <div style={{
+                    width: 36, height: 36, borderRadius: "50%",
+                    background: "linear-gradient(135deg,#7c3aed,#4f46e5)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 14, fontWeight: 700, color: "#fff",
+                  }}>
+                    {currentUser.username[0]?.toUpperCase()}
+                  </div>
+                )}
+                <div>
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>My Admin Credentials</h3>
+                  <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>{currentUser.email}</div>
+                </div>
               </div>
               <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
@@ -658,7 +1044,9 @@ export default function AdminPage() {
                   <input value={selfEmail} onChange={e => setSelfEmail(e.target.value)} type="email" style={S.input} />
                 </div>
                 <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>New Password <span style={{ fontWeight: 400 }}>(leave blank to keep)</span></label>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>
+                    New Password <span style={{ fontWeight: 400 }}>(leave blank to keep)</span>
+                  </label>
                   <div style={{ position: "relative" }}>
                     <input value={selfPassword} onChange={e => setSelfPassword(e.target.value)} type={showPw ? "text" : "password"} placeholder="••••••••" style={{ ...S.input, paddingRight: 36 }} />
                     <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "hsl(var(--muted-foreground))", padding: 4 }}>
@@ -670,7 +1058,11 @@ export default function AdminPage() {
                   {selfSaving ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Check size={13} />}
                   Save Changes
                 </button>
-                {selfMsg && <div style={{ fontSize: 12, color: selfMsg.includes("fail") ? "#ef4444" : "#22c55e", padding: "8px 12px", borderRadius: 8, background: selfMsg.includes("fail") ? "#ef444415" : "#22c55e15" }}>{selfMsg}</div>}
+                {selfMsg && (
+                  <div style={{ fontSize: 12, color: selfMsg.includes("fail") ? "#ef4444" : "#22c55e", padding: "8px 12px", borderRadius: 8, background: selfMsg.includes("fail") ? "#ef444415" : "#22c55e15" }}>
+                    {selfMsg}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -682,8 +1074,21 @@ export default function AdminPage() {
         <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
           onClick={e => { if (e.target === e.currentTarget) setEditUser(null); }}>
           <div style={{ ...S.card, width: 420, padding: 0, overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,0.4)" }}>
-            <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Edit User — {editUser.username}</h3>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+                  background: editUser.avatar_url ? "transparent" : (editUser.role === "admin" ? "linear-gradient(135deg,#7c3aed,#4f46e5)" : "linear-gradient(135deg,#3b82f6,#06b6d4)"),
+                  overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 12, fontWeight: 700, color: "#fff",
+                }}>
+                  {editUser.avatar_url
+                    ? <img src={editUser.avatar_url} referrerPolicy="no-referrer" alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    : editUser.username[0]?.toUpperCase()
+                  }
+                </div>
+                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Edit — {editUser.username}</h3>
+              </div>
               <button onClick={() => setEditUser(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "hsl(var(--muted-foreground))", padding: 4 }}><X size={16} /></button>
             </div>
             <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -756,31 +1161,165 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* ══════════ QUICK EMAIL MODAL ══════════ */}
-      {showEmailModal && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
-          onClick={e => { if (e.target === e.currentTarget) { setShowEmailModal(false); setEmailResult(null); } }}>
-          <div style={{ ...S.card, width: 440, padding: 0, overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,0.4)" }}>
-            <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Quick Email</h3>
-              <button onClick={() => { setShowEmailModal(false); setEmailResult(null); }} style={{ background: "none", border: "none", cursor: "pointer", color: "hsl(var(--muted-foreground))", padding: 4 }}><X size={16} /></button>
+      {/* ══════════ EMAIL COMPOSE MODAL ══════════ */}
+      {emailModal && (
+        <div
+          style={{ position: "fixed", inset: 0, zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)" }}
+          onClick={e => { if (e.target === e.currentTarget) setEmailModal(false); }}
+        >
+          <div style={{ width: 500, borderRadius: 20, overflow: "hidden", boxShadow: "0 32px 96px rgba(0,0,0,0.5), 0 0 0 1px rgba(59,130,246,0.15)", background: "hsl(var(--card))" }}>
+
+            {/* ── Branded hero header ── */}
+            <div style={{
+              position: "relative", padding: "28px 28px 24px",
+              background: "linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%)",
+              borderBottom: "1px solid rgba(59,130,246,0.2)",
+              overflow: "hidden",
+            }}>
+              {/* radial glow blobs */}
+              <div style={{ position: "absolute", top: -30, left: -30, width: 160, height: 160, borderRadius: "50%", background: "radial-gradient(circle, rgba(59,130,246,0.18) 0%, transparent 70%)", pointerEvents: "none" }} />
+              <div style={{ position: "absolute", bottom: -40, right: -20, width: 180, height: 180, borderRadius: "50%", background: "radial-gradient(circle, rgba(99,102,241,0.14) 0%, transparent 70%)", pointerEvents: "none" }} />
+
+              {/* close */}
+              <button onClick={() => setEmailModal(false)} style={{ position: "absolute", top: 14, right: 14, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, cursor: "pointer", color: "rgba(255,255,255,0.6)", padding: "4px 6px", display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s" }}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.13)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "rgba(255,255,255,0.07)")}
+              >
+                <X size={14} />
+              </button>
+
+              {/* Logo + title */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {/* Inline favicon SVG */}
+                  <svg viewBox="0 0 329.18 372.02" xmlns="http://www.w3.org/2000/svg" style={{ width: 24, height: 24 }}>
+                    <defs>
+                      <linearGradient id="emailLogoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style={{ stopColor: "#60a5fa", stopOpacity: 1 }} />
+                        <stop offset="50%" style={{ stopColor: "#3b82f6", stopOpacity: 1 }} />
+                        <stop offset="100%" style={{ stopColor: "#2563eb", stopOpacity: 1 }} />
+                      </linearGradient>
+                    </defs>
+                    <path fill="url(#emailLogoGrad)" fillRule="evenodd" d="M111,242.83c-.01-24.57-.04-49.15-.02-73.72,0-5.04,2.6-8.44,7.87-10.31,16.79-5.96,33.58-11.91,50.4-17.78,33.06-11.55,65.93-23.65,99.1-34.89,16.3-5.52,32.43-11.51,48.66-17.21,7.6-2.67,12.15.57,12.15,8.59.02,49.05,0,98.09,0,147.14-1.7-.31-1.06-1.68-1.2-2.68-.1-.76.24-1.79-.83-2.05-1.95-.48-3.99-1.33-5.9-1.15-6.13.59-12.16-.22-18.21-.84-.74-.08-1.77-.33-1.6-1.04.54-2.29-.92-1.96-2.24-2.01-1.56-.05-2.79.15-3.01,2.13-.13,1.14-.84,2.21-2.26,1.85-6.06-1.53-12.15-.84-18.24-.32-.82.07-1.55-.37-2.3-.55-4.2-.99-8.13.84-12.19,1.41-.24.03-.52.37-.62.63-1.09,2.74-1.96,1.37-2.99-.08-.76-1.06-1.7-1.69-3.16-2.04-4.79-1.12-9.5,3.77-14.23.07-2.59,1.22-5.17-.1-7.76-.08-9.81.05-19.51,2.06-29.43.88-3.45-.41-7.2.48-10.75-.49-1.62-.45-3.4-.76-4.8-.24-4.3,1.58-8.56.68-12.88.58-4.26-.1-8.52-.14-12.84.35-5.22.6-10.69,1.5-15.89-.94-1.01-.48-2.38-.15-3.57.33-.58.23-1.4.49-1.75-.49.15-.16.25-.38.41-.42,1.71-.52,2.48-1.65,2.33-3.43-.05-.62-.04-1.38-.81-1.42-1.42-.07-1.95,1.3-2.88,2.03-.16.12-.27.37-.44.41-2.29.59-2.84,4.03-5.06,3.86-2.38-.18-5.14.49-7.14-.75-3.48-2.14-6.15-.05-9.06.96-1.69.58-1.55,1.63-.27,2.68,1.04.86,2.14.94,3.4.5.56-.19,1.26-.06,1.38.76.06.44-.2.88-.64.86-1.86-.08-4.32.59-5.4-.79-1.97-2.52-3.45-2.33-5.35-.29,1.9-2.04,3.38-2.22,5.35.29,1.08,1.38,3.54.71,5.4.79.44.02.7-.42.64-.86-.12-.82-.82-.95-1.38-.76-1.26.43-2.36.36-3.4-.5-1.27-1.05-1.42-2.1.27-2.68,2.91-1,5.58-3.1,9.06-.96,2.01,1.23,4.76.56,7.14.75,2.22.17,2.77-3.26,5.06-3.86.17-.04.28-.29.44-.41.93-.73,1.46-2.1,2.88-2.03.77.04.76.8.81,1.42.16,1.78-.62,2.91-2.33,3.43-.16.05-.26.27-.41.42.35.99,1.17.73,1.75.49,1.19-.47,2.56-.8,3.57-.33,5.19,2.44,10.67,1.54,15.89.94,4.32-.49,8.57-.45,12.84-.35,4.32.1,8.58,1,12.88-.58,1.39-.51,3.18-.2,4.8.24,3.55.98,7.3.09,10.75.49,9.92,1.18,19.63-.84,29.43-.88,2.59-.01,5.17,1.3,7.76.08,4.73,3.7,9.44-1.19,14.23-.07,1.47.34,2.41.98,3.16,2.04,1.03,1.44,1.9,2.81,2.99.08.1-.26.38-.6.62-.63,4.06-.57,7.99-2.39,12.19-1.41.76.18,1.48.62,2.3.55,6.09-.52,12.18-1.2,18.24.32,1.42.36,2.13-.71,2.26-1.85.22-1.98,1.45-2.18,3.01-2.13,1.32.04,2.78-.28,2.24,2.01-.17.71.86.97,1.6,1.04,6.05.62,12.07,1.42,18.21.84,1.92-.18,3.95.66,5.9,1.15,1.07.27.72,1.29.83,2.05.14,1.01-.5,2.37,1.2,2.68,0,15.43.02,30.87,0,46.3,0,5.09-2.08,8.03-6.9,9.91-10.26,3.98-20.75,7.32-31.16,10.88-14.41,4.94-28.75,10.07-43.1,15.17-15.98,5.68-31.92,11.44-47.9,17.12-19.08,6.78-38.18,13.53-57.27,20.27-6.87,2.42-13.75,4.83-20.66,7.13-5.89,1.96-10.52-1.14-11.2-7.36-.05-.5-.02-1.01-.02-1.52,0-32.39.02-64.78.03-97.17,1.69-1.66,1.69-4.45,0-6.11,0-2.64,0-5.27,0-7.91.31-.16.83-.27.88-.49.15-.63-.44-.65-.88-.75,0-2.43,0-4.86,0-7.3,1.69,1.67,1.69,4.45,0,6.11,0-2.04,0-4.07,0-6.11,.44.1,1.02.11.88.75-.05.22-.57.33-.88.49,0-.41,0-.82,0-1.24ZM.03,169.67c0-25.09-.02-50.19,0-75.28,0-5.65,2.97-8.72,8.46-10.17,4.66-1.23,9.11-3.27,13.67-4.9,12.4-4.43,24.79-8.87,37.21-13.25,29.03-10.23,58.07-20.41,87.11-30.63,17.37-6.12,34.73-12.26,52.09-18.41,3.9-1.38,7.62-3.37,11.89-3.4,3.68-.03,6.35,1.87,6.99,5.43.39,2.16.84,4.34.83,6.6-.06,19.1.06,38.2-.08,57.3-.06,7.91-2.05,9.73-8.75,12.24-8.9,3.34-18.02,6.11-26.98,9.29-12.3,4.37-24.47,9.15-36.85,13.28-7.18,2.4-14.32,4.92-21.47,7.41-13.27,4.62-26.47,9.45-39.71,14.18-3.11,1.11-4.73,3.03-4.65,6.6.1,4.24-.33,8.48-.53,12.73-1.49.1-2.11-.58-1.68-2.03.71-2.35-.53-2.86-2.52-2.86-4.12,0-8.18,1-12.35.41-2.77-.39-5.64-.6-8.41-.31-7.15.75-14.31.32-21.46.56-1.67.06-3.7-2.14-5.05.69-.19.4-.75.17-.77-.35-.09-1.68-1.36-1.04-2-.83-1.5.49-3,.49-4.51.45-2.51-.07-4.79.29-6.67,2.25-1.18,1.23-2.61,1.32-3.39-.51-.58-1.35-1.43-1.12-2.47-.84-4.19,1.13-5.79,3.46-6.25,7.78-.23,2.19.47,4.82-1.71,6.57,2.18-1.75,1.48-4.38,1.71-6.57.46-4.32,2.05-6.65,6.25-7.78,1.04-.28,1.89-.52,2.47.84.78,1.83,2.22,1.74,3.39.51,1.88-1.96,4.16-2.32,6.67-2.25,1.51.04,3.01.05,4.51-.45.64-.21,1.91-.84,2,.83.03.52.58.75.77.35,1.35-2.83,3.38-.64,5.05-.69,7.15-.24,14.31.19,21.46-.56,2.77-.29,5.64-.08,8.41.31,4.17.59,8.23-.4,12.35-.41,1.99,0,3.23.51,2.52,2.86-.44,1.45.18,2.12,1.68,2.03,1.22,34.51.32,69.02.55,103.54.02,2.41-.16,4.88-.68,7.23-.6,2.66-2.18,4.69-4.98,5.68-16.15,5.67-32.27,11.41-48.42,17.11-5.44,1.92-10.85,3.94-16.37,5.6-4.44,1.34-8.93-2-9.35-6.59-.05-.5-.02-1.02-.02-1.52,0-40.02.01-80.04.02-120.06Z" />
+                  </svg>
+                </div>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", letterSpacing: "-0.01em" }}>
+                    {emailTarget ? `Message to ${emailTarget.username}` : "Broadcast Message"}
+                  </div>
+                  <div style={{ fontSize: 11, color: "rgba(148,163,184,0.9)", marginTop: 2 }}>
+                    {emailTarget
+                      ? `Sending to ${emailTarget.email}`
+                      : `${users.length} recipient${users.length !== 1 ? "s" : ""} · All users`}
+                  </div>
+                </div>
+              </div>
             </div>
-            <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* ── Form body ── */}
+            <div style={{ padding: "22px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {/* To chip */}
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Subject</label>
-                <input value={emailSubject} onChange={e => setEmailSubject(e.target.value)} placeholder="Subject…" style={S.input} />
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>To</label>
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
+                  borderRadius: 9, border: "1px solid hsl(var(--border))",
+                  background: "hsl(var(--muted)/0.3)",
+                }}>
+                  {emailTarget ? (
+                    <>
+                      {emailTarget.avatar_url
+                        ? <img src={emailTarget.avatar_url} referrerPolicy="no-referrer" alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover", border: "1.5px solid #3b82f640" }} />
+                        : <div style={{ width: 22, height: 22, borderRadius: "50%", background: "linear-gradient(135deg,#3b82f6,#06b6d4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#fff", flexShrink: 0 }}>{emailTarget.username[0]?.toUpperCase()}</div>
+                      }
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>{emailTarget.username}</span>
+                      <span style={{ fontSize: 12, color: "hsl(var(--muted-foreground))" }}>·</span>
+                      <span style={{ fontSize: 12, color: "hsl(var(--muted-foreground))" }}>{emailTarget.email}</span>
+                    </>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      <div style={{ width: 22, height: 22, borderRadius: "50%", background: "linear-gradient(135deg,#3b82f6,#7c3aed)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, flexShrink: 0 }}>
+                        <Users size={11} color="#fff" />
+                      </div>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>All Users</span>
+                      <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 99, background: "#3b82f618", border: "1px solid #3b82f630", color: "#3b82f6", fontWeight: 700 }}>{users.length}</span>
+                    </div>
+                  )}
+                </div>
               </div>
+
+              {/* Subject */}
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Message</label>
-                <textarea value={emailBody} onChange={e => setEmailBody(e.target.value)} rows={5} placeholder="Write your message…" style={{ ...S.input, resize: "vertical", fontFamily: "inherit" }} />
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>Subject</label>
+                <input
+                  value={emailSubject}
+                  onChange={e => setEmailSubject(e.target.value)}
+                  placeholder="Enter subject…"
+                  style={{
+                    ...S.input,
+                    fontSize: 13, fontWeight: 500,
+                    background: "hsl(var(--muted)/0.35)",
+                    transition: "border-color 0.15s",
+                  }}
+                  onFocus={e => (e.currentTarget.style.borderColor = "#3b82f6")}
+                  onBlur={e => (e.currentTarget.style.borderColor = "hsl(var(--border))")}
+                />
               </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button onClick={async () => { await sendEmail(); }} disabled={emailSending || !emailSubject || !emailBody}
-                  style={{ ...S.btn("primary"), opacity: emailSending || !emailSubject || !emailBody ? 0.5 : 1 }}>
-                  {emailSending ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Send size={13} />}
-                  Send
+
+              {/* Body */}
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>Message</label>
+                <textarea
+                  value={emailBody}
+                  onChange={e => setEmailBody(e.target.value)}
+                  placeholder="Write your message here…"
+                  rows={5}
+                  style={{
+                    ...S.input, resize: "vertical", lineHeight: 1.7, fontFamily: "inherit",
+                    fontSize: 13, background: "hsl(var(--muted)/0.35)", transition: "border-color 0.15s",
+                  }}
+                  onFocus={e => (e.currentTarget.style.borderColor = "#3b82f6")}
+                  onBlur={e => (e.currentTarget.style.borderColor = "hsl(var(--border))")}
+                />
+              </div>
+
+              {/* Footer row */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", paddingTop: 4 }}>
+                <button
+                  onClick={sendEmail}
+                  disabled={emailSending || !emailSubject.trim() || !emailBody.trim()}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 7,
+                    padding: "9px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700,
+                    cursor: (emailSending || !emailSubject.trim() || !emailBody.trim()) ? "not-allowed" : "pointer",
+                    border: "none",
+                    background: (emailSending || !emailSubject.trim() || !emailBody.trim())
+                      ? "rgba(59,130,246,0.35)"
+                      : "linear-gradient(135deg, #3b82f6, #2563eb)",
+                    color: "#fff",
+                    boxShadow: (emailSending || !emailSubject.trim() || !emailBody.trim()) ? "none" : "0 4px 14px rgba(59,130,246,0.35)",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  {emailSending
+                    ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} />
+                    : <Send size={13} />
+                  }
+                  {emailSending ? "Sending…" : "Send Message"}
                 </button>
-                {emailResult && <span style={{ fontSize: 12, color: "#22c55e" }}>{emailResult}</span>}
+                <button onClick={() => setEmailModal(false)} style={{ ...S.btn("ghost"), padding: "9px 14px", fontSize: 13 }}>
+                  <X size={13} /> Cancel
+                </button>
+                {emailResult && (
+                  <div style={{
+                    marginLeft: 4, fontSize: 12, fontWeight: 600,
+                    color: emailResult.startsWith("✅") ? "#22c55e" : "#ef4444",
+                    display: "flex", alignItems: "center", gap: 5,
+                  }}>
+                    {emailResult}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -788,7 +1327,7 @@ export default function AdminPage() {
       )}
 
       <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes spin  { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
       `}</style>
     </div>

@@ -34,6 +34,7 @@ export interface AuthUser {
   email:         string;
   avatar_url?:   string;
   display_name?: string;
+  role?:         string;  // "user" | "admin"
 }
 
 export type PendingAction = (() => void) | null;
@@ -114,6 +115,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setTimeout(action, 150); // wait for modal exit animation
     }
   }, [setCurrentUser]);
+
+  // ── Heartbeat: ping /auth/heartbeat every 60s while logged in ──────────────
+  useEffect(() => {
+    if (!currentUser?.token) return;
+    const ping = () =>
+      fetch("/auth/heartbeat", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${currentUser.token}` },
+      }).catch(() => {});
+    ping(); // fire immediately on login / page load
+    const id = setInterval(ping, 60_000);
+    return () => clearInterval(id);
+  }, [currentUser?.token]);
 
   const logout = useCallback(async () => {
     if (currentUser?.token) {
