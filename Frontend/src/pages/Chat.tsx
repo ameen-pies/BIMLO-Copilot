@@ -50,6 +50,9 @@ interface Conversation {
   messages: Message[];
 }
 
+const createUniqueId = (prefix = "id-") =>
+  crypto.randomUUID?.() ?? `${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
 // ---------------------------------------------------------------------------
 // Report types
 // ---------------------------------------------------------------------------
@@ -2310,6 +2313,7 @@ async function fetchAICompletion(
   recentMessages: { role: string; content: string }[],
   apiBase: string,
   availableDocs: string[] = [],
+  signal?: AbortSignal,
 ): Promise<string> {
   if (typed.trim().length < 4) return ""; // guard on trimmed length, but send raw `typed` to backend
 
@@ -2327,13 +2331,24 @@ async function fetchAICompletion(
         available_docs:  availableDocs.slice(0, 8),
         max_tokens:      28,
       }),
-      signal: AbortSignal.timeout(5000),
+      // Merge the external abort signal with the 5s timeout
+      signal: signal
+        ? (AbortSignal as any).any
+          ? (AbortSignal as any).any([signal, AbortSignal.timeout(5000)])
+          : signal
+        : AbortSignal.timeout(5000),
     });
     if (!res.ok) return "";
     const data = await res.json();
-    const completion = data.completion ?? "";
+    let completion = data.completion ?? "";
     if (!completion || completion.trim().length === 0 || completion.length > 80) return "";
-    return completion; // preserve leading space — backend sets it intentionally
+    // Preserve a leading space only when the user already ended with whitespace.
+    // If the user is typing an incomplete word like "how ar", strip the extra space
+    // so the suggestion continues the current token instead of inserting one.
+    if (!typed.match(/\s$/)) {
+      completion = completion.replace(/^\s+/, "");
+    }
+    return completion;
   } catch {
     return "";
   }
@@ -2378,7 +2393,7 @@ const WikiThumbnail: React.FC<{ wikiUrl: string }> = ({ wikiUrl }) => {
 // ---------------------------------------------------------------------------
 
 interface VoiceMessageBubbleProps {
-  blobUrl: string;
+  blobUrl?: string;
   duration: number;
   transcript: string | undefined;
   isExpanded: boolean;
@@ -2447,6 +2462,14 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
   };
 
   useEffect(() => {
+    if (!blobUrl) {
+      audioRef.current = null;
+      setIsPlaying(false);
+      setProgress(0);
+      setCurrentTime(0);
+      return;
+    }
+
     const audio = new Audio(blobUrl);
     audio.playbackRate = speed;
     audioRef.current = audio;
@@ -2476,9 +2499,10 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
       audio.pause();
       audio.src = "";
     };
-  }, [blobUrl]);
+  }, [blobUrl, speed, duration]);
 
   const isPending = transcript === undefined;
+  const missingAudio = !blobUrl && transcript !== undefined;
 
   // ── Waveform scrubber (click + drag to seek) ──────────────────────────────
   const waveformRef = useRef<HTMLDivElement>(null);
@@ -2560,7 +2584,8 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
         {/* Play / pause button */}
         <button
           onClick={togglePlay}
-          className="h-8 w-8 rounded-full bg-primary-foreground/20 hover:bg-primary-foreground/30 flex items-center justify-center shrink-0 transition-colors"
+          disabled={!blobUrl}
+          className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 transition-colors ${blobUrl ? "bg-primary-foreground/20 hover:bg-primary-foreground/30" : "bg-muted-foreground/10 cursor-not-allowed"}`}
         >
           {isPlaying ? (
             <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor">
@@ -2621,10 +2646,15 @@ const VoiceMessageBubble: React.FC<VoiceMessageBubbleProps> = ({
         </button>
       </div>
 
-      {/* Timestamp — sits directly under the blue pill */}
-      <span className="text-[10px] text-muted-foreground/50 tabular-nums">
-        {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-      </span>
+      {missingAudio ? (
+        <span className="text-[10px] text-muted-foreground/50 italic">
+          Audio unavailable after reload
+        </span>
+      ) : (
+        <span className="text-[10px] text-muted-foreground/50 tabular-nums">
+          {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
+      )}
     </div>
   );
 };
@@ -3325,7 +3355,7 @@ const WelcomeSplash: React.FC<{ visible: boolean }> = ({ visible }) => (
         exit={{ opacity: 0, transition: { duration: 0.2 } }}
         transition={{ duration: 0.3 }}
         className="absolute inset-0 flex flex-col items-center pointer-events-none select-none z-10"
-        style={{ justifyContent: "center", paddingBottom: "160px" }}
+        style={{ justifyContent: "center", paddingBottom: "140px" }}
       >
         {/* Subtle glow */}
         <div className="absolute inset-0 -z-10 flex items-center justify-center">
@@ -3404,6 +3434,9 @@ const Chat = () => {
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const activeConvIdRef = useRef<string>("");
   useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+  // Tracks IDs of conversations that have been deleted so in-flight responses
+  // don't re-insert them into the sidebar.
+  const deletedConvIdsRef = useRef<Set<string>>(new Set());
   const [pendingConvIds, setPendingConvIds] = useState<Record<string, boolean>>({});
   const markPendingConversation = useCallback((convId: string) => {
     setPendingConvIds(prev => ({ ...prev, [convId]: true }));
@@ -3418,6 +3451,8 @@ const Chat = () => {
   }, []);
   const updateConversationMessages = useCallback(
     (convId: string, updatedMessages: Message[], preview: string, title?: string) => {
+      // Never re-insert a conversation that was explicitly deleted by the user
+      if (deletedConvIdsRef.current.has(convId)) return;
       setConversations(prev => {
         const existing = prev.find(c => c.id === convId);
         if (existing) {
@@ -3433,6 +3468,8 @@ const Chat = () => {
               : c
           );
         }
+        // Double-check the set inside the updater too (state closure timing)
+        if (deletedConvIdsRef.current.has(convId)) return prev;
         return [
           {
             id: convId,
@@ -3481,6 +3518,35 @@ const Chat = () => {
   const [bubbleDoc, setBubbleDoc] = useState<Document | null>(null);
   const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
   const bubbleViewerRef = useRef<ViewerState | null>(null);
+  // ── Model selector ──────────────────────────────────────────────────────
+  type ModelProvider = "cf_primary" | "cf_backup" | "groq" | "nvidia";
+  const [selectedModel, setSelectedModel] = useState<ModelProvider>("cf_primary");
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    console.log("[Chat] selected model:", selectedModel);
+  }, [selectedModel]);
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const MODEL_OPTIONS: { id: ModelProvider; label: string; shortLabel: string; desc: string; color: string }[] = [
+    { id: "cf_primary",  label: "Cloudflare Primary",  shortLabel: "CF Primary",  desc: "Primary Cloudflare Workers AI",    color: "#f97316" },
+    { id: "cf_backup",   label: "Cloudflare Backup",   shortLabel: "CF Backup",   desc: "Backup Cloudflare Workers AI",     color: "#3b82f6" },
+    { id: "groq",        label: "Groq",                shortLabel: "Groq",        desc: "Groq (llama-3.3-70b-versatile)",   color: "#10b981" },
+    { id: "nvidia",      label: "NVIDIA NIM",          shortLabel: "NVIDIA",      desc: "DeepSeek V4 Pro via NVIDIA NIM",   color: "#76b900" },
+  ];
+
+  const isLoading_ref = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
   const [convLoading, setConvLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -3630,6 +3696,7 @@ const Chat = () => {
   const [showSilenceWarning, setShowSilenceWarning] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef   = useRef<Blob[]>([]);
+  const transcribeAbortRef = useRef<AbortController | null>(null);
   const recordingStartRef = useRef<number>(0);
   // Web Audio API analyser for live waveform
   const audioCtxRef         = useRef<AudioContext | null>(null);
@@ -3703,7 +3770,7 @@ const Chat = () => {
         waveformSamplesRef.current = [];
 
         // Immediately add a voice message bubble (transcript will fill in async)
-        const voiceMsgId = Date.now().toString();
+        const voiceMsgId = createUniqueId("msg-");
         const voiceMsg: Message = {
           id: voiceMsgId,
           role: "user",
@@ -3721,10 +3788,13 @@ const Chat = () => {
           formData.append("audio", blob, "recording.webm");
           formData.append("mime_type", mimeType);
 
+          transcribeAbortRef.current = new AbortController();
           const res = await fetch(`${getApiBase()}/transcribe`, {
             method: "POST",
             body: formData,
+            signal: transcribeAbortRef.current.signal,
           });
+          transcribeAbortRef.current = null;
 
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
@@ -3735,30 +3805,31 @@ const Chat = () => {
           const transcript = data.transcript?.trim();
 
           if (transcript) {
-            // Update the voice bubble with transcript and set content for RAG
+            // Use messagesRef to avoid stale closure — always reflects active conversation
             const updatedVoiceMsg: Message = { ...voiceMsg, content: transcript, voiceTranscript: transcript };
-            const voiceMessages = messages.some(m => m.id === voiceMsgId)
-              ? messages.map(m => m.id === voiceMsgId ? updatedVoiceMsg : m)
-              : [...messages, updatedVoiceMsg];
-            setMessages(voiceMessages);
+            const currentMsgs = messagesRef.current;
+            const voiceMessages = currentMsgs.some(m => m.id === voiceMsgId)
+              ? currentMsgs.map(m => m.id === voiceMsgId ? updatedVoiceMsg : m)
+              : [...currentMsgs, updatedVoiceMsg];
             // Wrap the transcript so the agent knows this was spoken, not typed
             const voiceQuery = `[Voice message — the user said this aloud, not typed it]\n\n${transcript}`;
-            // Now run the RAG query using the transcript as the question
-            setIsLoading(true);
+            const convId = ensureActiveConversationId();
+            const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
+            // Batch all synchronous state updates together before the first await so
+            // React 18 can flush them in a single render — avoids a visible flicker.
+            // Note: do NOT call setIsLoading(true) here; runStreamingQuery owns that
+            // state and sets it itself, so a redundant call here would cause an extra
+            // render cycle right before runStreamingQuery's own synchronous updates.
+            updateConversationMessages(convId, voiceMessages, "", title);
+            markPendingConversation(convId);
+            setTypingConvId(convId);
             if (!notifyDismissed) setShowNotifyBanner(true);
             try {
-              const convId = ensureActiveConversationId();
               const assistantMsg = await runStreamingQuery(voiceQuery);
               if (!assistantMsg) return;
               const updated = [...voiceMessages, assistantMsg];
-              const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
               const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-              setMessages(updated);
-              setConversations(convs => {
-                const existing = convs.find(c => c.id === convId);
-                if (existing) return convs.map(c => c.id === convId ? { ...c, messages: updated, preview, timestamp: new Date() } : c);
-                return [{ id: convId, title, preview, timestamp: new Date(), messages: updated, sessionId } as any, ...convs];
-              });
+              updateConversationMessages(convId, updated, preview, title);
               // Persist voice reply to DB
               saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
               setTypingMessageId(assistantMsg.id);
@@ -3767,7 +3838,7 @@ const Chat = () => {
             } catch (error) {
               const msg = serializeError(error);
               const errorMsg: Message = {
-                id: (Date.now() + 1).toString(),
+                id: createUniqueId("msg-"),
                 role: "assistant",
                 content: `Sorry, I encountered an error: ${msg}. Please try again.`,
                 timestamp: new Date(),
@@ -3785,6 +3856,8 @@ const Chat = () => {
             toast({ title: "Nothing detected", description: "No speech was recognised — please try again.", variant: "destructive" });
           }
         } catch (err) {
+          // Silently drop AbortError — user deleted the chat or cancelled
+          if (err instanceof Error && err.name === "AbortError") return;
           console.error("Transcription error:", err);
           setMessages(prev => prev.map(m =>
             m.id === voiceMsgId
@@ -3794,6 +3867,7 @@ const Chat = () => {
           toast({ title: "Transcription failed", description: err instanceof Error ? err.message : "Could not reach the transcription service.", variant: "destructive" });
         } finally {
           setVoiceState("idle");
+          transcribeAbortRef.current = null;
         }
       };
 
@@ -3945,6 +4019,8 @@ const Chat = () => {
   const [wordSuffix, setWordSuffix] = useState<string>("");
   // Debounce timer for AI ghost-text — avoids a fetch on every keystroke
   const ghostDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // AbortController for any in-flight /autocomplete request — cancelled on send
+  const ghostAbortRef = useRef<AbortController | null>(null);
 
   // Rebuild trie whenever messages or documents change.
   useEffect(() => {
@@ -4452,6 +4528,10 @@ const Chat = () => {
     preview: string,
     msgs: Message[],
   ) => {
+    if (deletedConvIdsRef.current.has(convId)) {
+      console.warn("saveConversationToDB skipped: conversation deleted", convId);
+      return;
+    }
     const authHeader = getAuthHeader();
     if (!authHeader.Authorization) {
       console.warn("saveConversationToDB skipped: no auth token available", { convId, title, preview, messageCount: msgs.length });
@@ -4484,6 +4564,8 @@ const Chat = () => {
             reportMeta:       m.reportMeta       ?? undefined,
             thinkingSteps:    m.thinkingSteps    ?? undefined,
             voiceTranscript:  m.voiceTranscript  ?? undefined,
+            voiceDuration:   m.voiceDuration   ?? undefined,
+            voiceWaveform:   m.voiceWaveform   ?? undefined,
             callCard:         m.callCard         ?? undefined,
             attachedDocIds:   m.attachedDocIds   ?? undefined,
             navAction:        m.navAction        ?? undefined,
@@ -4992,6 +5074,7 @@ const Chat = () => {
 
   const startNewConversation = () => {
     setActiveConvId("");
+    activeConvIdRef.current = "";
     setSessionId(null);
     sessionIdRef.current = null;
     setMessages([]);
@@ -5000,8 +5083,8 @@ const Chat = () => {
   };
 
   const ensureActiveConversationId = () => {
-    if (activeConvId) return activeConvId;
-    const newId = Date.now().toString();
+    if (activeConvIdRef.current) return activeConvIdRef.current;
+    const newId = createUniqueId("conv-");
     setActiveConvId(newId);
     activeConvIdRef.current = newId;  // sync update so runStreamingQuery reads it immediately
     return newId;
@@ -5024,6 +5107,7 @@ const Chat = () => {
     if (conv.messages && conv.messages.length > 0) {
       console.log("⚡ Using fast path: messages already in memory");
       setActiveConvId(conv.id);
+      activeConvIdRef.current = conv.id;
       setSessionId(null);
       sessionIdRef.current = null;
       setMessages(conv.messages);
@@ -5060,6 +5144,7 @@ const Chat = () => {
 
     // Commit to loading this conversation only after we know we have a token
     setActiveConvId(conv.id);
+    activeConvIdRef.current = conv.id;
     setSessionId(null);
     sessionIdRef.current = null;
     setConvLoading(true);
@@ -5085,7 +5170,7 @@ const Chat = () => {
           // Then spread payload if the backend nests rich fields there
           ...(m.payload ?? {}),
           // Always ensure these core fields are correct types and can't be overwritten
-          id:        m.id ?? Date.now().toString(),
+          id:        m.id ?? createUniqueId("msg-"),
           role:      m.role as "user" | "assistant",
           content:   m.content ?? "",
           timestamp: new Date(m.timestamp ?? (m.payload?.timestamp) ?? Date.now()),
@@ -5141,8 +5226,20 @@ const Chat = () => {
   };
 
   const deleteConversation = async (convId: string) => {
+    // Mark as deleted first so any in-flight response won't re-insert it
+    deletedConvIdsRef.current.add(convId);
     setConversations(prev => prev.filter(c => c.id !== convId));
-    if (convId === activeConvId) startNewConversation();
+    if (convId === activeConvId) {
+      // Abort any in-flight transcription or streaming for this conversation
+      transcribeAbortRef.current?.abort();
+      transcribeAbortRef.current = null;
+      mediaRecorderRef.current?.stop();
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setVoiceState("idle");
+      setIsLoading(false);
+      startNewConversation();
+    }
     if (currentUser) {
       try {
         const base = getApiBase();
@@ -5158,6 +5255,7 @@ const Chat = () => {
   // Used by handleSend, handleRedo, and handleEditSubmit so they all get
   // thinking steps and the SSE stream.
   const runStreamingQuery = useCallback(async (query: string, forceRoute?: string, pendingDocIdsToCommit: string[] = []) => {
+    console.log("[Chat] runStreamingQuery", { query, forceRoute, selectedModel, pendingDocIdsToCommit });
     setThinkingSteps([]);
     setThinkingExpanded(true);
     setIsLoading(true);
@@ -5190,6 +5288,7 @@ const Chat = () => {
           // Commit any files uploaded before this message so the backend indexes them
           // into the user/session collection before running the vector search.
           pending_doc_ids: pendingDocIdsToCommit,
+          preferred_provider: selectedModel,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -5245,7 +5344,7 @@ const Chat = () => {
                 setTimeout(() => _fetchReport(), 500);
               }
               resultMsg = {
-                id: Date.now().toString(),
+                id: createUniqueId("msg-"),
                 role: "assistant",
                 content: event.answer,
                 rawAnswer: event.raw_answer ?? event.answer,
@@ -5357,7 +5456,7 @@ const Chat = () => {
                 setTimeout(() => _fetchReport2(), 500);
               }
               resultMsg = {
-                id:          Date.now().toString(),
+                id:          createUniqueId("msg-"),
                 role:        "assistant",
                 content:     event.answer,
                 rawAnswer:   event.raw_answer ?? event.answer,
@@ -5444,7 +5543,7 @@ const Chat = () => {
             } else if (event.type === "result") {
               if (event.session_id) { setSessionId(event.session_id); sessionIdRef.current = event.session_id; loadDocuments(event.session_id); }
               resultMsg = {
-                id:        Date.now().toString(),
+                id:        createUniqueId("msg-"),
                 role:      "assistant",
                 content:   event.answer,
                 rawAnswer: event.answer,
@@ -5488,6 +5587,12 @@ const Chat = () => {
   const handleSendDirectRef = useRef<(() => Promise<void>) | null>(null);
 
   const handleSend = async () => {
+    // ── Cancel any pending ghost-text activity immediately ───────────────
+    if (ghostDebounceRef.current) { clearTimeout(ghostDebounceRef.current); ghostDebounceRef.current = null; }
+    if (ghostAbortRef.current) { ghostAbortRef.current.abort(); ghostAbortRef.current = null; }
+    setWordSuffix("");
+    // ─────────────────────────────────────────────────────────────────────
+
     const rawInput = inputOverrideRef.current ?? input;
     inputOverrideRef.current = null;
     const trimmedInput = rawInput.trim();
@@ -5542,8 +5647,8 @@ const Chat = () => {
     })();
 
     if (_softNav) {
-      const userId   = Date.now().toString();
-      const assistId = (Date.now() + 1).toString();
+      const userId   = createUniqueId("msg-");
+      const assistId = createUniqueId("msg-");
       const userMsg: Message = {
         id: userId,
         role: "user",
@@ -5576,7 +5681,7 @@ const Chat = () => {
     // Snapshot pendingDocIds BEFORE clearing so we can send them with the query request
     const snapshotDocIds = [...pendingDocIds];
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: createUniqueId("msg-"),
       role: "user",
       content: trimmedInput,
       timestamp: new Date(),
@@ -5673,7 +5778,7 @@ const Chat = () => {
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = {
-        id: (Date.now() + 1).toString(),
+        id: createUniqueId("msg-"),
         role: "assistant",
         content: `Sorry, I encountered an error: ${msg}. Please try again.`,
         timestamp: new Date(),
@@ -5700,7 +5805,7 @@ const Chat = () => {
       const last = prev[prev.length - 1];
       if (last?.role === "assistant") return prev;
       return [...prev, {
-        id: Date.now().toString(),
+        id: createUniqueId("msg-"),
         role: "assistant" as const,
         content: "⏸ Response stopped.",
         timestamp: new Date(),
@@ -5752,10 +5857,17 @@ const Chat = () => {
     const trimmed = before.trim();
     if (trimmed.length >= 4 && !isLoading) {
       ghostDebounceRef.current = setTimeout(async () => {
+        // Create a fresh AbortController for this fetch
+        const ac = new AbortController();
+        ghostAbortRef.current = ac;
         const base = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000";
         const docNames = documents.map((d: { filename: string }) => d.filename);
-        const suffix = await fetchAICompletion(before, messages, base, docNames);
-        setWordSuffix(suffix);
+        const suffix = await fetchAICompletion(before, messages, base, docNames, ac.signal);
+        // Only apply if this request wasn't aborted
+        if (!ac.signal.aborted) {
+          setWordSuffix(suffix);
+          ghostAbortRef.current = null;
+        }
       }, 280);
     }
   };
@@ -5938,7 +6050,7 @@ const Chat = () => {
       setTypingMessageId(assistantMsg.id);
     } catch (error) {
       const msg = serializeError(error);
-      const errorMsg: Message = { id: Date.now().toString(), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };
+      const errorMsg: Message = { id: createUniqueId("msg-"), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };
       if (activeConvIdRef.current === originConvId) {
         setMessages(prev => [...prev, errorMsg]);
       }
@@ -7155,7 +7267,7 @@ const Chat = () => {
                         </div>
                       </div>
                     </div>
-                  ) : msg.voiceBlobUrl ? (
+                  ) : msg.voiceBlobUrl || msg.voiceTranscript ? (
                     <VoiceMessageBubble
                       blobUrl={msg.voiceBlobUrl}
                       duration={msg.voiceDuration ?? 0}
@@ -7270,7 +7382,7 @@ const Chat = () => {
                         onSelect={async (hint) => {
                           if (isLoading) return;
                           const userMsg: Message = {
-                            id: Date.now().toString(),
+                            id: createUniqueId("msg-"),
                             role: "user",
                             content: hint,
                             timestamp: new Date(),
@@ -7288,7 +7400,7 @@ const Chat = () => {
                             fireNotification();
                           } catch (error) {
                             const errMsg: Message = {
-                              id: (Date.now() + 1).toString(),
+                              id: createUniqueId("msg-"),
                               role: "assistant",
                               content: `Sorry, I encountered an error: ${serializeError(error)}`,
                               timestamp: new Date(),
@@ -7312,7 +7424,7 @@ const Chat = () => {
                         onSelect={async (hint) => {
                           if (isLoading) return;
                           const userMsg: Message = {
-                            id: Date.now().toString(),
+                            id: createUniqueId("msg-"),
                             role: "user",
                             content: hint,
                             timestamp: new Date(),
@@ -7330,7 +7442,7 @@ const Chat = () => {
                             fireNotification();
                           } catch (error) {
                             const errMsg: Message = {
-                              id: (Date.now() + 1).toString(),
+                              id: createUniqueId("msg-"),
                               role: "assistant",
                               content: `Sorry, I encountered an error: ${serializeError(error)}`,
                               timestamp: new Date(),
@@ -7361,7 +7473,7 @@ const Chat = () => {
                             </button>
                             <button
                               onClick={() => {
-                                const replyId = Date.now().toString();
+                                const replyId = createUniqueId("msg-");
                                 setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, navAction: null } : m));
                                 setMessages(prev => [...prev, { id: replyId, role: "assistant", content: "No problem! Ask away — I'll do my best right here.", rawAnswer: "No problem! Ask away — I'll do my best right here.", timestamp: new Date() }]);
                                 setTypingMessageId(replyId);
@@ -7828,8 +7940,8 @@ const Chat = () => {
         {/* Input */}
         <div
           ref={inputAreaRef}
-          className={`overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messages.length > 0 ? "relative border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent"}`}
-          style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 80px))" } : {}}
+          className={`transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messages.length > 0 ? "relative z-10 border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm overflow-visible" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent overflow-visible"}`}
+          style={messages.length === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 60px))" } : {}}
           onDragEnter={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current++; setIsChatDragOver(true); }}
           onDragLeave={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current--; if (chatDragCounterRef.current === 0) setIsChatDragOver(false); }}
           onDragOver={e => e.preventDefault()}
@@ -8124,19 +8236,79 @@ const Chat = () => {
                           : "placeholder:opacity-100 placeholder:text-muted-foreground/60"
                       } placeholder:align-middle`}
                     />
-                    {/* Ghost-text suffix — never shown on empty input */}
+                    {/* Ghost-text suffix — overlaid on top of the textarea, never shown on empty input */}
                     {wordSuffix && input.length > 0 && !autocomplete && (
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute left-0 top-0 w-full h-full flex items-center text-sm leading-5 whitespace-pre-wrap break-words select-none px-0 py-1.5"
-                        style={{ color: "transparent" }}
+                        className="pointer-events-none absolute inset-0 flex items-center text-sm leading-5 select-none py-1.5 overflow-hidden"
+                        style={{ left: "calc(1.75rem + 6px)", color: "transparent" }}
                       >
-                        <span>{input}</span>
-                        <span className="text-muted-foreground/40">{wordSuffix}</span>
+                        <span className="whitespace-pre">{input}</span>
+                        <span className="text-muted-foreground/40 whitespace-pre">{wordSuffix}</span>
                       </span>
                     )}
                   </div>
                   )}
+
+                  {/* ── Model Picker ── */}
+                  <div ref={modelDropdownRef} className="relative shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setModelDropdownOpen(o => !o)}
+                      className="group flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-medium text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-all border border-transparent hover:border-border/40"
+                      title="Select model"
+                    >
+                      <span
+                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: MODEL_OPTIONS.find(m => m.id === selectedModel)?.color ?? "#60a5fa" }}
+                      />
+                      <span className="tabular-nums">{MODEL_OPTIONS.find(m => m.id === selectedModel)?.shortLabel}</span>
+                      <ChevronDown className={`h-3 w-3 transition-transform duration-150 ${modelDropdownOpen ? "rotate-180" : ""}`} />
+                    </button>
+
+                    <AnimatePresence>
+                      {modelDropdownOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 6, scale: 0.97 }}
+                          transition={{ duration: 0.13 }}
+                          className="absolute bottom-full mb-2 left-0 z-[9999] bg-card border border-border rounded-xl shadow-xl overflow-hidden min-w-[220px]"
+                        >
+                          <div className="px-3 py-2 border-b border-border/60">
+                            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Select Model</p>
+                          </div>
+                          {MODEL_OPTIONS.map(opt => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedModel(opt.id);
+                                setModelDropdownOpen(false);
+                              }}
+                              className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors ${
+                                selectedModel === opt.id
+                                  ? "bg-primary/8 text-foreground"
+                                  : "hover:bg-muted text-foreground/70 hover:text-foreground"
+                              }`}
+                            >
+                              <span
+                                className="h-2 w-2 rounded-full shrink-0"
+                                style={{ backgroundColor: opt.color }}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[12px] font-medium leading-none mb-0.5">{opt.label}</p>
+                                <p className="text-[10px] text-muted-foreground/60 leading-none">{opt.desc}</p>
+                              </div>
+                              {selectedModel === opt.id && (
+                                <Check className="h-3 w-3 text-primary shrink-0" />
+                              )}
+                            </button>
+                          ))}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
 
                   {/* Notify toggle */}
                   {notifyDismissed && (

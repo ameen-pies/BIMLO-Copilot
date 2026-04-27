@@ -150,6 +150,9 @@ class AgentState(TypedDict):
     # voice call optimisation — skips expensive judge/source/retry nodes
     voice_mode: bool
 
+    # user-selected model provider — forwarded to call_llm
+    preferred_provider: Optional[str]
+
     # internal: stores chunks from prior iterative_rag iterations for merge in rerank_merge
     _prev_retrieved_chunks: List[Dict]
 
@@ -232,6 +235,7 @@ class CloudflareClient:
             max_tokens=max_tokens,
             temperature=temperature,
             task=task,
+            preferred_provider=getattr(self, '_preferred_provider', None),
         )
 
 
@@ -629,13 +633,17 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
         # Store callback on instance so node wrappers can access it without going through state
         # (state keys starting with _ are stripped by pydantic/langgraph)
         self._status_callback = status_callback or (lambda *_: None)
         self._voice_mode = voice_mode
+        # Store preferred provider so CloudflareClient.complete() can forward it to call_llm
+        self._preferred_provider = preferred_provider
+        if self.llm:
+            self.llm._preferred_provider = preferred_provider
 
         # In voice mode skip the status-message LLM call — it's a full round-trip
         # just to produce pretty UI strings, which aren't shown during a call anyway.
@@ -675,6 +683,7 @@ class RAGEngine:
             "user_id": user_id,
             "error": None,
             "voice_mode": voice_mode,
+            "preferred_provider": preferred_provider,
         }
         
         print(f"\n{'='*80}")
@@ -986,7 +995,12 @@ Now generate for: "{q}" """
         # ── Stage 1: Intent classifier (separate LLM call, chain-of-thought) ──
         try:
             from intent_classifier import classify_intent
-            intent = classify_intent(query, history, route_log)
+            intent = classify_intent(
+                query,
+                history,
+                route_log,
+                preferred_provider=state.get("preferred_provider"),
+            )
             intent_hint = (
                 f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
                 f"  primary_intent: {intent.primary_intent}\n"
@@ -2447,6 +2461,8 @@ Remember: ALL text fields must be in {target_lang}."""
         history    = state.get("conversation_history", [])
         session_id = state.get("session_id", "")
 
+        from llm_client import call_llm
+
         cb = getattr(self, "_status_callback", None)
         if callable(cb):
             msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
@@ -2529,6 +2545,7 @@ Remember: ALL text fields must be in {target_lang}."""
                         max_tokens=80,
                         temperature=0.0,
                         task="classify",
+                        preferred_provider=state.get("preferred_provider"),
                     )
                     import json as _j, re as _re2
                     _clean = _re2.sub(r"```(?:json)?|```", "", _raw).strip()

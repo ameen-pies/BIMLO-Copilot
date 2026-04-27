@@ -121,15 +121,17 @@ def classify_intent(
     query: str,
     history: Optional[List[Dict]] = None,
     route_log: Optional[List[Dict]] = None,
+    preferred_provider: Optional[str] = None,
 ) -> IntentAnalysis:
     """
     Classify the intent of a query using the LLM.
     Falls back to heuristic classification if the LLM is unavailable.
 
     Args:
-        query:     The current user message.
-        history:   Conversation history [{role, content}, ...].
-        route_log: Per-session route log from AgentState._route_log.
+        query:              The current user message.
+        history:            Conversation history [{role, content}, ...].
+        route_log:          Per-session route log from AgentState._route_log.
+        preferred_provider: Optional provider hint to honor user-selected model.
 
     Returns:
         IntentAnalysis with suggested_route and rich metadata.
@@ -155,6 +157,7 @@ def classify_intent(
             max_tokens=500,
             temperature=0.0,
             task="classify",
+            preferred_provider=preferred_provider,
         )
 
         return _parse_result(raw)

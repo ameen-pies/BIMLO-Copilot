@@ -335,13 +335,14 @@ def clear_history(session_id: str):
 # ============================================================================
 
 class QueryRequest(BaseModel):
-    query:           str
-    top_k:           Optional[int]  = 5
-    session_id:      Optional[str]  = None   # omit → new session created automatically
-    force_route:     Optional[str]  = None   # e.g. "graph" — bypasses the LLM router
-    voice_mode:      Optional[bool] = False  # True → skip citation check, source formatting, iterative loops
-    conversation_id: Optional[str]  = None   # frontend conv ID — auto-save writes under this node
-    pending_doc_ids: Optional[List[str]] = []  # doc IDs uploaded but not yet committed to vector store
+    query:              str
+    top_k:              Optional[int]  = 5
+    session_id:         Optional[str]  = None
+    force_route:        Optional[str]  = None
+    voice_mode:         Optional[bool] = False
+    conversation_id:    Optional[str]  = None
+    pending_doc_ids:    Optional[List[str]] = []
+    preferred_provider: Optional[str]  = None  # "cf_primary" | "cf_backup" | "groq" | "nvidia"
 
 
 class QueryResponse(BaseModel):
@@ -568,7 +569,7 @@ async def query_documents(
         if pending_doc_ids:
             print(f"📎 /query: {len(pending_doc_ids)} doc(s) attached to this message: {pending_doc_ids}")
 
-        print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns]")
+        print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns, preferred_provider={request.preferred_provider!r}]")
 
         # Run the RAG engine with server-side history
         prev_route = _session_routes.get(session_id, "")
@@ -583,6 +584,7 @@ async def query_documents(
             session_id=session_id,
             user_id=user_id,
             voice_mode=request.voice_mode,
+            preferred_provider=request.preferred_provider,
         )
 
         # Store this turn in server-side history (clean, no [N] citation markers)
@@ -665,11 +667,13 @@ async def query_stream(
     prev_route = _session_routes.get(session_id, "")
     route_log  = get_route_log(session_id)
 
+    print(f"🔧 /query-stream preferred_provider={request.preferred_provider!r}")
     # Thread-safe queue: background thread pushes SSE events, async generator reads them
     q: queue.Queue = queue.Queue()
     DONE_SENTINEL = object()
 
     def status_callback(node: str, icon: str, message: str):
+        print(f"[SSE status] node={node} icon={icon} message={message}")
         q.put({"type": "status", "node": node, "icon": icon, "message": message})
 
     def run_query():
@@ -685,7 +689,9 @@ async def query_stream(
                 session_id=session_id,
                 user_id=user_id,
                 voice_mode=request.voice_mode,
+                preferred_provider=request.preferred_provider,
             )
+            print(f"✅ /query-stream done route={result.get('route')!r} preferred_provider={request.preferred_provider!r}")
             # Persist session
             import re as _re
             clean_answer = _re.sub(r'\s*\[\d+\]', '', result["answer"]).strip()

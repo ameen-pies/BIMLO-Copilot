@@ -1,15 +1,19 @@
 """
 llm_client.py — Shared LLM gateway for all Bimlo services
 
-Priority chain:
+User-selectable providers:
+  "cf_primary"  — Cloudflare Workers AI primary worker
+  "cf_backup"   — Cloudflare Workers AI backup worker
+  "groq"        — Groq API (llama-3.3-70b-versatile / llama-3.1-8b-instant)
+  "nvidia"      — NVIDIA NIM API (deepseek-ai/deepseek-v4-pro)
+
+When preferred_provider is set, that provider is tried first. If it fails,
+the call falls through to the standard priority chain so responses are never lost.
+
+Standard priority chain (when no preference is set):
   1. Cloudflare Workers AI — Primary   (CF_API_KEY  / CF_API_URL)
   2. Cloudflare Workers AI — Backup    (CF_BACKUP_API_KEY / CF_BACKUP_URL)
-  3. Groq API              — Last resort (GROQ_API_KEY)
-
-Fallback triggers automatically on:
-  - CF returning any non-200 status (including 500 quota errors like 4006)
-  - CF connection timeout / network error
-  - CF_API_KEY not set
+  3. Groq API                          (GROQ_API_KEY)
 
 Env vars:
   CF_API_KEY         — primary worker bearer token
@@ -17,6 +21,7 @@ Env vars:
   CF_BACKUP_URL      — backup worker URL        (default: bimlo.amepies3.workers.dev)
   CF_BACKUP_API_KEY  — backup worker token      (falls back to CF_API_KEY if omitted)
   GROQ_API_KEY       — Groq last-resort key
+  NVIDIA_API_KEY     — NVIDIA NIM API key (nvapi-...)
 """
 
 from __future__ import annotations
@@ -31,18 +36,13 @@ from typing import List, Dict, Optional
 # Config
 # ---------------------------------------------------------------------------
 
-_CF_DEFAULT_URL     = "https://bimloapi.medhelaliamin125.workers.dev"
-_CF_BACKUP_URL      = "https://bimlo.amepies3.workers.dev/"
-_GROQ_API_URL       = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL_PRIMARY = "llama-3.3-70b-versatile"
-_GROQ_MODEL_FAST    = "llama-3.1-8b-instant"
-
-# ---------------------------------------------------------------------------
-# Rate-limit and quota handling
-# ---------------------------------------------------------------------------
-# The CF worker fallbacks are handled immediately on failure, without any
-# per-worker retry state or persistence.
-
+_CF_DEFAULT_URL      = "https://bimloapi.medhelaliamin125.workers.dev"
+_CF_BACKUP_URL       = "https://bimlo.amepies3.workers.dev/"
+_GROQ_API_URL        = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL_PRIMARY  = "llama-3.3-70b-versatile"
+_GROQ_MODEL_FAST     = "llama-3.1-8b-instant"
+_NVIDIA_API_URL      = "https://integrate.api.nvidia.com/v1/chat/completions"
+_NVIDIA_MODEL        = "deepseek-ai/deepseek-v4-pro"
 
 # ---------------------------------------------------------------------------
 # Internal: single CF worker call
@@ -153,6 +153,72 @@ def _call_groq(
 
 
 # ---------------------------------------------------------------------------
+# Internal: NVIDIA NIM call (deepseek-v4-pro)
+# ---------------------------------------------------------------------------
+
+def _call_nvidia(
+    messages: List[Dict],
+    max_tokens: int,
+    temperature: float,
+    reason: str,
+) -> str:
+    """
+    Call NVIDIA NIM endpoint (deepseek-ai/deepseek-v4-pro) via the OpenAI-compatible REST API.
+    Uses NVIDIA_API_KEY env var. Returns "" on failure so the caller can fall through.
+
+    NOTE: `extra_body` / `chat_template_kwargs` is an OpenAI *Python SDK* concept and must NOT
+    be sent as a top-level JSON field to the REST endpoint — NVIDIA will return 422 and silently
+    fall through to Groq.  The correct way to disable DeepSeek chain-of-thought over REST is to
+    pass `chat_template_kwargs` as a sibling of `model` directly in the JSON body.
+    """
+    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    if not nvidia_key:
+        print("⚠️  llm_client: NVIDIA_API_KEY not set — skipping NVIDIA provider")
+        return ""
+
+    payload = {
+        "model":       _NVIDIA_MODEL,
+        "messages":    messages,
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+        "top_p":       0.95,
+        "stream":      False,
+        # ↓ Correct REST form — NOT nested under "extra_body"
+        "chat_template_kwargs": {"thinking": False},
+    }
+    headers = {
+        "Authorization": f"Bearer {nvidia_key}",
+        "Content-Type":  "application/json",
+    }
+
+    masked_key = nvidia_key[:8] + "..." + nvidia_key[-4:]
+    print(f"🟢 [llm_client] NVIDIA NIM → model={_NVIDIA_MODEL} | key={masked_key} | reason={reason}")
+
+    for attempt in range(3):
+        try:
+            resp = requests.post(_NVIDIA_API_URL, headers=headers, json=payload, timeout=90)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw = data["choices"][0]["message"]["content"]
+                print(f"✅ [llm_client] NVIDIA NIM responded ({len(raw)} chars) — model={_NVIDIA_MODEL}")
+                return raw if isinstance(raw, str) else str(raw)
+            elif resp.status_code == 429:
+                wait = 2 ** attempt
+                print(f"⚠️  llm_client: NVIDIA rate-limited — retrying in {wait}s ({attempt + 1}/3)")
+                time.sleep(wait)
+            else:
+                # Log the FULL error body so failures are never silent
+                print(f"❌ llm_client: NVIDIA returned HTTP {resp.status_code} — {resp.text[:300]}")
+                break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                print(f"❌ llm_client: NVIDIA request exception — {e}")
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Public: unified LLM call
 # ---------------------------------------------------------------------------
 
@@ -163,23 +229,27 @@ def call_llm(
     max_tokens: int = 1200,
     temperature: float = 0.3,
     task: str = "synthesise",
+    preferred_provider: Optional[str] = None,
 ) -> str:
     """
     Send a prompt to the LLM.
 
-    Priority: CF Primary → CF Backup → Groq
-    Quota-exhausted workers are skipped for 12h automatically.
+    Priority: preferred_provider (if set) → CF Primary → CF Backup → Groq
+    Fallback is always attempted if the preferred provider fails.
 
     Args:
-        prompt:        The current user turn / instruction.
-        system_prompt: Optional system instruction.
-        history:       Prior [{role, content}] turns (capped by worker at 10).
-        max_tokens:    Token budget. ≤50 → fast model on both providers.
-        temperature:   Sampling temperature.
-        task:          Hint for the CF worker (synthesise / plan / classify …).
+        prompt:             The current user turn / instruction.
+        system_prompt:      Optional system instruction.
+        history:            Prior [{role, content}] turns (capped by worker at 10).
+        max_tokens:         Token budget. ≤50 → fast model on both providers.
+        temperature:        Sampling temperature.
+        task:               Hint for the CF worker (synthesise / plan / classify …).
+        preferred_provider: One of "cf_primary", "cf_backup", "groq", "nvidia".
+                            If set, that provider is tried first; falls back on failure.
+                            "nvidia" uses deepseek-ai/deepseek-v4-pro via NVIDIA NIM.
 
     Returns:
-        Generated text string, or "" if all three providers fail.
+        Generated text string, or "" if all providers fail.
     """
     messages: List[Dict] = []
     if system_prompt:
@@ -198,34 +268,111 @@ def call_llm(
         "task":         task,
     }
 
-    # ── 1. CF Primary ────────────────────────────────────────────────────────
+    # Resolve CF keys once — used across all CF routing below
     cf_primary_key = os.getenv("CF_API_KEY", "").strip()
     cf_primary_url = os.getenv("CF_API_URL", _CF_DEFAULT_URL)
+    cf_backup_key  = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
+    cf_backup_url  = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
 
-    if cf_primary_key:
-        text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary")
-        if text is not None:
-            return text
-        print(f"⚠️  llm_client: CF primary failed ({reason}) — trying backup worker")
-    else:
-        print("⚠️  llm_client: CF_API_KEY not set — skipping primary, trying backup")
+    print(f"🧠 llm_client: call_llm preferred_provider={preferred_provider or 'auto'} max_tokens={max_tokens} task={task}")
+    last_reason: str = "no providers tried"
 
-    # ── 2. CF Backup ─────────────────────────────────────────────────────────
-    cf_backup_key = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
-    cf_backup_url = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
+    # ── User-preferred provider (tried first) ─────────────────────────────────
+    if preferred_provider == "cf_primary":
+        if cf_primary_key:
+            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary")
+            if text is not None:
+                return text
+            last_reason = reason or "cf_primary failed"
+            print(f"⚠️  llm_client: preferred cf_primary failed ({last_reason}) — falling through to backup")
+        else:
+            last_reason = "CF_API_KEY not set"
+            print(f"⚠️  llm_client: preferred cf_primary requested but {last_reason}")
 
-    if cf_backup_key:
-        text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup")
-        if text is not None:
-            print("✅ llm_client: CF backup worker answered")
-            return text
-        print(f"⚠️  llm_client: CF backup also failed ({reason}) — falling back to Groq")
-    else:
-        reason = "no CF key available for backup worker"
-        print(f"⚠️  llm_client: {reason}")
+    elif preferred_provider == "cf_backup":
+        if cf_backup_key:
+            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup")
+            if text is not None:
+                return text
+            last_reason = reason or "cf_backup failed"
+            print(f"⚠️  llm_client: preferred cf_backup failed ({last_reason}) — falling through")
+        else:
+            last_reason = "no CF backup key available"
+            print(f"⚠️  llm_client: preferred cf_backup requested but {last_reason}")
 
-    # ── 3. Groq (last resort) ────────────────────────────────────────────────
-    return _call_groq(messages, max_tokens, temperature, reason or "both CF workers unavailable")
+    elif preferred_provider == "groq":
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        if groq_key:
+            result = _call_groq(messages, max_tokens, temperature, "user-selected groq")
+            if result:
+                return result
+            last_reason = "groq returned empty"
+            print(f"⚠️  llm_client: preferred groq failed — falling through to CF workers")
+        else:
+            last_reason = "GROQ_API_KEY not set"
+            print(f"⚠️  llm_client: preferred groq requested but {last_reason}")
+
+    elif preferred_provider == "nvidia":
+        nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
+        if nvidia_key:
+            result = _call_nvidia(messages, max_tokens, temperature, "user-selected nvidia")
+            if result:
+                return result
+            last_reason = "nvidia returned empty or failed"
+            print(f"⚠️  llm_client: preferred nvidia failed — falling through to CF workers")
+        else:
+            last_reason = "NVIDIA_API_KEY not set"
+            print(f"⚠️  llm_client: preferred nvidia requested but {last_reason}")
+
+    # ── Standard priority fallback chain ──────────────────────────────────────
+    # Each provider is skipped if it was already tried as preferred_provider above.
+    # This prevents double-calling and keeps the log honest.
+
+    if preferred_provider and preferred_provider not in ("cf_primary", "cf_backup", "groq", "nvidia"):
+        print(f"⚠️  llm_client: unknown preferred_provider={preferred_provider!r} — using auto chain")
+
+    # CF Primary
+    if preferred_provider != "cf_primary":
+        if cf_primary_key:
+            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary")
+            if text is not None:
+                return text
+            last_reason = reason or "cf_primary failed"
+            print(f"⚠️  llm_client: CF primary failed ({last_reason}) — trying backup worker")
+        else:
+            print("⚠️  llm_client: CF_API_KEY not set — skipping primary, trying backup")
+
+    # CF Backup
+    if preferred_provider != "cf_backup":
+        if cf_backup_key:
+            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup")
+            if text is not None:
+                print("✅ llm_client: CF backup worker answered")
+                return text
+            last_reason = reason or "cf_backup failed"
+            print(f"⚠️  llm_client: CF backup also failed ({last_reason}) — falling back to Groq")
+        else:
+            last_reason = "no CF key available for backup worker"
+            print(f"⚠️  llm_client: {last_reason}")
+
+    # Groq — skip if already tried as preferred OR if nvidia was preferred (keep nvidia opt-in only)
+    if preferred_provider not in ("groq", "nvidia"):
+        result = _call_groq(messages, max_tokens, temperature, last_reason)
+        if result:
+            return result
+        last_reason = "groq also failed"
+    elif preferred_provider == "groq":
+        pass  # already tried above, skip
+    # nvidia preferred but failed → still fall through to Groq as last resort
+    elif preferred_provider == "nvidia":
+        print(f"⚠️  llm_client: NVIDIA preferred but failed — falling back to Groq as last resort")
+        result = _call_groq(messages, max_tokens, temperature, last_reason)
+        if result:
+            return result
+
+    # NVIDIA is NOT in the automatic fallback chain for non-nvidia requests.
+    # It is opt-in only via preferred_provider to avoid burning free-tier quota silently.
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -274,5 +421,9 @@ def check_llm_available() -> tuple[bool, str]:
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     if groq_key:
         return True, "Groq (last resort)"
+
+    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    if nvidia_key:
+        return True, "NVIDIA NIM (deepseek-v4-pro)"
 
     return False, "none"
