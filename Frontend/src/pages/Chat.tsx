@@ -15,6 +15,61 @@ import BorderGlow from "@/components/BorderGlow";
 import { useAuth } from "@/context/AuthContext";
 import { ProfileBubble } from "@/components/Navbar";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ShinyText — inline shimmer effect for agent thinking steps
+// ─────────────────────────────────────────────────────────────────────────────
+import { useMotionValue, useAnimationFrame, useTransform } from "framer-motion";
+
+const ShinyText = ({
+  text,
+  speed = 2.5,
+  color = "hsl(var(--muted-foreground) / 0.45)",
+  shineColor = "hsl(var(--foreground) / 0.85)",
+  spread = 120,
+  className = "",
+}: {
+  text: string;
+  speed?: number;
+  color?: string;
+  shineColor?: string;
+  spread?: number;
+  className?: string;
+}) => {
+  const progress = useMotionValue(0);
+  const elapsedRef = React.useRef(0);
+  const lastTimeRef = React.useRef<number | null>(null);
+  const animationDuration = speed * 1000;
+
+  useAnimationFrame(time => {
+    if (lastTimeRef.current === null) { lastTimeRef.current = time; return; }
+    const delta = time - lastTimeRef.current;
+    lastTimeRef.current = time;
+    elapsedRef.current += delta;
+    const cycleTime = elapsedRef.current % animationDuration;
+    progress.set((cycleTime / animationDuration) * 100);
+  });
+
+  const backgroundPosition = useTransform(progress, p => `${150 - p * 2}% center`);
+
+  return (
+    <motion.span
+      className={className}
+      style={{
+        backgroundImage: `linear-gradient(${spread}deg, ${color} 0%, ${color} 35%, ${shineColor} 50%, ${color} 65%, ${color} 100%)`,
+        backgroundSize: "200% auto",
+        WebkitBackgroundClip: "text",
+        backgroundClip: "text",
+        WebkitTextFillColor: "transparent",
+        display: "inline-block",
+        backgroundPosition,
+      }}
+    >
+      {text}
+    </motion.span>
+  );
+};
+
+
 interface ThinkingStep { node: string; icon: string; message: string; ts: number; }
 
 interface Message {
@@ -3521,6 +3576,12 @@ const Chat = () => {
   // ── Model selector ──────────────────────────────────────────────────────
   type ModelProvider = "cf_primary" | "cf_backup" | "groq" | "nvidia";
   const [selectedModel, setSelectedModel] = useState<ModelProvider>("cf_primary");
+  // Ref always tracks latest selectedModel so runStreamingQuery's useCallback
+  // can read it without a stale closure — avoids adding selectedModel to the
+  // dep array which would break in-flight streams on every model switch.
+  const selectedModelRef = useRef<ModelProvider>("cf_primary");
+  useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
+
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -3543,11 +3604,26 @@ const Chat = () => {
     { id: "cf_primary",  label: "Cloudflare Primary",  shortLabel: "CF Primary",  desc: "Primary Cloudflare Workers AI",    color: "#f97316" },
     { id: "cf_backup",   label: "Cloudflare Backup",   shortLabel: "CF Backup",   desc: "Backup Cloudflare Workers AI",     color: "#3b82f6" },
     { id: "groq",        label: "Groq",                shortLabel: "Groq",        desc: "Groq (llama-3.3-70b-versatile)",   color: "#10b981" },
-    { id: "nvidia",      label: "NVIDIA NIM",          shortLabel: "NVIDIA",      desc: "DeepSeek V4 Pro via NVIDIA NIM",   color: "#76b900" },
+    { id: "nvidia",      label: "MiniMax M2.7",         shortLabel: "MiniMax",     desc: "MiniMax M2.7 via NVIDIA NIM",      color: "#76b900" },
   ];
 
   const isLoading_ref = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
+  // thinkingVisible stays true briefly after isLoading → false so the
+  // AnimatePresence exit animation has time to run before unmounting.
+  const [thinkingVisible, setThinkingVisible] = useState(false);
+  const thinkingLingerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep thinking panel visible for 350ms after loading ends so exit anim plays
+  React.useEffect(() => {
+    if (isLoading) {
+      if (thinkingLingerRef.current) clearTimeout(thinkingLingerRef.current);
+      setThinkingVisible(true);
+    } else {
+      thinkingLingerRef.current = setTimeout(() => setThinkingVisible(false), 350);
+    }
+    return () => { if (thinkingLingerRef.current) clearTimeout(thinkingLingerRef.current); };
+  }, [isLoading]);
   const [convLoading, setConvLoading] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { currentUser, showAuthModal, logout } = useAuth();
@@ -5288,7 +5364,7 @@ const Chat = () => {
           // Commit any files uploaded before this message so the backend indexes them
           // into the user/session collection before running the vector search.
           pending_doc_ids: pendingDocIdsToCommit,
-          preferred_provider: selectedModel,
+          preferred_provider: selectedModelRef.current,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -7193,62 +7269,7 @@ const Chat = () => {
               >
 
                 <div className={`group/msg relative ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end gap-0.5" : "max-w-[80%] space-y-2"}`}>
-                  {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
-                  {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
-                    const steps = msg.thinkingSteps;
-                    const stepKey = `thinking-${msg.id}`;
-                    const isOpen = openSourceKey === stepKey;
-                    const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
-                    return (
-                      <div className="flex flex-col gap-1 pl-0 mb-1">
-                        <button
-                          onClick={() => setOpenSourceKey(k => k === stepKey ? null : stepKey)}
-                          className="flex items-center gap-1.5 group/think w-fit"
-                        >
-                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary/30 shrink-0" />
-                          <span className="text-[11px] text-muted-foreground/40 italic leading-none">
-                            {steps[steps.length - 1]?.message ?? "Thought process"}
-                          </span>
-                          <motion.span
-                            animate={{ rotate: isOpen ? 180 : 0 }}
-                            transition={{ duration: 0.2 }}
-                            className="opacity-0 group-hover/think:opacity-60 transition-opacity"
-                          >
-                            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
-                          </motion.span>
-                        </button>
-                        <AnimatePresence>
-                          {isOpen && steps.length > 0 && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.18 }}
-                              className="overflow-hidden"
-                            >
-                              <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
-                                {steps.map((step, i) => {
-                                  const icon =
-                                    step.node === "retrieve"       ? <FileText className={cls} /> :
-                                    step.node === "rewrite_query"  ? <Search className={cls} /> :
-                                    step.node === "judge_plan"     ? <ScrollText className={cls} /> :
-                                    step.node === "synthesise"     ? <Pencil className={cls} /> :
-                                    step.node === "judge_evaluate" ? <Check className={cls} /> :
-                                                                     <Sparkles className={cls} />;
-                                  return (
-                                    <div key={`${step.node}-${i}`} className="flex items-center gap-1.5">
-                                      {icon}
-                                      <span className="text-[10px] text-muted-foreground/35 leading-snug">{step.message}</span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
-                    );
-                  })()}
+
                   {/* ── Voice message — rendered directly, bypasses group/bubble wrapper ── */}
                   {msg.callCard ? (
                     /* ── Call card — Messenger-style "You called" summary ── */
@@ -7800,19 +7821,19 @@ const Chat = () => {
               </motion.div>
             ))}
 
-            {isLoading && typingConvId === activeConvId && (
+            {thinkingVisible && typingConvId === activeConvId && (
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col gap-1.5"
               >
                 {/* Thinking steps above logo+dots */}
-                <AnimatePresence>
+                <AnimatePresence mode="wait">
                   {thinkingSteps.length > 0 && (
                     <motion.div
                       initial={{ opacity: 0, y: -4 }}
                       animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
+                      exit={{ opacity: 0, y: -4, transition: { duration: 0.25 } }}
                       transition={{ duration: 0.2 }}
                       className="flex flex-col gap-1"
                     >
@@ -7830,9 +7851,12 @@ const Chat = () => {
                           initial={{ opacity: 0, y: 2 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ duration: 0.18 }}
-                          className="text-[11px] text-muted-foreground/50 italic leading-none"
+                          className="text-[11px] italic leading-none"
                         >
-                          {thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
+                          <ShinyText
+                            text={thinkingSteps[thinkingSteps.length - 1]?.message ?? "Thinking…"}
+                            speed={2.2}
+                          />
                         </motion.span>
                         <motion.span
                           animate={{ rotate: thinkingExpanded ? 180 : 0 }}
@@ -7870,7 +7894,7 @@ const Chat = () => {
                                     className="flex items-center gap-1.5"
                                   >
                                     {icon}
-                                    <span className="text-[10px] text-muted-foreground/35 leading-snug">{step.message}</span>
+                                    <ShinyText text={step.message} speed={3.5} className="text-[10px] leading-snug" />
                                   </motion.div>
                                 );
                               })}
@@ -7881,12 +7905,14 @@ const Chat = () => {
                     </motion.div>
                   )}
                 </AnimatePresence>
-                {/* Logo + dots always same row */}
-                <div className="flex gap-3 items-center">
-                  <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
-                    <TypingIndicator />
+                {/* Logo + dots — only while actually loading */}
+                {isLoading && (
+                  <div className="flex gap-3 items-center">
+                    <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 inline-block">
+                      <TypingIndicator />
+                    </div>
                   </div>
-                </div>
+                )}
               </motion.div>
             )}
 

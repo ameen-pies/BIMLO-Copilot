@@ -5,7 +5,7 @@ User-selectable providers:
   "cf_primary"  — Cloudflare Workers AI primary worker
   "cf_backup"   — Cloudflare Workers AI backup worker
   "groq"        — Groq API (llama-3.3-70b-versatile / llama-3.1-8b-instant)
-  "nvidia"      — NVIDIA NIM API (deepseek-ai/deepseek-v4-pro)
+  "nvidia"      — NVIDIA NIM API (minimaxai/minimax-m2.7)
 
 When preferred_provider is set, that provider is tried first. If it fails,
 the call falls through to the standard priority chain so responses are never lost.
@@ -42,7 +42,7 @@ _GROQ_API_URL        = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL_PRIMARY  = "llama-3.3-70b-versatile"
 _GROQ_MODEL_FAST     = "llama-3.1-8b-instant"
 _NVIDIA_API_URL      = "https://integrate.api.nvidia.com/v1/chat/completions"
-_NVIDIA_MODEL        = "deepseek-ai/deepseek-v4-pro"
+_NVIDIA_MODEL        = "minimaxai/minimax-m2.7"
 
 # ---------------------------------------------------------------------------
 # Internal: single CF worker call
@@ -163,13 +163,8 @@ def _call_nvidia(
     reason: str,
 ) -> str:
     """
-    Call NVIDIA NIM endpoint (deepseek-ai/deepseek-v4-pro) via the OpenAI-compatible REST API.
+    Call NVIDIA NIM endpoint (minimaxai/minimax-m2.7) via the OpenAI-compatible REST API.
     Uses NVIDIA_API_KEY env var. Returns "" on failure so the caller can fall through.
-
-    NOTE: `extra_body` / `chat_template_kwargs` is an OpenAI *Python SDK* concept and must NOT
-    be sent as a top-level JSON field to the REST endpoint — NVIDIA will return 422 and silently
-    fall through to Groq.  The correct way to disable DeepSeek chain-of-thought over REST is to
-    pass `chat_template_kwargs` as a sibling of `model` directly in the JSON body.
     """
     nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
     if not nvidia_key:
@@ -179,12 +174,10 @@ def _call_nvidia(
     payload = {
         "model":       _NVIDIA_MODEL,
         "messages":    messages,
-        "max_tokens":  max_tokens,
+        "max_tokens":  min(max_tokens, 8192),  # MiniMax M2.7 output cap
         "temperature": temperature,
         "top_p":       0.95,
         "stream":      False,
-        # ↓ Correct REST form — NOT nested under "extra_body"
-        "chat_template_kwargs": {"thinking": False},
     }
     headers = {
         "Authorization": f"Bearer {nvidia_key}",
@@ -194,24 +187,47 @@ def _call_nvidia(
     masked_key = nvidia_key[:8] + "..." + nvidia_key[-4:]
     print(f"🟢 [llm_client] NVIDIA NIM → model={_NVIDIA_MODEL} | key={masked_key} | reason={reason}")
 
-    for attempt in range(3):
+    for attempt in range(2):  # 2 attempts max — NVIDIA is slow, don't triple-wait
         try:
-            resp = requests.post(_NVIDIA_API_URL, headers=headers, json=payload, timeout=90)
+            # Split timeout: 15s to connect, 60s to read the full response body.
+            # A single 90s timeout was hiding slow-connect failures as read hangs.
+            resp = requests.post(
+                _NVIDIA_API_URL, headers=headers, json=payload,
+                timeout=(15, 60),
+            )
             if resp.status_code == 200:
                 data = resp.json()
-                raw = data["choices"][0]["message"]["content"]
+                msg = data["choices"][0]["message"]
+
+                # DeepSeek V4 Pro (thinking disabled) returns content in "content".
+                # When thinking is accidentally enabled it fills "reasoning_content"
+                # and may leave "content" empty — fall back gracefully.
+                raw = msg.get("content") or msg.get("reasoning_content") or ""
+                raw = raw.strip()
+
+                if not raw:
+                    print(f"⚠️  llm_client: NVIDIA responded 200 but content is empty — full msg: {msg}")
+                    return ""
+
                 print(f"✅ [llm_client] NVIDIA NIM responded ({len(raw)} chars) — model={_NVIDIA_MODEL}")
-                return raw if isinstance(raw, str) else str(raw)
+                return raw
             elif resp.status_code == 429:
-                wait = 2 ** attempt
-                print(f"⚠️  llm_client: NVIDIA rate-limited — retrying in {wait}s ({attempt + 1}/3)")
+                wait = 3 * (attempt + 1)
+                print(f"⚠️  llm_client: NVIDIA rate-limited — retrying in {wait}s ({attempt + 1}/2)")
                 time.sleep(wait)
             else:
                 # Log the FULL error body so failures are never silent
                 print(f"❌ llm_client: NVIDIA returned HTTP {resp.status_code} — {resp.text[:300]}")
                 break
+        except requests.exceptions.ConnectTimeout:
+            print(f"❌ llm_client: NVIDIA connect timeout (15s) on attempt {attempt + 1}")
+            if attempt < 1:
+                time.sleep(2)
+        except requests.exceptions.ReadTimeout:
+            print(f"❌ llm_client: NVIDIA read timeout (60s) on attempt {attempt + 1} — model may be overloaded")
+            break  # don't retry a read timeout — it will just hang again
         except Exception as e:
-            if attempt < 2:
+            if attempt < 1:
                 time.sleep(1)
             else:
                 print(f"❌ llm_client: NVIDIA request exception — {e}")
@@ -246,7 +262,7 @@ def call_llm(
         task:               Hint for the CF worker (synthesise / plan / classify …).
         preferred_provider: One of "cf_primary", "cf_backup", "groq", "nvidia".
                             If set, that provider is tried first; falls back on failure.
-                            "nvidia" uses deepseek-ai/deepseek-v4-pro via NVIDIA NIM.
+                            "nvidia" uses minimaxai/minimax-m2.7 via NVIDIA NIM.
 
     Returns:
         Generated text string, or "" if all providers fail.
