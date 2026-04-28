@@ -7270,6 +7270,62 @@ const Chat = () => {
 
                 <div className={`group/msg relative ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end gap-0.5" : "max-w-[80%] space-y-2"}`}>
 
+                  {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
+                  {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
+                    const steps = msg.thinkingSteps;
+                    const stepKey = `thinking-${msg.id}`;
+                    const isOpen = openSourceKey === stepKey;
+                    const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
+                    return (
+                      <div className="flex flex-col gap-1 pl-0 mb-1">
+                        <button
+                          onClick={() => setOpenSourceKey(k => k === stepKey ? null : stepKey)}
+                          className="flex items-center gap-1.5 group/think w-fit"
+                        >
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary/30 shrink-0" />
+                          <span className="text-[11px] text-muted-foreground/40 italic leading-none">
+                            {steps[steps.length - 1]?.message ?? "Thought process"}
+                          </span>
+                          <motion.span
+                            animate={{ rotate: isOpen ? 180 : 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="opacity-0 group-hover/think:opacity-60 transition-opacity"
+                          >
+                            <ChevronDown className="h-3 w-3 text-muted-foreground/40" />
+                          </motion.span>
+                        </button>
+                        <AnimatePresence>
+                          {isOpen && steps.length > 0 && (
+                            <motion.div
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.18 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+                                {steps.map((step, i) => {
+                                  const icon =
+                                    step.node === "retrieve"       ? <FileText className={cls} /> :
+                                    step.node === "rewrite_query"  ? <Search className={cls} /> :
+                                    step.node === "judge_plan"     ? <ScrollText className={cls} /> :
+                                    step.node === "synthesise"     ? <Pencil className={cls} /> :
+                                    step.node === "judge_evaluate" ? <Check className={cls} /> :
+                                                                     <Sparkles className={cls} />;
+                                  return (
+                                    <div key={`${step.node}-${i}`} className="flex items-center gap-1.5">
+                                      {icon}
+                                      <span className="text-[10px] text-muted-foreground/35 leading-snug">{step.message}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    );
+                  })()}
                   {/* ── Voice message — rendered directly, bypasses group/bubble wrapper ── */}
                   {msg.callCard ? (
                     /* ── Call card — Messenger-style "You called" summary ── */

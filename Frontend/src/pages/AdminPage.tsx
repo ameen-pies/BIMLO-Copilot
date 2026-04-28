@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
   Shield, Users, Activity, Trash2, Edit3, Check, X,
@@ -37,20 +37,59 @@ interface Stats {
   total_reports:       number;
 }
 
+interface LLMProviders {
+  cf_primary?: string;
+  cf_backup?:  string;
+  groq?:       string;
+  nvidia_nim?: string;
+}
+
+interface NewsPipelineInfo {
+  available:       boolean;
+  running?:        boolean;
+  last_run_at?:    string | null;
+  next_run_at?:    string | null;
+  total_pages?:    number;
+  total_items?:    number;
+  total_articles?: number;
+  status?:         string;
+  error?:          string;
+}
+
 interface HealthData {
-  status:     string;
-  timestamp:  string;
+  status:       string;
+  timestamp:    string;
   vector_store: string;
-  services:   string;
+  services?:    string;
+  neo4j?:       string;
+  api_server?:  string;
+
+  // LLM
+  llm_status?:    string;
+  llm_providers?: LLMProviders;
+
+  // Voice
+  voice_agent?:  string;
+  elevenlabs?:   string;
+
+  // Agents
+  cad_ifc_agent?:  string;
+  ingestion_mode?: string;
+  wiki_enricher?:  string;
+  llm_judge?:      string;
+
+  // News
+  news_pipeline?: NewsPipelineInfo;
+
+  // Stats
   statistics?: {
     total_chunks?:     number;
     total_documents?:  number;
     active_sessions?:  number;
     cached_documents?: number;
   };
-  llm_provider?: string;
-  neo4j?: string;
-  voice_agent?: string;
+  active_sessions?: number;
+  report_count?:    number;
 }
 
 interface LogEntry { ts: string; msg: string; }
@@ -270,6 +309,155 @@ function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
+
+// ─── Shared styles (module-level so all components can access) ────────────────
+const S = {
+  page: {
+    minHeight: "100vh",
+    background: "hsl(var(--background))",
+    fontFamily: "'Geist', 'DM Sans', system-ui, sans-serif",
+  } as React.CSSProperties,
+  header: {
+    position: "sticky" as const, top: 0, zIndex: 50,
+    background: "hsl(var(--background)/0.85)",
+    backdropFilter: "blur(12px)",
+    borderBottom: "1px solid hsl(var(--border)/0.5)",
+    padding: "0 28px",
+    height: 58,
+    display: "flex", alignItems: "center", justifyContent: "space-between",
+  },
+  tab: (active: boolean) => ({
+    display: "inline-flex", alignItems: "center", gap: 6,
+    padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+    cursor: "pointer", border: "none",
+    background: active ? "hsl(var(--primary))" : "transparent",
+    color: active ? "hsl(var(--primary-foreground))" : "hsl(var(--muted-foreground))",
+    transition: "all 0.15s",
+  }) as React.CSSProperties,
+  card: {
+    background: "hsl(var(--card))",
+    border: "1px solid hsl(var(--border))",
+    borderRadius: 16,
+  } as React.CSSProperties,
+  input: {
+    width: "100%", padding: "8px 12px", borderRadius: 8, fontSize: 13,
+    background: "hsl(var(--muted)/0.4)",
+    border: "1px solid hsl(var(--border))",
+    color: "hsl(var(--foreground))",
+    outline: "none",
+    boxSizing: "border-box" as const,
+  } as React.CSSProperties,
+  btn: (variant: "primary" | "ghost" | "danger" = "primary") => ({
+    display: "inline-flex", alignItems: "center", gap: 5,
+    padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+    cursor: "pointer", border: "none", transition: "opacity 0.15s",
+    background: variant === "primary" ? "hsl(var(--primary))"
+              : variant === "danger"  ? "#ef4444"
+              : "hsl(var(--muted)/0.6)",
+    color: variant === "ghost" ? "hsl(var(--foreground))" : "#fff",
+  }) as React.CSSProperties,
+  sectionTitle: {
+    fontSize: 11, fontWeight: 700, letterSpacing: "0.06em",
+    textTransform: "uppercase" as const, color: "hsl(var(--muted-foreground))",
+    marginBottom: 10,
+  },
+};
+
+// ─── News Pipeline Card ───────────────────────────────────────────────────────
+
+function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; onTrigger: () => void }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const np = health?.news_pipeline;
+  const isRunning = np?.running ?? false;
+
+  const nextRun = np?.next_run_at ? new Date(np.next_run_at).getTime() : null;
+  const lastRun = np?.last_run_at ? new Date(np.last_run_at).getTime() : null;
+
+  const msLeft = nextRun ? Math.max(0, nextRun - now) : null;
+  const countdown = (() => {
+    if (msLeft === null) return "—";
+    if (msLeft === 0) return "Running soon";
+    const d = Math.floor(msLeft / 86400000);
+    const h = Math.floor((msLeft % 86400000) / 3600000);
+    const m = Math.floor((msLeft % 3600000) / 60000);
+    const s = Math.floor((msLeft % 60000) / 1000);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    return `${m}m ${s}s`;
+  })();
+
+  const totalArticles = np?.total_articles ?? (np?.total_items) ?? 0;
+  const totalPages = np?.total_pages ?? 0;
+  const statusColor = isRunning ? "#f59e0b" : np?.available ? "#22c55e" : "#6b7280";
+  const statusLabel = isRunning ? "Running" : np?.available ? (np?.status === "ok" ? "Ready" : np?.status ?? "Ready") : "Unavailable";
+
+  return (
+    <div style={{ ...S.card, padding: "18px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 7, background: "#f59e0b15", border: "1px solid #f59e0b25", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Clock size={13} color="#f59e0b" />
+          </div>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "hsl(var(--foreground))", textTransform: "uppercase", letterSpacing: "0.06em" }}>News Pipeline</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, animation: isRunning ? "pulse 1s infinite" : "none" }} />
+          <span style={{ fontSize: 10, fontWeight: 600, color: statusColor, textTransform: "uppercase" }}>{statusLabel}</span>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+        {[
+          { label: "Articles Cached", value: totalArticles.toLocaleString(), color: "#3b82f6" },
+          { label: "Pages",           value: totalPages.toString(),           color: "#a855f7" },
+        ].map(s => (
+          <div key={s.label} style={{ background: "hsl(var(--muted)/0.3)", borderRadius: 8, padding: "10px 12px", border: "1px solid hsl(var(--border))" }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value || "—"}</div>
+            <div style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 3 }}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Timeline */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+          <span style={{ color: "hsl(var(--muted-foreground))" }}>Last run</span>
+          <span style={{ color: "hsl(var(--foreground))", fontWeight: 600 }}>{lastRun ? timeAgo(np?.last_run_at!) : "Never"}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+          <span style={{ color: "hsl(var(--muted-foreground))" }}>Next run in</span>
+          <span style={{ color: msLeft !== null && msLeft < 3600000 ? "#f59e0b" : "hsl(var(--foreground))", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{countdown}</span>
+        </div>
+        {/* Progress bar */}
+        {lastRun && nextRun && (
+          <div style={{ height: 3, borderRadius: 999, background: "hsl(var(--muted)/0.4)", overflow: "hidden", marginTop: 2 }}>
+            <div style={{
+              height: "100%", borderRadius: 999,
+              background: "linear-gradient(to right, #f59e0b, #ef4444)",
+              width: `${Math.min(100, ((now - lastRun) / (nextRun - lastRun)) * 100)}%`,
+              transition: "width 1s linear",
+            }} />
+          </div>
+        )}
+      </div>
+
+      {/* Trigger button */}
+      <button
+        onClick={onTrigger}
+        style={{ ...S.btn("ghost"), width: "100%", justifyContent: "center", gap: 6, fontSize: 11, padding: "7px 12px", border: "1px solid hsl(var(--border))" }}
+      >
+        <RefreshCw size={11} />
+        Trigger Manual Refresh
+      </button>
+    </div>
+  );
+}
 
 export default function AdminPage() {
   const { currentUser, logout } = useAuth();
@@ -507,67 +695,15 @@ export default function AdminPage() {
   function deriveStatus(val: string | undefined): "ok" | "warn" | "error" | "unknown" {
     if (!val) return "unknown";
     const v = val.toLowerCase();
-    if (v === "ok" || v === "healthy" || v === "connected" || v === "ready") return "ok";
-    if (v === "warn" || v === "degraded") return "warn";
-    if (v === "error" || v === "down" || v === "failed" || v === "disconnected") return "error";
+    if (["ok", "healthy", "connected", "ready", "configured", "available"].includes(v)) return "ok";
+    if (["warn", "degraded", "not_configured", "unavailable", "fallback_direct"].includes(v)) return "warn";
+    if (["error", "down", "failed", "disconnected", "not_available"].includes(v)) return "error";
     return "unknown";
   }
 
   if (!currentUser || currentUser.role !== "admin") return null;
 
   // ── Styles ──────────────────────────────────────────────────────────────────
-  const S = {
-    page: {
-      minHeight: "100vh",
-      background: "hsl(var(--background))",
-      fontFamily: "'Geist', 'DM Sans', system-ui, sans-serif",
-    } as React.CSSProperties,
-    header: {
-      position: "sticky" as const, top: 0, zIndex: 50,
-      background: "hsl(var(--background)/0.85)",
-      backdropFilter: "blur(12px)",
-      borderBottom: "1px solid hsl(var(--border)/0.5)",
-      padding: "0 28px",
-      height: 58,
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-    },
-    tab: (active: boolean) => ({
-      display: "inline-flex", alignItems: "center", gap: 6,
-      padding: "6px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600,
-      cursor: "pointer", border: "none",
-      background: active ? "hsl(var(--primary))" : "transparent",
-      color: active ? "hsl(var(--primary-foreground))" : "hsl(var(--muted-foreground))",
-      transition: "all 0.15s",
-    }) as React.CSSProperties,
-    card: {
-      background: "hsl(var(--card))",
-      border: "1px solid hsl(var(--border))",
-      borderRadius: 16,
-    } as React.CSSProperties,
-    input: {
-      width: "100%", padding: "8px 12px", borderRadius: 8, fontSize: 13,
-      background: "hsl(var(--muted)/0.4)",
-      border: "1px solid hsl(var(--border))",
-      color: "hsl(var(--foreground))",
-      outline: "none",
-      boxSizing: "border-box" as const,
-    } as React.CSSProperties,
-    btn: (variant: "primary" | "ghost" | "danger" = "primary") => ({
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
-      cursor: "pointer", border: "none", transition: "opacity 0.15s",
-      background: variant === "primary" ? "hsl(var(--primary))"
-                : variant === "danger"  ? "#ef4444"
-                : "hsl(var(--muted)/0.6)",
-      color: variant === "ghost" ? "hsl(var(--foreground))" : "#fff",
-    }) as React.CSSProperties,
-    sectionTitle: {
-      fontSize: 11, fontWeight: 700, letterSpacing: "0.06em",
-      textTransform: "uppercase" as const, color: "hsl(var(--muted-foreground))",
-      marginBottom: 10,
-    },
-  };
-
   return (
     <div style={S.page}>
       {/* ── Header ── */}
@@ -661,42 +797,14 @@ export default function AdminPage() {
             <MiniBarChart data={activityBars.counts} labels={activityBars.days} color="#a855f7" />
           </div>
 
-          {/* Top users by conversations */}
-          <div style={{ ...S.card, padding: "18px 20px" }}>
-            <div style={{ ...S.sectionTitle, marginBottom: 14 }}>Top Users by Activity</div>
-            {topUsers.length === 0 ? (
-              <div style={{ fontSize: 13, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: "20px 0" }}>No data yet</div>
-            ) : topUsers.map((u, i) => {
-              const pct = u.conversation_count > 0 ? (u.conversation_count / topUsers[0].conversation_count) * 100 : 0;
-              return (
-                <div key={u.user_id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: i < topUsers.length - 1 ? 10 : 0 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", width: 14, textAlign: "right" }}>{i + 1}</span>
-                  {/* Avatar */}
-                  <div style={{
-                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0,
-                    overflow: "hidden", border: "1.5px solid hsl(var(--border))",
-                    background: u.avatar_url ? "transparent" : (u.role === "admin" ? "linear-gradient(135deg,#7c3aed,#4f46e5)" : "linear-gradient(135deg,#3b82f6,#06b6d4)"),
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 10, fontWeight: 700, color: "#fff",
-                  }}>
-                    {u.avatar_url
-                      ? <img src={u.avatar_url} referrerPolicy="no-referrer" alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      : u.username[0]?.toUpperCase()
-                    }
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--foreground))", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.username}</span>
-                      <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", flexShrink: 0, marginLeft: 4 }}>{u.conversation_count}</span>
-                    </div>
-                    <div style={{ height: 4, borderRadius: 999, background: "hsl(var(--muted)/0.4)", overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${pct}%`, background: "linear-gradient(to right, #3b82f6, #06b6d4)", borderRadius: 999, transition: "width 0.5s ease" }} />
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          {/* News Pipeline Status */}
+          <NewsPipelineCard health={health} onTrigger={async () => {
+            try {
+              const { token } = JSON.parse(localStorage.getItem("bimlo_auth") || "{}");
+              await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(token || "") });
+              setTimeout(loadHealth, 2000);
+            } catch {}
+          }} />
         </div>
 
         {/* ── Tabs ── */}
@@ -847,7 +955,8 @@ export default function AdminPage() {
         {/* ══════════════════════ HEALTH TAB ══════════════════════ */}
         {tab === "health" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Header row with last refresh */}
+
+            {/* Header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
                 <div style={{ fontSize: 16, fontWeight: 800, color: "hsl(var(--foreground))" }}>System Health</div>
@@ -867,24 +976,15 @@ export default function AdminPage() {
             <div style={{
               padding: "14px 18px", borderRadius: 12,
               display: "flex", alignItems: "center", gap: 12,
-              background: health?.status === "ok" || health?.status === "healthy"
-                ? "linear-gradient(135deg, #22c55e10, #16a34a08)"
-                : "#ef444410",
-              border: `1px solid ${health?.status === "ok" || health?.status === "healthy" ? "#22c55e30" : "#ef444430"}`,
+              background: health?.status === "healthy" ? "linear-gradient(135deg, #22c55e10, #16a34a08)" : "#ef444410",
+              border: `1px solid ${health?.status === "healthy" ? "#22c55e30" : "#ef444430"}`,
             }}>
-              <div style={{
-                width: 36, height: 36, borderRadius: "50%",
-                background: health?.status === "ok" || health?.status === "healthy" ? "#22c55e18" : "#ef444418",
-                display: "flex", alignItems: "center", justifyContent: "center",
-              }}>
-                {health?.status === "ok" || health?.status === "healthy"
-                  ? <CheckCircle2 size={18} color="#22c55e" />
-                  : <XCircle size={18} color="#ef4444" />
-                }
+              <div style={{ width: 36, height: 36, borderRadius: "50%", background: health?.status === "healthy" ? "#22c55e18" : "#ef444418", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {health?.status === "healthy" ? <CheckCircle2 size={18} color="#22c55e" /> : <XCircle size={18} color="#ef4444" />}
               </div>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>
-                  {health?.status === "ok" || health?.status === "healthy" ? "All Systems Operational" : health ? "System Issues Detected" : "Checking system status…"}
+                  {health?.status === "healthy" ? "All Systems Operational" : health ? "System Issues Detected" : "Checking system status…"}
                 </div>
                 <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>
                   {health?.services ?? "Loading service status…"}
@@ -896,65 +996,109 @@ export default function AdminPage() {
               </div>
             </div>
 
-            {/* Service grid */}
+            {/* ── Row 1: Core Infrastructure + LLM Providers ── */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              {/* Core services */}
+
+              {/* Core Infrastructure */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
-                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Core Services</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Core Infrastructure</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <ServiceBadge label="API Server (FastAPI)"    status={health ? "ok" : "unknown"}              icon={Server}   detail="Backend running" />
+                  <ServiceBadge label="Vector Store (Chroma)"   status={deriveStatus(health?.vector_store)}     icon={Cpu}      detail={health?.statistics?.total_chunks != null ? `${health.statistics.total_chunks.toLocaleString()} chunks · ${health.statistics.total_documents ?? 0} docs` : "Embedding & similarity search"} />
+                  <ServiceBadge label="Neo4j Graph Database"    status={deriveStatus(health?.neo4j)}            icon={Database} detail={health?.neo4j === "connected" ? "Auth, sessions & knowledge graph" : health?.neo4j ?? "Not configured"} />
+                  <ServiceBadge label="Voice Agent (ElevenLabs)" status={deriveStatus(health?.elevenlabs)}     icon={Radio}    detail={health?.elevenlabs === "configured" ? "TTS ready — eleven_flash_v2_5" : "ELEVENLABS_API_KEY not set"} />
+                </div>
+              </div>
+
+              {/* LLM Providers */}
+              <div style={{ ...S.card, padding: "18px 20px" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div style={{ ...S.sectionTitle }}>LLM Providers</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: health?.llm_status === "ok" ? "#22c55e" : "#ef4444" }} />
+                    <span style={{ fontSize: 10, color: health?.llm_status === "ok" ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
+                      {health?.llm_status === "ok" ? "Operational" : "Degraded"}
+                    </span>
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {([
+                    { key: "cf_primary",  label: "CF Worker Primary",      icon: Zap,      color: "#f97316" },
+                    { key: "cf_backup",   label: "CF Worker Backup",       icon: Zap,      color: "#f97316" },
+                    { key: "groq",        label: "Groq (Llama 3.3 70B)",   icon: Cpu,      color: "#8b5cf6" },
+                    { key: "nvidia_nim",  label: "NVIDIA NIM (MiniMax)",   icon: Activity, color: "#76b900" },
+                  ] as const).map(p => {
+                    const val = health?.llm_providers?.[p.key as keyof LLMProviders];
+                    const st = val === "configured" ? "ok" : val === "not_configured" ? "warn" : "unknown";
+                    return (
+                      <ServiceBadge key={p.key} label={p.label} status={st} icon={p.icon}
+                        detail={val === "configured" ? "API key configured" : "API key not set"} />
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Row 2: Agents & Pipelines + Platform Metrics ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+
+              {/* Agents & Pipelines */}
+              <div style={{ ...S.card, padding: "18px 20px" }}>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Agents & Pipelines</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <ServiceBadge
-                    label="Neo4j Graph Database"
-                    status={deriveStatus(health?.neo4j ?? health?.vector_store)}
-                    icon={Database}
-                    detail={health?.statistics?.total_chunks != null ? `${health.statistics.total_chunks.toLocaleString()} chunks indexed` : "Graph memory & user data store"}
-                  />
-                  <ServiceBadge
-                    label="Vector Store (Chroma)"
-                    status={deriveStatus(health?.vector_store)}
-                    icon={Cpu}
-                    detail={health?.statistics?.total_documents != null ? `${health.statistics.total_documents} documents` : "Embedding & similarity search"}
-                  />
-                  <ServiceBadge
-                    label="LLM Provider"
-                    status={deriveStatus(health?.llm_provider ?? health?.services)}
+                    label="Ingestion Pipeline"
+                    status={health?.ingestion_mode === "langgraph" ? "ok" : health?.ingestion_mode ? "warn" : "unknown"}
                     icon={Zap}
-                    detail={health?.llm_provider ?? "AI inference engine"}
+                    detail={health?.ingestion_mode === "langgraph" ? "LangGraph 3-node pipeline" : "Fallback: direct indexing"}
                   />
                   <ServiceBadge
-                    label="Voice Agent"
-                    status={deriveStatus(health?.voice_agent)}
-                    icon={Radio}
-                    detail="Real-time voice pipeline"
+                    label="LLM Judge (RAG Evaluator)"
+                    status={deriveStatus(health?.llm_judge)}
+                    icon={CheckCircle2}
+                    detail={health?.llm_judge === "available" ? "Plan → generate → evaluate loop" : "Module not found"}
                   />
                   <ServiceBadge
-                    label="API Server"
-                    status={health ? "ok" : "unknown"}
-                    icon={Server}
-                    detail="FastAPI backend"
+                    label="Wiki Enricher"
+                    status={deriveStatus(health?.wiki_enricher)}
+                    icon={Search}
+                    detail={health?.wiki_enricher === "available" ? "wikipedia-api installed" : "pip install wikipedia-api"}
+                  />
+                  <ServiceBadge
+                    label="CAD / IFC Agent"
+                    status={deriveStatus(health?.cad_ifc_agent)}
+                    icon={BarChart3}
+                    detail={health?.cad_ifc_agent === "available" ? "IFC, DXF, DWG, STEP supported" : "Module not loaded"}
+                  />
+                  <ServiceBadge
+                    label="News Pipeline"
+                    status={health?.news_pipeline?.available ? (health.news_pipeline.running ? "warn" : "ok") : "error"}
+                    icon={Clock}
+                    detail={health?.news_pipeline?.available
+                      ? (health.news_pipeline.running ? "Currently running…" : `${health.news_pipeline.total_articles ?? health.news_pipeline.total_items ?? 0} articles cached`)
+                      : "Module not found"}
                   />
                 </div>
               </div>
 
-              {/* Platform metrics */}
+              {/* Platform Metrics */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
                 <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Platform Metrics</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {[
-                    { label: "Total Users",        value: stats?.total_users ?? 0,         icon: Users,         color: "#3b82f6" },
-                    { label: "Conversations",      value: stats?.total_conversations ?? 0, icon: MessageSquare, color: "#f59e0b" },
-                    { label: "Documents Uploaded", value: stats?.total_documents ?? 0,     icon: Zap,           color: "#06b6d4" },
-                    { label: "Reports Generated",  value: stats?.total_reports ?? 0,       icon: BarChart3,     color: "#22c55e" },
-                  ].map(m => (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {([
+                    { label: "Total Users",         value: stats?.total_users ?? 0,               icon: Users,         color: "#3b82f6" },
+                    { label: "Conversations",        value: stats?.total_conversations ?? 0,       icon: MessageSquare, color: "#f59e0b" },
+                    { label: "Documents Uploaded",   value: stats?.total_documents ?? 0,           icon: Zap,           color: "#06b6d4" },
+                    { label: "Reports Generated",    value: health?.report_count ?? stats?.total_reports ?? 0, icon: BarChart3, color: "#22c55e" },
+                    { label: "Vector Chunks",        value: health?.statistics?.total_chunks ?? 0, icon: Database,      color: "#8b5cf6" },
+                    { label: "Active Sessions",      value: health?.active_sessions ?? 0,          icon: Activity,      color: "#f97316" },
+                  ] as const).map(m => (
                     <div key={m.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div style={{
-                        width: 28, height: 28, borderRadius: 7,
-                        background: `${m.color}15`, border: `1px solid ${m.color}25`,
-                        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                      }}>
+                      <div style={{ width: 28, height: 28, borderRadius: 7, background: `${m.color}15`, border: `1px solid ${m.color}25`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                         <m.icon size={13} color={m.color} />
                       </div>
                       <span style={{ flex: 1, fontSize: 12, color: "hsl(var(--muted-foreground))" }}>{m.label}</span>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>{m.value.toLocaleString()}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>{Number(m.value).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>

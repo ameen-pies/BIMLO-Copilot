@@ -1569,14 +1569,116 @@ async def news_refresh(background_tasks: BackgroundTasks):
 async def health_check():
     try:
         stats = vector_store.get_collection_stats()
+
+        # ── LLM providers ─────────────────────────────────────────────────────
+        import os as _os
+        cf_primary_ok  = bool(_os.getenv("CF_API_KEY", "").strip())
+        # Backup falls back to primary key if CF_BACKUP_API_KEY not set (matches llm_client.py)
+        cf_backup_ok   = bool(_os.getenv("CF_BACKUP_API_KEY", _os.getenv("CF_API_KEY", "")).strip())
+        groq_ok        = bool(_os.getenv("GROQ_API_KEY"))
+        nvidia_ok      = bool(_os.getenv("NVIDIA_API_KEY"))
+        elevenlabs_ok  = bool(_os.getenv("ELEVENLABS_API_KEY"))
+
+        llm_providers = {
+            "cf_primary":  "configured" if cf_primary_ok  else "not_configured",
+            "cf_backup":   "configured" if cf_backup_ok   else "not_configured",
+            "groq":        "configured" if groq_ok        else "not_configured",
+            "nvidia_nim":  "configured" if nvidia_ok      else "not_configured",
+        }
+        # Overall LLM status: ok if at least one provider is configured
+        llm_status = "ok" if any([cf_primary_ok, cf_backup_ok, groq_ok, nvidia_ok]) else "degraded"
+
+        # ── Neo4j ─────────────────────────────────────────────────────────────
+        neo4j_status = "unknown"
+        try:
+            from neo4j_auth import get_driver as _get_neo4j_driver
+            drv = _get_neo4j_driver()
+            if drv:
+                drv.verify_connectivity()
+                neo4j_status = "connected"
+            else:
+                neo4j_status = "not_configured"
+        except Exception:
+            neo4j_status = "not_configured"
+
+        # ── News pipeline ─────────────────────────────────────────────────────
+        news_info = {"available": _news_pipeline_available}
+        if _news_pipeline_available:
+            try:
+                from news_pipeline import get_status as _news_status, get_page as _news_page
+                ns = _news_status()
+                news_info.update(ns)
+                # Count total articles from page 1
+                p1 = _news_page(1)
+                if p1 and "articles" in p1:
+                    articles_on_p1 = len(p1["articles"])
+                    total_items = ns.get("total_items") or (articles_on_p1 * max(ns.get("total_pages", 1), 1))
+                    news_info["total_articles"] = total_items
+            except Exception as _ne:
+                news_info["error"] = str(_ne)
+
+        # ── Wiki enricher ─────────────────────────────────────────────────────
+        wiki_ok = False
+        try:
+            import importlib
+            importlib.import_module("wikipediaapi")
+            wiki_ok = True
+        except ImportError:
+            pass
+
+        # ── LLM Judge ─────────────────────────────────────────────────────────
+        judge_ok = False
+        try:
+            from llm_judge import LLMJudge
+            judge_ok = True
+        except Exception:
+            pass
+
+        # ── Ingestion pipeline ────────────────────────────────────────────────
+        ingestion_mode = "langgraph" if _ingestion_graph_available else "fallback_direct"
+
+        # ── Report agent ──────────────────────────────────────────────────────
+        report_count = 0
+        try:
+            from services.report_agent import _reports_store as _rs
+            report_count = len(_rs)
+        except Exception:
+            try:
+                from report_agent import _reports_store as _rs
+                report_count = len(_rs)
+            except Exception:
+                pass
+
         return {
             "status":       "healthy",
             "timestamp":    datetime.now().isoformat(),
+
+            # Core infra
             "vector_store": "connected",
-            "graph":        "LangGraph agentic RAG",
-            "statistics":   stats,
-            "active_sessions": len(_sessions),
-            "cad_ifc_agent": "available" if _cad_ifc_available else "unavailable",
+            "neo4j":        neo4j_status,
+            "api_server":   "ok",
+
+            # LLM
+            "llm_status":   llm_status,
+            "llm_providers": llm_providers,
+
+            # Voice
+            "voice_agent":  "configured" if elevenlabs_ok else "not_configured",
+            "elevenlabs":   "configured" if elevenlabs_ok else "not_configured",
+
+            # Agents & pipelines
+            "cad_ifc_agent":    "available" if _cad_ifc_available else "unavailable",
+            "ingestion_mode":   ingestion_mode,
+            "wiki_enricher":    "available" if wiki_ok else "unavailable",
+            "llm_judge":        "available" if judge_ok else "unavailable",
+            "news_pipeline":    news_info,
+
+            # Stats
+            "statistics":       stats,
+            "active_sessions":  len(_sessions),
+            "report_count":     report_count,
+
+            "services": f"{sum([cf_primary_ok, cf_backup_ok, groq_ok, groq_ok, elevenlabs_ok, _cad_ifc_available, _news_pipeline_available])} services active",
         }
     except Exception as e:
         return {"status": "degraded", "timestamp": datetime.now().isoformat(), "error": str(e)}
