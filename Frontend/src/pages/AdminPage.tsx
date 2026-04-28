@@ -263,23 +263,182 @@ function ServiceBadge({ label, status, icon: Icon, detail }: {
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
+function ExpandedChart({ data, color, label }: { data: number[]; color: string; label: string }) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  if (!data.length) return null;
+
+  const W = 260, H = 90;
+  const padL = 28, padR = 10, padT = 10, padB = 22;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+
+  const max = Math.max(...data, 1);
+  const min = Math.min(...data, 0);
+  const range = max - min || 1;
+  const peakIdx = data.indexOf(max);
+
+  const toX = (i: number) => padL + (i / Math.max(data.length - 1, 1)) * chartW;
+  const toY = (v: number) => padT + chartH - ((v - min) / range) * chartH;
+
+  const points = data.map((v, i) => ({ x: toX(i), y: toY(v), v }));
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x},${p.y}`).join(" ");
+  const areaPath = `${linePath} L ${points[points.length - 1].x},${padT + chartH} L ${points[0].x},${padT + chartH} Z`;
+
+  // Y axis ticks
+  const yTicks = [0, 0.5, 1].map(t => ({ v: Math.round(min + t * range), y: padT + chartH * (1 - t) }));
+  // X axis labels — show first, mid, last
+  const xLabels = [0, Math.floor((data.length - 1) / 2), data.length - 1];
+  const gradId = `exp-${color.replace(/[^a-z0-9]/gi, "")}`;
+
+  return (
+    <svg width={W} height={H} style={{ overflow: "visible", display: "block" }}>
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.25} />
+          <stop offset="100%" stopColor={color} stopOpacity={0} />
+        </linearGradient>
+      </defs>
+
+      {/* Grid lines */}
+      {yTicks.map((t, i) => (
+        <line key={i} x1={padL} y1={t.y} x2={W - padR} y2={t.y}
+          stroke="rgba(255,255,255,0.06)" strokeWidth={1} strokeDasharray="3,3" />
+      ))}
+
+      {/* Y axis labels */}
+      {yTicks.map((t, i) => (
+        <text key={i} x={padL - 5} y={t.y + 4} textAnchor="end"
+          fontSize={8} fill="rgba(148,163,184,0.7)" fontFamily="inherit">
+          {t.v}
+        </text>
+      ))}
+
+      {/* X axis labels */}
+      {xLabels.map((idx) => (
+        <text key={idx} x={toX(idx)} y={H - 4} textAnchor="middle"
+          fontSize={8} fill="rgba(148,163,184,0.7)" fontFamily="inherit">
+          {idx === 0 ? "7d ago" : idx === data.length - 1 ? "now" : "mid"}
+        </text>
+      ))}
+
+      {/* Axis line */}
+      <line x1={padL} y1={padT} x2={padL} y2={padT + chartH}
+        stroke="rgba(255,255,255,0.1)" strokeWidth={1} />
+      <line x1={padL} y1={padT + chartH} x2={W - padR} y2={padT + chartH}
+        stroke="rgba(255,255,255,0.1)" strokeWidth={1} />
+
+      {/* Area fill */}
+      <path d={areaPath} fill={`url(#${gradId})`} />
+
+      {/* Line */}
+      <path d={linePath} fill="none" stroke={color} strokeWidth={2}
+        strokeLinecap="round" strokeLinejoin="round" />
+
+      {/* Peak marker */}
+      <circle cx={points[peakIdx].x} cy={points[peakIdx].y} r={4}
+        fill={color} stroke="hsl(220 15% 12%)" strokeWidth={2} />
+      <text x={points[peakIdx].x} y={points[peakIdx].y - 8}
+        textAnchor="middle" fontSize={8} fontWeight={700} fill={color} fontFamily="inherit">
+        peak: {max}
+      </text>
+
+      {/* Hover hit areas */}
+      {points.map((p, i) => {
+        const prev = points[i - 1];
+        const next = points[i + 1];
+        const x0 = prev ? (prev.x + p.x) / 2 : padL;
+        const x1 = next ? (p.x + next.x) / 2 : W - padR;
+        return (
+          <rect key={i} x={x0} y={padT} width={x1 - x0} height={chartH}
+            fill="transparent"
+            onMouseEnter={() => setHoveredIdx(i)}
+            onMouseLeave={() => setHoveredIdx(null)}
+            style={{ cursor: "crosshair" }} />
+        );
+      })}
+
+      {/* Hovered dot + tooltip */}
+      {hoveredIdx !== null && hoveredIdx !== peakIdx && (
+        <circle cx={points[hoveredIdx].x} cy={points[hoveredIdx].y} r={3.5}
+          fill={color} stroke="hsl(220 15% 12%)" strokeWidth={2} />
+      )}
+      {hoveredIdx !== null && (() => {
+        const p = points[hoveredIdx];
+        const tipW = 36, tipH = 18, gap = 6;
+        let tx = p.x - tipW / 2;
+        let ty = p.y - tipH - gap;
+        if (tx < 0) tx = 0;
+        if (tx + tipW > W) tx = W - tipW;
+        if (ty < padT) ty = p.y + gap;
+        return (
+          <g style={{ pointerEvents: "none" }}>
+            <rect x={tx} y={ty} width={tipW} height={tipH} rx={4}
+              fill="hsl(220 15% 10%)" stroke={color} strokeWidth={0.8} opacity={0.96} />
+            <text x={tx + tipW / 2} y={ty + tipH / 2 + 4.5}
+              textAnchor="middle" fontSize={9} fontWeight={700} fill={color} fontFamily="inherit">
+              {p.v}
+            </text>
+          </g>
+        );
+      })()}
+    </svg>
+  );
+}
+
 function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
   icon: React.ElementType; label: string; value: number | string; sub?: string; accent: string;
   trend?: number; sparkData?: number[];
 }) {
+  const [hovered, setHovered]   = useState(false);
+  const [leaving, setLeaving]   = useState(false);
+  const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleEnter = () => {
+    if (leaveTimer.current) clearTimeout(leaveTimer.current);
+    setLeaving(false);
+    setHovered(true);
+  };
+
+  const handleLeave = () => {
+    // Start the out-animation, then collapse after it finishes
+    setLeaving(true);
+    leaveTimer.current = setTimeout(() => {
+      setHovered(false);
+      setLeaving(false);
+    }, 280); // matches kpiChartFadeOut duration
+  };
+
+  // True while the expanded state (card + chart) should be visible
+  const expanded = hovered || leaving;
+
   return (
-    <div style={{
-      background: "hsl(var(--card))",
-      border: "1px solid hsl(var(--border))",
-      borderRadius: 16, padding: "18px 20px",
-      display: "flex", flexDirection: "column", gap: 6,
-      position: "relative", overflow: "hidden",
-    }}>
+    <div
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+      style={{
+        background: "hsl(var(--card))",
+        border: `1px solid ${expanded ? accent + "50" : "hsl(var(--border))"}`,
+        borderRadius: 16,
+        padding: expanded ? "18px 20px 16px" : "18px 20px",
+        display: "flex", flexDirection: "column", gap: 6,
+        position: "relative", overflow: "hidden",
+        cursor: "default",
+        minWidth: expanded ? 300 : undefined,
+        boxShadow: expanded ? `0 8px 32px ${accent}22, 0 0 0 1px ${accent}20` : "none",
+        transition: "min-width 0.35s cubic-bezier(0,0,.2,1), box-shadow 0.35s cubic-bezier(0,0,.2,1), border-color 0.3s ease, padding 0.25s ease",
+        zIndex: expanded ? 10 : 1,
+      }}
+    >
+      {/* Glow orb */}
       <div style={{
-        position: "absolute", top: 0, right: 0, width: 80, height: 80,
-        background: `radial-gradient(circle at 70% 30%, ${accent}22, transparent 70%)`,
+        position: "absolute", top: 0, right: 0,
+        width: expanded ? 160 : 80, height: expanded ? 160 : 80,
+        background: `radial-gradient(circle at 70% 30%, ${accent}${expanded ? "30" : "22"}, transparent 70%)`,
         pointerEvents: "none",
+        transition: "width 0.35s cubic-bezier(0,0,.2,1), height 0.35s cubic-bezier(0,0,.2,1)",
       }} />
+
+      {/* Header row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <div style={{
@@ -299,10 +458,37 @@ function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
           </div>
         )}
       </div>
+
+      {/* Value */}
       <div style={{ fontSize: 26, fontWeight: 800, color: "hsl(var(--foreground))", lineHeight: 1.1 }}>{value}</div>
+
+      {/* Chart area */}
       <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
-        {sub && <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{sub}</div>}
-        {sparkData && <Sparkline data={sparkData} color={accent} />}
+        {sub && !expanded && <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{sub}</div>}
+        {sparkData && (
+          <div style={{
+            width: expanded ? 260 : 120,
+            overflow: "hidden",
+            transition: "width 0.35s cubic-bezier(0,0,.2,1)",
+          }}>
+            {expanded
+              ? (
+                <div style={{
+                  animation: leaving
+                    ? "kpiChartFadeOut 0.26s cubic-bezier(.4,0,1,1) forwards"
+                    : "kpiChartFadeIn 0.25s cubic-bezier(0,0,.2,1) forwards",
+                }}>
+                  <div style={{ fontSize: 9, color: "hsl(var(--muted-foreground))", marginBottom: 4, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                    Last 7 days · {label}
+                  </div>
+                  <ExpandedChart data={sparkData} color={accent} label={label} />
+                  {sub && <div style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 6 }}>{sub}</div>}
+                </div>
+              )
+              : <Sparkline data={sparkData} color={accent} />
+            }
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1473,6 +1659,7 @@ export default function AdminPage() {
       <style>{`
         @keyframes spin  { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+        @keyframes kpiChartFadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
       `}</style>
     </div>
   );
