@@ -48,6 +48,15 @@ _services_dir = os.path.dirname(os.path.abspath(__file__))
 if _services_dir not in sys.path:
     sys.path.insert(0, _services_dir)
 
+# ── Observability (structured pipeline logging) ────────────────────────────────
+try:
+    from observability import obs as _obs
+    _OBS_AVAILABLE = True
+except ImportError:
+    _obs = None
+    _OBS_AVAILABLE = False
+    print("⚠️  observability.py not found — structured logging disabled")
+
 # Source Agent — dedicated specialist for source extraction
 try:
     from source_agent import build_sources_node
@@ -688,13 +697,41 @@ class RAGEngine:
         
         print(f"\n{'='*80}")
         print(f"🔍 Query: {user_query}")
-        
+
+        _t0 = time.time()
         try:
             final_state = self.graph.invoke(initial_state)
         finally:
             self._status_callback = None  # always clean up
             self._status_msgs = None
             self._voice_mode = False
+        _total_ms = (time.time() - _t0) * 1000
+
+        # ── Observability: log retrieval scores and query end ─────────────────
+        if _OBS_AVAILABLE:
+            _chunks = final_state.get("retrieved_chunks", [])
+            _scores = [c.get("distance", 0.0) for c in _chunks if isinstance(c, dict)]
+            if _scores:
+                _obs.log_retrieval(
+                    session_id=session_id,
+                    query=user_query,
+                    top_k=top_k,
+                    scores=_scores,
+                    reranker_used=False,
+                    graph_hits=0,
+                    latency_ms=_total_ms,
+                )
+            _eval = final_state.get("response_evaluation")
+            _obs.log_query_end(
+                session_id=session_id,
+                route=final_state.get("route", "unknown"),
+                total_latency_ms=_total_ms,
+                success=not bool(final_state.get("error")),
+                confidence=final_state.get("confidence", 0.0),
+                judge_attempts=final_state.get("retry_count", 0) + 1,
+                sources_count=len(final_state.get("sources", [])),
+                error=str(final_state.get("error") or ""),
+            )
 
         # Build response
         response = {
@@ -964,6 +1001,14 @@ Now generate for: "{q}" """
         # Skip classification when force_route was set by the caller
         if state.get("route"):
             print(f"⚡ router: force_route={state['route']} — skipping classification")
+            if _OBS_AVAILABLE:
+                _obs.log_routing(
+                    session_id=state.get("session_id", ""),
+                    query=state["query"],
+                    route=state["route"],
+                    confidence=1.0,
+                    forced=True,
+                )
             return state
 
         query = state["query"]
@@ -1015,7 +1060,16 @@ Now generate for: "{q}" """
             # If classifier is very confident, trust it directly and skip the second LLM call
             if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
                 print(f"{intent.suggested_route} (intent classifier, conf={intent.confidence:.2f})")
-                return {**state, "route": intent.suggested_route, "_intent": intent.to_dict()}
+                _r = intent.suggested_route
+                if _OBS_AVAILABLE:
+                    _obs.log_routing(
+                        session_id=state.get("session_id", ""),
+                        query=state["query"],
+                        route=_r,
+                        confidence=getattr(intent, "confidence", 0.8),
+                        forced=False,
+                    )
+                return {**state, "route": _r, "_intent": intent.to_dict()}
         except Exception as e:
             print(f"[intent_classifier error: {e}] ", end="")
             intent_hint = ""
@@ -1170,6 +1224,14 @@ Reply with ONE word only — the route name."""
 
         # Default to single-pass RAG
         print("rag (fallback)")
+        if _OBS_AVAILABLE:
+            _obs.log_routing(
+                session_id=state.get("session_id", ""),
+                query=state["query"],
+                route="rag",
+                confidence=0.5,
+                forced=False,
+            )
         return {**state, "route": "rag"}
 
     # ------------------------------------------------------------------ #
@@ -1896,6 +1958,16 @@ Answer in {plan.target_language}:"""
             print(f"   Issues: {', '.join(evaluation.specific_problems)}")
             print(f"   How to fix: {evaluation.how_to_fix}")
             self._emit("judge_evaluate", "🔁", f"Improving answer: {evaluation.how_to_fix[:60]}…")
+
+        if _OBS_AVAILABLE:
+            _obs.log_judge(
+                session_id=state.get("session_id", ""),
+                attempt=state.get("retry_count", 0) + 1,
+                passed=evaluation.is_acceptable,
+                score=evaluation.overall_score,
+                reason=(", ".join(evaluation.specific_problems) if evaluation.specific_problems
+                        else evaluation.how_to_fix),
+            )
 
         return {
             **state,

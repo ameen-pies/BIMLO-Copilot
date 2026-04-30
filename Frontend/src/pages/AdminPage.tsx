@@ -94,6 +94,62 @@ interface HealthData {
 
 interface LogEntry { ts: string; msg: string; }
 
+// ── Structured pipeline log types ─────────────────────────────────────────────
+type LogMode = "console" | "pipeline";
+type PipelineEventType = "routing" | "judge" | "retrieval" | "ingestion" | "query_end" | "alert" | "latency";
+
+interface PipelineLogEntry {
+  ts:           string;
+  event:        PipelineEventType;
+  // routing
+  session_id?:  string;
+  query?:       string;
+  route?:       string;
+  confidence?:  number;
+  latency_ms?:  number;
+  intent?:      string;
+  prev_route?:  string;
+  forced?:      boolean;
+  // judge
+  attempt?:     number;
+  passed?:      boolean;
+  score?:       number;
+  reason?:      string;
+  // retrieval
+  top_k?:       number;
+  result_count?: number;
+  min_score?:   number;
+  max_score?:   number;
+  avg_score?:   number;
+  reranker_used?: boolean;
+  graph_hits?:  number;
+  source?:      string;
+  // ingestion
+  doc_id?:      string;
+  filename?:    string;
+  node?:        string;
+  status?:      string;
+  user_id?:     string;
+  details?:     Record<string, unknown>;
+  // query_end
+  total_latency_ms?: number;
+  success?:     boolean;
+  judge_attempts?: number;
+  sources_count?: number;
+  error?:       string;
+  // alert
+  alert_type?:  string;
+  message?:     string;
+  // latency
+  label?:       string;
+  // obs stats
+  event_counts?: Record<string, number>;
+  judge_pass?:  number;
+  judge_fail?:  number;
+  judge_pass_rate?: number | null;
+  log_file?:    string;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function timeAgo(iso: string | null | undefined): string {
@@ -682,6 +738,14 @@ export default function AdminPage() {
   const logEndRef = useRef<HTMLDivElement>(null);
   const esRef     = useRef<EventSource | null>(null);
 
+  // ── Log mode switch: console vs structured pipeline ────────────────────────
+  const [logMode, setLogMode]               = useState<LogMode>("console");
+  const [pipelineLogs, setPipelineLogs]     = useState<PipelineLogEntry[]>([]);
+  const [pipelineFilter, setPipelineFilter] = useState<PipelineEventType | "all">("all");
+  const [pipelineStats, setPipelineStats]   = useState<PipelineLogEntry | null>(null);
+  const [pipelineLoading, setPipelineLoading] = useState(false);
+  const pipelineEndRef = useRef<HTMLDivElement>(null);
+
   // ── Dark mode ──────────────────────────────────────────────────────────────
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
   const toggleDark = () => {
@@ -796,6 +860,29 @@ export default function AdminPage() {
   useEffect(() => {
     if (tab === "logs") logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, tab]);
+
+  // ── Pipeline log fetch (structured JSON) ────────────────────────────────────
+  const loadPipelineLogs = useCallback(async () => {
+    if (!currentUser?.token) return;
+    setPipelineLoading(true);
+    try {
+      const [logsRes, statsRes] = await Promise.all([
+        fetch(`${API}/auth/admin/pipeline-logs?limit=300`, { headers: authHeaders(currentUser.token) }),
+        fetch(`${API}/auth/admin/pipeline-logs/stats`,     { headers: authHeaders(currentUser.token) }),
+      ]);
+      if (logsRes.ok) {
+        const d = await logsRes.json();
+        setPipelineLogs(d.entries || []);
+      }
+      if (statsRes.ok) setPipelineStats(await statsRes.json());
+    } catch {}
+    finally { setPipelineLoading(false); }
+  }, [currentUser?.token]);
+
+  useEffect(() => {
+    if (tab === "logs" && logMode === "pipeline") loadPipelineLogs();
+  }, [tab, logMode, loadPipelineLogs]);
+
 
   // ── Edit user ───────────────────────────────────────────────────────────────
   function openEdit(u: AdminUser) {
@@ -1294,51 +1381,222 @@ export default function AdminPage() {
         )}
 
         {/* ══════════════════════ LOGS TAB ══════════════════════ */}
-        {tab === "logs" && (
-          <div style={{ ...S.card, overflow: "hidden" }}>
-            <div style={{
-              padding: "12px 20px", borderBottom: "1px solid hsl(var(--border))",
-              display: "flex", alignItems: "center", gap: 10,
-              background: "hsl(var(--muted)/0.2)",
-            }}>
-              <Terminal size={14} color="#22c55e" />
-              <span style={{ fontSize: 13, fontWeight: 700, color: "hsl(var(--foreground))" }}>System Logs</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: "auto" }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", animation: "pulse 2s infinite" }} />
-                <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>LIVE</span>
-              </div>
-              <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{logs.length} entries</span>
-              <button onClick={() => setLogs([])} style={S.btn("ghost")}><X size={12} /> Clear</button>
-            </div>
-            <div style={{
-              height: 560, overflowY: "auto", padding: "8px 0",
-              background: "hsl(220 15% 7%)",
-              fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-              fontSize: 12,
-            }}>
-              {logs.length === 0 ? (
-                <div style={{ padding: 40, textAlign: "center", color: "#4a5568", fontSize: 13 }}>
-                  Waiting for log entries…
-                </div>
-              ) : logs.map((l, i) => {
-                const kind  = classifyLog(l.msg);
-                const color = kind === "error" ? "#f87171" : kind === "warn" ? "#fbbf24" : kind === "success" ? "#4ade80" : "#94a3b8";
-                const bg    = kind === "error" ? "rgba(248,113,113,0.04)" : kind === "warn" ? "rgba(251,191,36,0.04)" : "transparent";
-                const ts    = l.ts ? new Date(l.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
-                return (
-                  <div key={i} style={{ display: "flex", gap: 12, padding: "3px 16px", background: bg, transition: "background 0.1s" }}
-                    onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)"}
-                    onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = bg}
-                  >
-                    <span style={{ color: "#4a5568", flexShrink: 0, userSelect: "none", fontSize: 11 }}>{ts}</span>
-                    <span style={{ color, wordBreak: "break-all", lineHeight: 1.6 }}>{l.msg}</span>
+        {tab === "logs" && (() => {
+          // ── Pipeline event helpers ──────────────────────────────────────────
+          const EVENT_META: Record<string, { label: string; color: string; icon: string }> = {
+            routing:   { label: "Route",     color: "#3b82f6", icon: "🗺️" },
+            judge:     { label: "Judge",     color: "#a855f7", icon: "⚖️" },
+            retrieval: { label: "Retrieval", color: "#06b6d4", icon: "🔍" },
+            ingestion: { label: "Ingest",    color: "#f59e0b", icon: "📦" },
+            query_end: { label: "Query",     color: "#22c55e", icon: "✅" },
+            alert:     { label: "Alert",     color: "#ef4444", icon: "🚨" },
+            latency:   { label: "Latency",   color: "#64748b", icon: "⏱️" },
+          };
+
+          const filteredPipeline = pipelineLogs.filter(e =>
+            pipelineFilter === "all" || e.event === pipelineFilter
+          );
+
+          function fmtPipelineRow(e: PipelineLogEntry) {
+            const ts = e.ts ? new Date(e.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+            const meta = EVENT_META[e.event] || { label: e.event, color: "#94a3b8", icon: "📝" };
+            let summary = "";
+            switch (e.event) {
+              case "routing":
+                summary = `→ ${e.route ?? "?"}  conf=${((e.confidence ?? 0) * 100).toFixed(0)}%  ${e.latency_ms != null ? e.latency_ms.toFixed(0) + "ms" : ""}${e.forced ? "  [FORCED]" : ""}`;
+                break;
+              case "judge":
+                summary = `attempt=${e.attempt}  ${e.passed ? "✅ PASS" : "❌ FAIL"}  score=${((e.score ?? 0) * 100).toFixed(0)}%${e.reason ? "  " + e.reason.slice(0, 60) : ""}`;
+                break;
+              case "retrieval":
+                summary = `hits=${e.result_count ?? 0}  avg=${((e.avg_score ?? 0)).toFixed(3)}  rerank=${e.reranker_used ? "yes" : "no"}  ${e.latency_ms != null ? e.latency_ms.toFixed(0) + "ms" : ""}`;
+                break;
+              case "ingestion":
+                summary = `[${e.node ?? "?"}]  ${e.status ?? "?"}  ${e.filename ?? ""}  ${e.latency_ms != null ? e.latency_ms.toFixed(0) + "ms" : ""}`;
+                break;
+              case "query_end":
+                summary = `${e.success ? "✅" : "❌"}  route=${e.route ?? "?"}  ${e.total_latency_ms != null ? e.total_latency_ms.toFixed(0) + "ms" : ""}  srcs=${e.sources_count ?? 0}  judge×${e.judge_attempts ?? 1}`;
+                break;
+              case "alert":
+                summary = `[${e.alert_type ?? "?"}]  ${(e.message ?? "").slice(0, 100)}`;
+                break;
+              case "latency":
+                summary = `${e.label ?? "?"}  ${e.latency_ms != null ? e.latency_ms.toFixed(1) + "ms" : ""}`;
+                break;
+              default:
+                summary = JSON.stringify(e).slice(0, 120);
+            }
+            const sessionShort = e.session_id ? e.session_id.slice(-8) : "";
+            return { ts, meta, summary, sessionShort };
+          }
+
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+              {/* ── Mode switcher header ─────────────────────────────────── */}
+              <div style={{ ...S.card, overflow: "hidden" }}>
+                <div style={{
+                  padding: "12px 20px", borderBottom: "1px solid hsl(var(--border))",
+                  display: "flex", alignItems: "center", gap: 10,
+                  background: "hsl(var(--muted)/0.2)",
+                }}>
+                  {/* Mode pills */}
+                  <div style={{ display: "flex", gap: 3, background: "hsl(var(--muted)/0.4)", borderRadius: 9, padding: 3 }}>
+                    {(["console", "pipeline"] as LogMode[]).map(m => (
+                      <button key={m} onClick={() => setLogMode(m)} style={{
+                        padding: "5px 13px", borderRadius: 7, fontSize: 12, fontWeight: 600,
+                        border: "none", cursor: "pointer", transition: "all 0.15s",
+                        background: logMode === m
+                          ? (m === "console" ? "#22c55e" : "#3b82f6")
+                          : "transparent",
+                        color: logMode === m ? "#fff" : "hsl(var(--muted-foreground))",
+                        display: "flex", alignItems: "center", gap: 5,
+                      }}>
+                        {m === "console" ? <Terminal size={11} /> : <Activity size={11} />}
+                        {m === "console" ? "Console" : "Pipeline"}
+                      </button>
+                    ))}
                   </div>
-                );
-              })}
-              <div ref={logEndRef} />
+
+                  {/* Console: live indicator + count + clear */}
+                  {logMode === "console" && (<>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: 8 }}>
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", animation: "pulse 2s infinite" }} />
+                      <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>LIVE</span>
+                    </div>
+                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginLeft: "auto" }}>{logs.length} entries</span>
+                    <button onClick={() => setLogs([])} style={S.btn("ghost")}><X size={12} /> Clear</button>
+                  </>)}
+
+                  {/* Pipeline: filter chips + refresh */}
+                  {logMode === "pipeline" && (<>
+                    <div style={{ display: "flex", gap: 4, marginLeft: 8, flexWrap: "wrap" }}>
+                      {(["all", "routing", "judge", "retrieval", "ingestion", "query_end", "alert"] as const).map(f => {
+                        const m = f === "all" ? null : EVENT_META[f];
+                        return (
+                          <button key={f} onClick={() => setPipelineFilter(f)} style={{
+                            padding: "3px 9px", borderRadius: 99, fontSize: 11, fontWeight: 600,
+                            border: `1px solid ${pipelineFilter === f ? (m?.color ?? "#3b82f6") : "hsl(var(--border))"}`,
+                            background: pipelineFilter === f ? `${m?.color ?? "#3b82f6"}18` : "transparent",
+                            color: pipelineFilter === f ? (m?.color ?? "#3b82f6") : "hsl(var(--muted-foreground))",
+                            cursor: "pointer",
+                          }}>
+                            {f === "all" ? "All" : `${m?.icon} ${m?.label}`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <button onClick={loadPipelineLogs} disabled={pipelineLoading} style={{ ...S.btn("ghost"), marginLeft: "auto", gap: 5 }}>
+                      <RefreshCw size={11} style={pipelineLoading ? { animation: "spin 0.8s linear infinite" } : {}} />
+                      Refresh
+                    </button>
+                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{filteredPipeline.length} entries</span>
+                  </>)}
+                </div>
+
+                {/* ── Console view ─────────────────────────────────────────── */}
+                {logMode === "console" && (
+                  <div style={{
+                    height: 560, overflowY: "auto", padding: "8px 0",
+                    background: "hsl(220 15% 7%)",
+                    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+                    fontSize: 12,
+                  }}>
+                    {logs.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "#4a5568", fontSize: 13 }}>
+                        Waiting for log entries…
+                      </div>
+                    ) : logs.map((l, i) => {
+                      const kind  = classifyLog(l.msg);
+                      const color = kind === "error" ? "#f87171" : kind === "warn" ? "#fbbf24" : kind === "success" ? "#4ade80" : "#94a3b8";
+                      const bg    = kind === "error" ? "rgba(248,113,113,0.04)" : kind === "warn" ? "rgba(251,191,36,0.04)" : "transparent";
+                      const ts    = l.ts ? new Date(l.ts).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+                      return (
+                        <div key={i} style={{ display: "flex", gap: 12, padding: "3px 16px", background: bg, transition: "background 0.1s" }}
+                          onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)"}
+                          onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = bg}
+                        >
+                          <span style={{ color: "#4a5568", flexShrink: 0, userSelect: "none", fontSize: 11 }}>{ts}</span>
+                          <span style={{ color, wordBreak: "break-all", lineHeight: 1.6 }}>{l.msg}</span>
+                        </div>
+                      );
+                    })}
+                    <div ref={logEndRef} />
+                  </div>
+                )}
+
+                {/* ── Pipeline view ─────────────────────────────────────────── */}
+                {logMode === "pipeline" && (
+                  <div style={{
+                    height: 560, overflowY: "auto", padding: "8px 0",
+                    background: "hsl(220 15% 7%)",
+                    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+                    fontSize: 12,
+                  }}>
+                    {filteredPipeline.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "#4a5568", fontSize: 13 }}>
+                        {pipelineLoading ? "Loading pipeline logs…" : "No pipeline events yet. Run a query to see structured logs."}
+                      </div>
+                    ) : [...filteredPipeline].reverse().map((e, i) => {
+                      const { ts, meta, summary, sessionShort } = fmtPipelineRow(e);
+                      const isAlert = e.event === "alert";
+                      const bg = isAlert ? "rgba(239,68,68,0.06)" : "transparent";
+                      return (
+                        <div key={i}
+                          style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "4px 16px", background: bg, borderLeft: isAlert ? "2px solid #ef4444" : "2px solid transparent", transition: "background 0.1s" }}
+                          onMouseEnter={ev => (ev.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)"}
+                          onMouseLeave={ev => (ev.currentTarget as HTMLDivElement).style.background = bg}
+                        >
+                          {/* timestamp */}
+                          <span style={{ color: "#4a5568", flexShrink: 0, fontSize: 10, width: 60 }}>{ts}</span>
+                          {/* event badge */}
+                          <span style={{
+                            flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4,
+                            background: `${meta.color}20`, color: meta.color, border: `1px solid ${meta.color}35`,
+                            width: 64, textAlign: "center",
+                          }}>
+                            {meta.icon} {meta.label}
+                          </span>
+                          {/* session chip */}
+                          {sessionShort && (
+                            <span style={{ flexShrink: 0, fontSize: 9, color: "#4a5568", fontFamily: "monospace" }}>
+                              …{sessionShort}
+                            </span>
+                          )}
+                          {/* summary */}
+                          <span style={{ color: isAlert ? "#f87171" : "#94a3b8", wordBreak: "break-all", lineHeight: 1.7, flex: 1 }}>
+                            {summary}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <div ref={pipelineEndRef} />
+                  </div>
+                )}
+              </div>
+
+              {/* ── Pipeline stats cards (only in pipeline mode) ─────────── */}
+              {logMode === "pipeline" && pipelineStats && (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+                  {([
+                    { label: "Total Queries",    value: (pipelineStats.event_counts?.["query_end"] ?? 0).toLocaleString(),      color: "#22c55e" },
+                    { label: "Judge Pass Rate",  value: pipelineStats.judge_pass_rate != null ? `${(pipelineStats.judge_pass_rate * 100).toFixed(1)}%` : "—", color: "#a855f7" },
+                    { label: "Judge Passes",     value: (pipelineStats.judge_pass ?? 0).toLocaleString(),                        color: "#3b82f6" },
+                    { label: "Judge Failures",   value: (pipelineStats.judge_fail ?? 0).toLocaleString(),                        color: "#ef4444" },
+                    { label: "Routing Events",   value: (pipelineStats.event_counts?.["routing"]   ?? 0).toLocaleString(),      color: "#f59e0b" },
+                    { label: "Ingestion Events", value: (pipelineStats.event_counts?.["ingestion"] ?? 0).toLocaleString(),      color: "#06b6d4" },
+                    { label: "Alerts Fired",     value: (pipelineStats.event_counts?.["alert"]     ?? 0).toLocaleString(),      color: "#ef4444" },
+                  ]).map(s => (
+                    <div key={s.label} style={{ ...S.card, padding: "14px 16px" }}>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
+                      <div style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ══════════════════════ SETTINGS TAB ══════════════════════ */}
         {tab === "settings" && (

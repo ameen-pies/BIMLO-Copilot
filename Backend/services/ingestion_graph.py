@@ -35,6 +35,14 @@ from typing import Dict, List, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
 
+# ── Observability ──────────────────────────────────────────────────────────────
+try:
+    from observability import obs as _obs
+    _OBS_AVAILABLE = True
+except ImportError:
+    _obs = None
+    _OBS_AVAILABLE = False
+
 # ─────────────────────────────────────────────────────────────────────────────
 # State
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,12 +78,20 @@ def _node_chunk_document(state: IngestionState) -> IngestionState:
     if not chunks:
         msg = f"[ingestion] '{filename}': no chunks produced — skipping indexing"
         print(f"⚠️  {msg}")
+        if _OBS_AVAILABLE:
+            _obs.log_ingestion(state["doc_id"], filename, "chunk_document", "failed",
+                               details={"reason": "no chunks"})
         return {**state, "error": msg}
 
     print(
         f"📄 [ingestion:chunk_document] '{filename}' — "
         f"{len(chunks)} chunks ready for indexing"
     )
+    if _OBS_AVAILABLE:
+        _obs.log_ingestion(state["doc_id"], filename, "chunk_document", "ok",
+                           details={"chunk_count": len(chunks)},
+                           session_id=state.get("session_id"),
+                           user_id=state.get("user_id"))
     return state  # pass through; chunks already produced by DocumentProcessor
 
 
@@ -107,15 +123,25 @@ def _make_index_vector_store_node(vector_store):
                 user_id=user_id,
                 doc_id=state.get("doc_id"),
             )
+            _latency_ms = (time.time() - t0) * 1000
             print(
                 f"✅ [ingestion:index_vector_store] '{filename}' indexed "
                 f"in {time.time()-t0:.1f}s to user_{user_id or 'anon'}_session_{session_id}"
             )
+            if _OBS_AVAILABLE:
+                _obs.log_ingestion(doc_id, filename, "index_vector_store", "ok",
+                                   latency_ms=_latency_ms,
+                                   details={"chunk_count": len(chunks)},
+                                   session_id=session_id, user_id=user_id)
             return {**state, "vector_indexed": True}
         except Exception as e:
             msg = f"[ingestion] vector store indexing failed for '{filename}': {e}"
             print(f"❌ {msg}")
             traceback.print_exc()
+            if _OBS_AVAILABLE:
+                _obs.log_ingestion(doc_id, filename, "index_vector_store", "failed",
+                                   details={"error": str(e)},
+                                   session_id=session_id, user_id=user_id)
             return {**state, "error": msg, "vector_indexed": False}
 
     return _node
@@ -142,24 +168,38 @@ def _node_ingest_graph_rag(state: IngestionState) -> IngestionState:
 
         if not graph_engine.available:
             print(f"ℹ️  [ingestion:ingest_graph_rag] Neo4j unavailable — skipping for '{filename}'")
+            if _OBS_AVAILABLE:
+                _obs.log_ingestion(doc_id, filename, "ingest_graph_rag", "skipped",
+                                   details={"reason": "Neo4j unavailable"})
             return {**state, "skipped_graph": True, "graph_ingested": False}
 
         print(f"🕸️  [ingestion:ingest_graph_rag] extracting entities from '{filename}'…")
+        _t0 = time.time()
         stats = graph_engine.ingest_chunks(doc_id, filename, chunks)
+        _latency_ms = (time.time() - _t0) * 1000
         print(
             f"✅ [ingestion:ingest_graph_rag] '{filename}' — "
             f"{stats.get('entities', 0)} entities, "
             f"{stats.get('relationships', 0)} relationships"
         )
+        if _OBS_AVAILABLE:
+            _obs.log_ingestion(doc_id, filename, "ingest_graph_rag", "ok",
+                               latency_ms=_latency_ms, details=stats)
         return {**state, "graph_ingested": True, "graph_stats": stats}
 
     except ImportError:
         print(f"ℹ️  [ingestion:ingest_graph_rag] graph_rag module not found — skipping")
+        if _OBS_AVAILABLE:
+            _obs.log_ingestion(doc_id, filename, "ingest_graph_rag", "skipped",
+                               details={"reason": "graph_rag not installed"})
         return {**state, "skipped_graph": True, "graph_ingested": False}
 
     except Exception as e:
         # Non-fatal — vector store is already indexed and usable
         print(f"⚠️  [ingestion:ingest_graph_rag] entity extraction failed (non-fatal): {e}")
+        if _OBS_AVAILABLE:
+            _obs.log_ingestion(doc_id, filename, "ingest_graph_rag", "failed",
+                               details={"error": str(e)})
         return {**state, "graph_ingested": False, "graph_stats": {"error": str(e)}}
 
 

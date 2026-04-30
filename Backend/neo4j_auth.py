@@ -1524,3 +1524,59 @@ async def admin_logs_stream(admin: Dict = Depends(require_admin)):
 
     return _SR(_gen(), media_type="text/event-stream",
                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+@router.get("/admin/pipeline-logs")
+def admin_pipeline_logs(
+    limit: int = 300,
+    event: str = None,          # optional filter: routing|judge|retrieval|…
+    user: dict = Depends(require_admin),
+):
+    """
+    Return the last `limit` structured pipeline log entries from
+    observability.py's JSONL file.
+ 
+    Query params:
+      limit  — max entries to return (default 300, max 2000)
+      event  — filter by event type (routing, judge, retrieval, ingestion,
+                query_end, alert, latency)
+ 
+    Response:
+      { "entries": [ {...}, … ], "total": N, "log_file": "…" }
+    """
+    try:
+        from observability import obs
+        limit = min(max(1, limit), 2000)
+        entries = obs.tail_logs(n=limit, event_filter=event or None)
+        return {
+            "entries":  entries,
+            "total":    len(entries),
+            "log_file": str(obs.LOG_FILE) if hasattr(obs, "LOG_FILE") else "unknown",
+        }
+    except ImportError:
+        raise HTTPException(503, "observability module not available — ensure observability.py is in the Python path")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read pipeline logs: {e}")
+ 
+ 
+@router.get("/admin/pipeline-logs/stats")
+def admin_pipeline_logs_stats(user: dict = Depends(require_admin)):
+    """
+    Return aggregate statistics computed from the full pipeline log file.
+ 
+    Response:
+      {
+        "event_counts":    { "routing": N, "judge": N, … },
+        "judge_pass":      N,
+        "judge_fail":      N,
+        "judge_pass_rate": 0.xx | null,
+        "log_file":        "/path/to/bimlo_structured.jsonl"
+      }
+    """
+    try:
+        from observability import obs
+        stats = obs.get_stats()
+        return stats
+    except ImportError:
+        raise HTTPException(503, "observability module not available")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to compute pipeline stats: {e}")

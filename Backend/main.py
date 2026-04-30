@@ -330,6 +330,63 @@ def clear_history(session_id: str):
     _session_route_log.pop(session_id, None)
 
 
+def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Optional[str]):
+    """
+    Ensure every doc_id in pending_doc_ids is indexed in the vector store
+    for this session before the RAG engine searches.
+
+    The upload endpoint submits docs to the background ingestion pipeline,
+    so by the time the user sends their first message the doc may or may not
+    be in ChromaDB yet.  This function guarantees it is.
+    """
+    if not pending_doc_ids:
+        return
+
+    for _pending_id in pending_doc_ids:
+        # Fast-path: already in the collection?
+        try:
+            _existing = vector_store.list_documents(user_id=user_id, session_id=session_id)
+            if any(d["document_id"] == _pending_id for d in _existing):
+                print(f"✅ Doc {_pending_id} already indexed in session {session_id}")
+                continue
+        except Exception:
+            pass
+
+        # Not indexed yet — pull from in-memory file cache and index synchronously
+        _cached = DOCUMENT_FILE_CACHE.get(_pending_id)
+        if not _cached:
+            print(f"⚠️  Doc {_pending_id} not in file cache — ingestion pipeline may still be running")
+            continue
+
+        print(f"⏳ Committing pending doc '{_cached['filename']}' ({_pending_id})…")
+        try:
+            import tempfile as _tmpmod
+            _ext = _cached.get('doc_type', '.txt')
+            with _tmpmod.NamedTemporaryFile(suffix=_ext, delete=False) as _tmp:
+                _tmp.write(_cached['bytes'])
+                _tmp_path = _tmp.name
+            try:
+                _chunks = doc_processor.process_document(_tmp_path)
+                for _idx, _chunk in enumerate(_chunks):
+                    if "metadata" not in _chunk:
+                        _chunk["metadata"] = {}
+                    _chunk["metadata"]["chunk_index"] = _idx
+                    _chunk["metadata"]["document_id"] = _pending_id
+            finally:
+                os.unlink(_tmp_path)
+
+            vector_store.add_document(
+                _cached['filename'],
+                _chunks,
+                session_id=session_id,
+                user_id=user_id,
+                doc_id=_pending_id,
+            )
+            print(f"✅ Committed '{_cached['filename']}' ({len(_chunks)} chunks) → session {session_id}")
+        except Exception as _err:
+            print(f"❌ Failed to commit pending doc {_pending_id}: {_err}")
+
+
 # ============================================================================
 # MODELS
 # ============================================================================
@@ -564,10 +621,11 @@ async def query_documents(
         # Get history accumulated so far for this session
         history = get_history(session_id)
 
-        # Log any pending doc IDs sent by frontend (already indexed at upload time)
+        # ── Commit any pending docs the frontend attached to this message ──────
         pending_doc_ids = request.pending_doc_ids or []
         if pending_doc_ids:
-            print(f"📎 /query: {len(pending_doc_ids)} doc(s) attached to this message: {pending_doc_ids}")
+            print(f"📎 /query: {len(pending_doc_ids)} pending doc(s) — ensuring indexed before search")
+            commit_pending_docs(pending_doc_ids, session_id, user_id)
 
         print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns, preferred_provider={request.preferred_provider!r}]")
 
@@ -678,6 +736,12 @@ async def query_stream(
 
     def run_query():
         try:
+            # Commit any pending docs before the RAG engine searches
+            _pending = request.pending_doc_ids or []
+            if _pending:
+                print(f"📎 /query-stream: {len(_pending)} pending doc(s) — ensuring indexed")
+                commit_pending_docs(_pending, session_id, user_id)
+
             result = rag_engine.query(
                 request.query,
                 top_k=request.top_k,
