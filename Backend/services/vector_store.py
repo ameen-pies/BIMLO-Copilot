@@ -289,6 +289,41 @@ class VectorStoreManager:
             "table_chunks":    table_chunks,
         }
 
+    def get_global_stats(self) -> Dict:
+        """
+        Aggregate stats across ALL collections (for admin dashboard).
+        Replaces get_collection_stats() in health checks so the admin panel
+        shows the real total instead of the empty 'global' fallback collection.
+        """
+        total_chunks    = 0
+        total_documents = 0
+        image_chunks    = 0
+        table_chunks    = 0
+
+        try:
+            all_collections = self.client.list_collections()
+            for col in all_collections:
+                col_obj   = self.client.get_collection(col.name)
+                results   = col_obj.get()
+                metadatas = results.get("metadatas", [])
+
+                doc_ids = set(
+                    m.get("document_id") for m in metadatas if m.get("document_id")
+                )
+                total_chunks    += col_obj.count()
+                total_documents += len(doc_ids)
+                image_chunks    += sum(1 for m in metadatas if m.get("has_images"))
+                table_chunks    += sum(1 for m in metadatas if m.get("has_tables"))
+        except Exception as e:
+            print(f"Warning: could not aggregate global stats: {e}")
+
+        return {
+            "total_chunks":    total_chunks,
+            "total_documents": total_documents,
+            "image_chunks":    image_chunks,
+            "table_chunks":    table_chunks,
+        }
+
     def delete_collection(self, user_id: Optional[str] = None, session_id: Optional[str] = None):
         """
         Completely delete a user/session's collection.

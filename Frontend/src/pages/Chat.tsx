@@ -97,9 +97,17 @@ interface Message {
   navAction?: { path: string; label: string; icon: string } | null; // inline nav buttons baked into the bubble
 }
 
+interface FactChip {
+  label: string;
+  value: string;
+  raw_line: string;
+  is_numeric: boolean;
+}
+
 interface Conversation {
   id: string;
   title: string;
+  initialTitle?: string;
   preview: string;
   timestamp: Date;
   messages: Message[];
@@ -107,6 +115,16 @@ interface Conversation {
 
 const createUniqueId = (prefix = "id-") =>
   crypto.randomUUID?.() ?? `${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const getDefaultConversationTitle = (text: string): string | null => {
+  const cleaned = text.trim().replace(/[.!?]+$/, "").toLowerCase();
+  if (!cleaned) return null;
+  if (/^(hi|hello|hey|hiya|yo|greetings)$/i.test(cleaned)) return "Greetings";
+  if (/^good (morning|afternoon|evening)$/i.test(cleaned)) return "Greetings";
+  if (/^(how are you|how's it going|what's up|sup)$/i.test(cleaned)) return "Checking in";
+  if (/^(thank you|thanks|thx|ty)$/i.test(cleaned)) return "Thanks";
+  return null;
+};
 
 // ---------------------------------------------------------------------------
 // Report types
@@ -3489,6 +3507,7 @@ const Chat = () => {
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const activeConvIdRef = useRef<string>("");
   useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+  const activeConversation = conversations.find(c => c.id === activeConvId);
   // Tracks IDs of conversations that have been deleted so in-flight responses
   // don't re-insert them into the sidebar.
   const deletedConvIdsRef = useRef<Set<string>>(new Set());
@@ -3519,16 +3538,25 @@ const Chat = () => {
                   preview: preview || c.preview,
                   timestamp: new Date(),
                   title: title || c.title,
+                  initialTitle: c.initialTitle ?? title ?? c.title,
                 }
               : c
           );
         }
         // Double-check the set inside the updater too (state closure timing)
         if (deletedConvIdsRef.current.has(convId)) return prev;
+        // Never create a new sidebar entry with a blank, whitespace-only, or
+        // trivially short title — this is the root cause of the ghost "chat"
+        // conversation that appears whenever the user types a short phrase and
+        // the first updateConversationMessages call fires before the assistant
+        // has replied. We only insert when we have a real, non-trivial title.
+        const resolvedTitle = (title || "").trim();
+        if (!resolvedTitle || resolvedTitle.length < 2) return prev;
         return [
           {
             id: convId,
-            title: title || "Untitled",
+            title: resolvedTitle || "Untitled",
+            initialTitle: resolvedTitle || "Untitled",
             preview,
             timestamp: new Date(),
             messages: updatedMessages,
@@ -3856,6 +3884,8 @@ const Chat = () => {
         const capturedSamples = [...waveformSamplesRef.current];
         waveformSamplesRef.current = [];
 
+        // Snapshot any documents waiting to be attached before transcription
+        const snapshotDocIds = [...pendingDocIds];
         // Immediately add a voice message bubble (transcript will fill in async)
         const voiceMsgId = createUniqueId("msg-");
         const voiceMsg: Message = {
@@ -3866,6 +3896,7 @@ const Chat = () => {
           voiceDuration: duration,
           voiceTranscript: undefined, // pending
           voiceWaveform: capturedSamples,
+          attachedDocIds: snapshotDocIds.length > 0 ? snapshotDocIds : undefined,
           timestamp: new Date(),
         };
         setMessages(prev => [...prev, voiceMsg]);
@@ -3898,21 +3929,24 @@ const Chat = () => {
             const voiceMessages = currentMsgs.some(m => m.id === voiceMsgId)
               ? currentMsgs.map(m => m.id === voiceMsgId ? updatedVoiceMsg : m)
               : [...currentMsgs, updatedVoiceMsg];
-            // Wrap the transcript so the agent knows this was spoken, not typed
-            const voiceQuery = `[Voice message — the user said this aloud, not typed it]\n\n${transcript}`;
+            // Transcript leads so the language judge reads the user's language first.
+            // The trailing tag signals voice input without polluting language detection.
+            const voiceQuery = `${transcript}\n\n[voice_input=true]`;
             const convId = ensureActiveConversationId();
-            const title = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
+            const transcriptTitle = transcript.length > 50 ? transcript.slice(0, 50) + "…" : transcript;
+            const title = activeConversation?.title ?? transcriptTitle;
             // Batch all synchronous state updates together before the first await so
             // React 18 can flush them in a single render — avoids a visible flicker.
             // Note: do NOT call setIsLoading(true) here; runStreamingQuery owns that
             // state and sets it itself, so a redundant call here would cause an extra
             // render cycle right before runStreamingQuery's own synchronous updates.
             updateConversationMessages(convId, voiceMessages, "", title);
+            setPendingDocIds([]);
             markPendingConversation(convId);
             setTypingConvId(convId);
             if (!notifyDismissed) setShowNotifyBanner(true);
             try {
-              const assistantMsg = await runStreamingQuery(voiceQuery);
+              const assistantMsg = await runStreamingQuery(voiceQuery, undefined, snapshotDocIds);
               if (!assistantMsg) return;
               const updated = [...voiceMessages, assistantMsg];
               const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
@@ -4032,7 +4066,7 @@ const Chat = () => {
       toast({ title: "Microphone access denied", description: "Allow microphone access in your browser settings.", variant: "destructive" });
       setVoiceState("idle");
     }
-  }, [voiceState, toast]);
+  }, [voiceState, toast, pendingDocIds]);
 
   // ── Thinking / progress steps ────────────────────────────────────────────
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
@@ -4153,13 +4187,9 @@ const Chat = () => {
   ) => {
     const userMsgs = messages.filter(m => m.role === "user");
     if (userMsgs.length < 1) return;
-    const firstUserText = userMsgs[0]?.content ?? "";
-    // Re-title whenever the title still looks like a raw first-message slice
-    // (either exact match or truncated version). Be permissive — smart titles
-    // are cheap and always better than raw user phrasing.
-    const norm = (s: string) => s.trim().toLowerCase().replace(/…$/, "").slice(0, 50);
-    const looksRaw = norm(currentTitle) === norm(firstUserText);
-    if (!looksRaw) return;
+    // Only generate a title after the very first exchange (1 user msg + 1 assistant reply).
+    // If there are already 2+ user messages, the conversation was already titled — skip.
+    if (userMsgs.length > 1) return;
 
     try {
       const res = await fetch(`${getApiBase()}/title`, {
@@ -4364,6 +4394,151 @@ const Chat = () => {
     const doc = documents.find(d => d.filename === filename);
     if (!doc) return;
     openBubbleDoc(doc, excerpts[0] ?? null, excerpts);
+  };
+
+  const renderSourceCards = (msg: Message) => {
+    if (msg.role !== "assistant" || !msg.sources?.length) return null;
+
+    const seenNums = new Set<number>();
+    const citedSources = msg.sources.filter((source) => {
+      const hasChips = (source as any).fact_chips?.length > 0;
+      const hasLegacy = (source as any).cited_facts?.length > 0;
+      if (!hasChips && !hasLegacy) return false;
+      if (seenNums.has(source.source_number)) return false;
+      seenNums.add(source.source_number);
+      return true;
+    });
+    if (citedSources.length === 0) return null;
+
+    return (
+      <div className="mt-3 space-y-2">
+        {citedSources.map((source) => {
+          const docExcerpt: string = (source as any).excerpt ?? "";
+          const sourceKey = `${msg.id}-${source.source_number}`;
+          const isExpanded = openSourceKey === sourceKey;
+          const isWiki = !!(source as any).wiki_url;
+          const wikiUrl: string = (source as any).wiki_url ?? "";
+          const hasImages = !!(source as any).has_images;
+          const hasTables = !!(source as any).has_tables;
+
+          const factChips: FactChip[] = (() => {
+            const raw = (source as any).fact_chips;
+            if (Array.isArray(raw) && raw.length > 0) return raw as FactChip[];
+            const secs = (source as any).sections ?? [];
+            return secs.map((sec: any) => ({
+              label: sec.title ?? source.filename,
+              value: sec.excerpt ?? (sec.lines?.[0] ?? ""),
+              raw_line: sec.excerpt ?? (sec.lines?.[0] ?? ""),
+              is_numeric: false,
+            })).filter((c: FactChip) => c.value);
+          })();
+
+          if (isWiki) {
+            return (
+              <a
+                key={source.source_number}
+                id={`source-${msg.id}-${source.source_number}`}
+                href={wikiUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-xl border border-blue-500/25 overflow-hidden scroll-mt-4 flex flex-col hover:border-blue-500/50 transition-colors group/wiki no-underline"
+              >
+                <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/8 group-hover/wiki:bg-blue-500/12 transition-colors">
+                  <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-[10px] shrink-0">
+                    {source.source_number}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[12px] font-semibold text-foreground truncate">{source.filename}</span>
+                      <ExternalLink className="h-3 w-3 shrink-0 text-blue-400/70 group-hover/wiki:text-blue-400 transition-colors" />
+                    </span>
+                    <span className="text-[10px] text-blue-400/50 truncate block">wikipedia.org</span>
+                  </span>
+                </div>
+                {docExcerpt && (
+                  <div className="flex items-start gap-3 px-3 py-2 border-t border-blue-500/10 bg-background/40">
+                    <p className="text-[11px] text-muted-foreground/60 leading-relaxed line-clamp-3 flex-1">{docExcerpt}</p>
+                    <WikiThumbnail wikiUrl={wikiUrl} />
+                  </div>
+                )}
+              </a>
+            );
+          }
+
+          return (
+            <div
+              key={source.source_number}
+              id={`source-${msg.id}-${source.source_number}`}
+              className="rounded-xl border border-primary/20 overflow-hidden scroll-mt-4"
+            >
+              <div className="flex items-center gap-2 px-3 py-2 bg-primary/8">
+                <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary/20 text-primary font-bold text-[10px] shrink-0">
+                  {source.source_number}
+                </span>
+                <span className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
+                  <span
+                    title={source.filename}
+                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
+                    style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
+                    data-open-doc
+                    onClick={(e) => { e.stopPropagation(); openDocumentAtExcerpt(source.filename, docExcerpt); }}
+                  >
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                      <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                      <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                    </svg>
+                    {source.filename}
+                  </span>
+                  {factChips.length > 0 && (
+                    <span className="text-[9px] text-muted-foreground/50 shrink-0">
+                      {factChips.length} fact{factChips.length !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {hasImages && (
+                    <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
+                      <ImageIcon className="h-2.5 w-2.5" />
+                      visual
+                    </span>
+                  )}
+                  {hasTables && (
+                    <span title="Contains table data" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-teal-500/15 text-teal-400 text-[9px] font-medium shrink-0">
+                      table
+                    </span>
+                  )}
+                </span>
+              </div>
+
+              {factChips.length > 0 && (
+                <div className="px-3 py-2.5 flex flex-wrap gap-1.5 border-t border-primary/10 bg-background/40">
+                  {factChips.map((chip, ci) => (
+                    <button
+                      key={ci}
+                      title={chip.raw_line}
+                      data-open-doc
+                      onClick={() => openDocumentAtExcerpt(source.filename, chip.raw_line)}
+                      className="group/chip inline-flex items-baseline gap-1 rounded-lg border transition-all hover:border-primary/40 hover:bg-primary/5 active:scale-95"
+                      style={{
+                        padding: "3px 8px 3px 6px",
+                        background: "color-mix(in srgb, hsl(var(--primary)) 4%, transparent)",
+                        borderColor: "color-mix(in srgb, hsl(var(--primary)) 16%, transparent)",
+                      }}
+                    >
+                      <span className="text-[9px] font-medium text-muted-foreground/60 uppercase tracking-wide leading-none group-hover/chip:text-muted-foreground transition-colors whitespace-nowrap">
+                        {chip.label}
+                      </span>
+                      <span className="text-[8px] text-muted-foreground/30 leading-none">·</span>
+                      <span className={`text-[11px] font-semibold leading-none whitespace-nowrap ${chip.is_numeric ? "text-primary" : "text-foreground/80"}`}>
+                        {chip.value}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   // Open viewer and highlight the line containing a specific number value
@@ -5775,9 +5950,17 @@ const Chat = () => {
       attachedDocIds: snapshotDocIds.length > 0 ? snapshotDocIds : undefined,
     };
     const userRawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
+    const greetingTitle = getDefaultConversationTitle(trimmedInput);
+    const conversationTitle = greetingTitle ?? userRawTitle;
     const updatedUserMessages = [...originMessages, userMsg];
     setMessages(prev => [...prev, userMsg]);
-    updateConversationMessages(convId, updatedUserMessages, "", userRawTitle);
+    const titleToSet = activeConversation?.initialTitle ?? activeConversation?.title ?? conversationTitle;
+    // NOTE: Pass "" as title here so updateConversationMessages does NOT create
+    // a new sidebar entry yet (the guard above blocks entries with empty titles).
+    // The conversation will be inserted into the sidebar only once the assistant
+    // reply arrives and updateConversationMessages is called with the full preview
+    // and a real title — this prevents the ghost "chat" entry from appearing.
+    updateConversationMessages(convId, updatedUserMessages, "", activeConvId ? titleToSet : "");
     setInput("");
     setPendingDocIds([]);
     if (!notifyDismissed) setShowNotifyBanner(true);
@@ -5830,9 +6013,14 @@ const Chat = () => {
       const updatedMessages: Message[] = [...originMessages, userMsg, assistantMsg];
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
       const preview  = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-      updateConversationMessages(convId, updatedMessages, preview, rawTitle);
-      // Persist to DB (non-blocking)
-      saveConversationToDB(convId, sessionIdRef.current ?? "", rawTitle, preview, updatedMessages);
+      // Pass the real title here — this is the first call that will actually
+      // insert the conversation into the sidebar (the earlier call was blocked
+      // by the empty-title guard to prevent ghost entries appearing on send).
+      const finalTitle = activeConversation?.initialTitle ?? activeConversation?.title ?? conversationTitle ?? rawTitle;
+      updateConversationMessages(convId, updatedMessages, preview, finalTitle);
+      // Persist to DB (non-blocking); keep the current conversation title if it was already set
+      const currentTitle = activeConversation?.title ?? finalTitle ?? rawTitle;
+      saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, updatedMessages);
       setTypingMessageId(assistantMsg.id);
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
@@ -6348,15 +6536,25 @@ const Chat = () => {
           )}
         </AnimatePresence>
         {/* Header */}
-        <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0 bg-background">
+        <header className="h-14 border-b border-border flex items-center px-4 gap-2 shrink-0 bg-background relative">
           <Link to="/">
             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">
               <ArrowLeft className="h-4 w-4" />
             </Button>
           </Link>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <Logo className="h-7 w-7" />
             <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
+          </div>
+          <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center">
+            <p className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem]">
+              <TypewriterText
+                key={activeConversation?.id ?? "new-conversation"}
+                text={activeConversation?.initialTitle ?? activeConversation?.title ?? "New conversation"}
+                speed={28}
+                render={partial => <span className="inline-block align-middle">{partial}</span>}
+              />
+            </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
 
@@ -7358,26 +7556,9 @@ const Chat = () => {
                         </div>
                       </div>
                     </div>
-                  ) : msg.voiceBlobUrl || msg.voiceTranscript ? (
-                    <VoiceMessageBubble
-                      blobUrl={msg.voiceBlobUrl}
-                      duration={msg.voiceDuration ?? 0}
-                      transcript={msg.voiceTranscript}
-                      isExpanded={expandedTranscripts.has(msg.id)}
-                      waveform={msg.voiceWaveform}
-                      timestamp={msg.timestamp}
-                      onToggleTranscript={() =>
-                        setExpandedTranscripts(prev => {
-                          const next = new Set(prev);
-                          if (next.has(msg.id)) next.delete(msg.id);
-                          else next.add(msg.id);
-                          return next;
-                        })
-                      }
-                    />
                   ) : (
                   <>
-                  {/* Attached docs — shown above the bubble for user messages */}
+                  {/* Attached docs — shown above the bubble for user/voice messages */}
                   {msg.role === "user" && msg.attachedDocIds && msg.attachedDocIds.length > 0 && (
                     <div className="flex flex-wrap justify-end gap-1.5 mb-1">
                       {msg.attachedDocIds.map(docId => {
@@ -7417,7 +7598,25 @@ const Chat = () => {
                       })}
                     </div>
                   )}
-                  <div
+                  {/* Voice bubble sits below attached docs, text bubble for all other messages */}
+                  {(msg.voiceBlobUrl || msg.voiceTranscript) ? (
+                    <VoiceMessageBubble
+                      blobUrl={msg.voiceBlobUrl}
+                      duration={msg.voiceDuration ?? 0}
+                      transcript={msg.voiceTranscript}
+                      isExpanded={expandedTranscripts.has(msg.id)}
+                      waveform={msg.voiceWaveform}
+                      timestamp={msg.timestamp}
+                      onToggleTranscript={() =>
+                        setExpandedTranscripts(prev => {
+                          const next = new Set(prev);
+                          if (next.has(msg.id)) next.delete(msg.id);
+                          else next.add(msg.id);
+                          return next;
+                        })
+                      }
+                    />
+                  ) : <div
                     className={`group/bubble relative z-10 px-4 rounded-2xl text-sm leading-relaxed ${
                       msg.role === "user"
                         ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit break-words min-w-0 max-w-full"
@@ -7620,8 +7819,8 @@ const Chat = () => {
                       /* ── Normal user message ── */
                       <span>{msg.content}</span>
                     )}
-                  </div>
-                  </> )} {/* end voice ? ... : <> */}
+                  </div>}
+                  </> )} {/* end CAD/voice/<> block */}
 
                   {/* Timestamp + action bar — hidden for voice messages (timestamp is inside VoiceMessageBubble) */}
                   {!msg.voiceBlobUrl && (
@@ -7685,167 +7884,9 @@ const Chat = () => {
                       </div>
                     )}
                   </div>
-                  )} {/* end !msg.voiceBlobUrl */}
+                  )}
 
-                  {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
-                    // ── v11 Fact-Chip Source Cards ─────────────────────────────────────
-                    // Deduplicate by source_number
-                    const seenNums = new Set<number>();
-                    const citedSources = msg.sources.filter(s => {
-                      const hasChips = (s as any).fact_chips?.length > 0;
-                      const hasLegacy = (s as any).cited_facts?.length > 0;
-                      if (!hasChips && !hasLegacy) return false;
-                      if (seenNums.has(s.source_number)) return false;
-                      seenNums.add(s.source_number);
-                      return true;
-                    });
-                    if (citedSources.length === 0) return null;
-
-                    return (
-                      <div className="mt-3 space-y-2">
-                        {citedSources.map((source) => {
-                          const docExcerpt: string = (source as any).excerpt ?? "";
-                          const sourceKey = `${msg.id}-${source.source_number}`;
-                          const isExpanded = openSourceKey === sourceKey;
-                          const isWiki = !!(source as any).wiki_url;
-                          const wikiUrl: string = (source as any).wiki_url ?? "";
-                          const hasImages = !!(source as any).has_images;
-                          const hasTables = !!(source as any).has_tables;
-
-                          // Fact chips — v11 shape, with legacy fallback
-                          type FactChip = { label: string; value: string; raw_line: string; is_numeric: boolean };
-                          const factChips: FactChip[] = (() => {
-                            const raw = (source as any).fact_chips;
-                            if (Array.isArray(raw) && raw.length > 0) return raw as FactChip[];
-                            // Legacy fallback: synthesise chips from sections
-                            const secs = (source as any).sections ?? [];
-                            return secs.map((sec: any) => ({
-                              label:      sec.title ?? source.filename,
-                              value:      sec.excerpt ?? (sec.lines?.[0] ?? ""),
-                              raw_line:   sec.excerpt ?? (sec.lines?.[0] ?? ""),
-                              is_numeric: false,
-                            })).filter((c: FactChip) => c.value);
-                          })();
-
-                          // ── Wikipedia source card ──────────────────────
-                          if (isWiki) {
-                            return (
-                              <a
-                                key={source.source_number}
-                                id={`source-${msg.id}-${source.source_number}`}
-                                href={wikiUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="rounded-xl border border-blue-500/25 overflow-hidden scroll-mt-4 flex flex-col hover:border-blue-500/50 transition-colors group/wiki no-underline"
-                              >
-                                <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/8 group-hover/wiki:bg-blue-500/12 transition-colors">
-                                  <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-blue-500/20 text-blue-400 font-bold text-[10px] shrink-0">
-                                    {source.source_number}
-                                  </span>
-                                  <span className="flex-1 min-w-0">
-                                    <span className="flex items-center gap-1.5">
-                                      <span className="text-[12px] font-semibold text-foreground truncate">{source.filename}</span>
-                                      <ExternalLink className="h-3 w-3 shrink-0 text-blue-400/70 group-hover/wiki:text-blue-400 transition-colors" />
-                                    </span>
-                                    <span className="text-[10px] text-blue-400/50 truncate block">wikipedia.org</span>
-                                  </span>
-                                </div>
-                                {docExcerpt && (
-                                  <div className="flex items-start gap-3 px-3 py-2 border-t border-blue-500/10 bg-background/40">
-                                    <p className="text-[11px] text-muted-foreground/60 leading-relaxed line-clamp-3 flex-1">{docExcerpt}</p>
-                                    <WikiThumbnail wikiUrl={wikiUrl} />
-                                  </div>
-                                )}
-                              </a>
-                            );
-                          }
-
-                          // ── Regular document source card (v11 fact-chip layout) ───────
-                          return (
-                            <div
-                              key={source.source_number}
-                              id={`source-${msg.id}-${source.source_number}`}
-                              className="rounded-xl border border-primary/20 overflow-hidden scroll-mt-4"
-                            >
-                              {/* ── Card header ── */}
-                              <div className="flex items-center gap-2 px-3 py-2 bg-primary/8">
-                                <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary/20 text-primary font-bold text-[10px] shrink-0">
-                                  {source.source_number}
-                                </span>
-                                <span className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
-                                  {/* File icon + name */}
-                                  <span
-                                    title={source.filename}
-                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
-                                    style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
-                                    data-open-doc
-                                    onClick={(e) => { e.stopPropagation(); openDocumentAtExcerpt(source.filename, docExcerpt); }}
-                                  >
-                                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="shrink-0">
-                                      <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                                      <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                                    </svg>
-                                    {source.filename}
-                                  </span>
-                                  {/* Chip count badge */}
-                                  {factChips.length > 0 && (
-                                    <span className="text-[9px] text-muted-foreground/50 shrink-0">
-                                      {factChips.length} fact{factChips.length !== 1 ? "s" : ""}
-                                    </span>
-                                  )}
-                                  {hasImages && (
-                                    <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
-                                      <ImageIcon className="h-2.5 w-2.5" />
-                                      visual
-                                    </span>
-                                  )}
-                                  {hasTables && (
-                                    <span title="Contains table data" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-teal-500/15 text-teal-400 text-[9px] font-medium shrink-0">
-                                      table
-                                    </span>
-                                  )}
-                                </span>
-
-                              </div>
-
-                              {/* ── Fact chips — always visible (no expand needed) ── */}
-                              {factChips.length > 0 && (
-                                <div className="px-3 py-2.5 flex flex-wrap gap-1.5 border-t border-primary/10 bg-background/40">
-                                  {factChips.map((chip, ci) => (
-                                    <button
-                                      key={ci}
-                                      title={chip.raw_line}
-                                      data-open-doc
-                                      onClick={() => openDocumentAtExcerpt(source.filename, chip.raw_line)}
-                                      className="group/chip inline-flex items-baseline gap-1 rounded-lg border transition-all hover:border-primary/40 hover:bg-primary/5 active:scale-95"
-                                      style={{
-                                        padding: "3px 8px 3px 6px",
-                                        background: "color-mix(in srgb, hsl(var(--primary)) 4%, transparent)",
-                                        borderColor: "color-mix(in srgb, hsl(var(--primary)) 16%, transparent)",
-                                      }}
-                                    >
-                                      {/* Label */}
-                                      <span className="text-[9px] font-medium text-muted-foreground/60 uppercase tracking-wide leading-none group-hover/chip:text-muted-foreground transition-colors whitespace-nowrap">
-                                        {chip.label}
-                                      </span>
-                                      {/* Divider */}
-                                      <span className="text-[8px] text-muted-foreground/30 leading-none">·</span>
-                                      {/* Value */}
-                                      <span className={`text-[11px] font-semibold leading-none whitespace-nowrap ${chip.is_numeric ? "text-primary" : "text-foreground/80"}`}>
-                                        {chip.value}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-
-
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
+                  {renderSourceCards(msg)}
 
                   {/* ── Report card — shown below source cards ── */}
                   {msg.role === "assistant" && (msg.reportId || msg.reportGenerating || msg.reportTitle) && (() => {

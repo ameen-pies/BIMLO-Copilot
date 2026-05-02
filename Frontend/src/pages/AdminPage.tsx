@@ -702,7 +702,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
 }
 
 export default function AdminPage() {
-  const { currentUser, logout } = useAuth();
+  const { currentUser, logout, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
   const [tab, setTab]           = useState<"users" | "health" | "logs" | "settings">("users");
@@ -972,6 +972,20 @@ export default function AdminPage() {
     if (["warn", "degraded", "not_configured", "unavailable", "fallback_direct"].includes(v)) return "warn";
     if (["error", "down", "failed", "disconnected", "not_available"].includes(v)) return "error";
     return "unknown";
+  }
+
+  // While auth context is still hydrating, show a neutral loading screen
+  // instead of returning null (which would cause a blank flash on first navigation).
+  if (authLoading) {
+    return (
+      <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          <RefreshCw size={24} style={{ animation: "spin 0.8s linear infinite", color: "hsl(var(--muted-foreground))" }} />
+          <span style={{ fontSize: 13, color: "hsl(var(--muted-foreground))" }}>Loading…</span>
+        </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
   }
 
   if (!currentUser || currentUser.role !== "admin") return null;

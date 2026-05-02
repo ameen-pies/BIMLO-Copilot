@@ -918,9 +918,10 @@ async def generate_title(request: dict):
         system = (
             "You generate ultra-short conversation titles. "
             "Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end. "
-            "Capture the TOPIC or ACTION — not the phrasing. "
-            "Good: 'Telecom Site Survey Analysis', 'Network Coverage Question', 'Hello and Greeting', 'Revenue Chart Request'. "
-            "Bad: 'Make me a report on', 'What is the', 'User asked about'. "
+            "Capture the TOPIC or ACTION — not the literal phrasing of the user. "
+            "For greetings in any language, summarise the tone/language, e.g. 'Casual French Greeting', 'Polite Good Morning', 'Friendly Hello'. "
+            "For questions, name the subject: 'Network Coverage Question', 'Revenue Chart Request', 'Telecom Site Survey Analysis'. "
+            "NEVER echo the user's words back verbatim. NEVER start with 'User' or 'What'. "
             "Reply with ONLY the title, nothing else."
         )
         prompt = f"Conversation:\n{excerpt}\n\nTitle:"
@@ -1632,7 +1633,7 @@ async def news_refresh(background_tasks: BackgroundTasks):
 @app.get("/health")
 async def health_check():
     try:
-        stats = vector_store.get_collection_stats()
+        stats = vector_store.get_global_stats()
 
         # ── LLM providers ─────────────────────────────────────────────────────
         import os as _os
@@ -1763,7 +1764,7 @@ async def startup_event():
     print(f"📄 Reports:     {REPORTS_DIR}")
     print(f"🕸️  Graph routes: direct | rag | iterative_rag | analytics")
     try:
-        s = vector_store.get_collection_stats()
+        s = vector_store.get_global_stats()
         print(f"📊 Vector store: {s['total_documents']} docs, {s['total_chunks']} chunks")
     except:
         print("⚠️  Vector store stats unavailable")

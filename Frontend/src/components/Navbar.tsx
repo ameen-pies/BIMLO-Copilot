@@ -263,9 +263,6 @@ const Navbar = () => {
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             How it works
           </a>
-          <a href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            Documentation
-          </a>
           <a href="#contact" onClick={scrollTo('contact', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             Contact
@@ -325,7 +322,7 @@ const Navbar = () => {
                 Log in
               </button>
               <Link to="/chat">
-                <Button className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold">
+                <Button size="sm" className="h-9 px-4 py-[6px] rounded-[8px] bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold">
                   Launch Copilot
                 </Button>
               </Link>
