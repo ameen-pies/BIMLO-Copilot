@@ -122,6 +122,7 @@ def classify_intent(
     history: Optional[List[Dict]] = None,
     route_log: Optional[List[Dict]] = None,
     preferred_provider: Optional[str] = None,
+    session_has_docs: bool = False,
 ) -> IntentAnalysis:
     """
     Classify the intent of a query using the LLM.
@@ -132,6 +133,8 @@ def classify_intent(
         history:            Conversation history [{role, content}, ...].
         route_log:          Per-session route log from AgentState._route_log.
         preferred_provider: Optional provider hint to honor user-selected model.
+        session_has_docs:   True if the session has documents in the vector store.
+                            When True, ambiguous/short messages default to rag.
 
     Returns:
         IntentAnalysis with suggested_route and rich metadata.
@@ -140,16 +143,30 @@ def classify_intent(
         from llm_client import call_llm, check_llm_available
         available, _ = check_llm_available()
         if not available:
-            return _heuristic_classify(query, history, route_log)
+            return _heuristic_classify(query, history, route_log, session_has_docs)
 
         history_block = _format_history(history or [])
         route_history = _format_route_log(route_log or [])
+
+        # Build a session-state hint so the LLM knows whether docs exist
+        docs_hint = (
+            "\nSESSION STATE: The user HAS uploaded documents to this session. "
+            "Short or ambiguous messages that could refer to the uploaded documents "
+            "(e.g. 'its uploaded', 'summarize it', 'what do you think', 'go ahead', "
+            "'yes', 'analyze it', 'check the file') MUST be classified as rag, not direct. "
+            "Only classify as direct if the message is clearly conversational with zero "
+            "relation to any document (greetings, thanks, AI self-reference)."
+            if session_has_docs else
+            "\nSESSION STATE: No documents have been uploaded yet. "
+            "Classify document-related requests as rag anyway — the retrieval "
+            "pipeline will handle the empty state gracefully."
+        )
 
         prompt = _CLASSIFIER_PROMPT_TEMPLATE.format(
             history_block=history_block,
             route_history=route_history,
             query=query,
-        )
+        ) + docs_hint
 
         raw = call_llm(
             prompt=prompt,
@@ -160,11 +177,19 @@ def classify_intent(
             preferred_provider=preferred_provider,
         )
 
-        return _parse_result(raw)
+        result = _parse_result(raw)
+
+        # Post-parse safety net: if session has docs and classifier said "direct"
+        # but ambiguity is non-trivial, override to rag.
+        if session_has_docs and result.suggested_route == "direct" and result.ambiguity_score >= 0.2:
+            result.suggested_route = "rag"
+            result.reasoning += " [overridden direct→rag: session has docs and query is ambiguous]"
+
+        return result
 
     except Exception as e:
         logger.warning(f"intent_classifier LLM call failed: {e}")
-        return _heuristic_classify(query, history, route_log)
+        return _heuristic_classify(query, history, route_log, session_has_docs)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -251,10 +276,12 @@ def _heuristic_classify(
     query: str,
     history: Optional[List[Dict]],
     route_log: Optional[List[Dict]],
+    session_has_docs: bool = False,
 ) -> IntentAnalysis:
     """
     Fast heuristic fallback — no LLM required.
     Mirrors the logic in _fallback_router but returns an IntentAnalysis.
+    When session_has_docs=True, short/ambiguous messages default to rag.
     """
     q = query.lower().strip()
 
@@ -310,22 +337,33 @@ def _heuristic_classify(
     if any(s in q for s in define_signals) and len(q.split()) <= 10:
         return _make_heuristic(query, "define", "define_term", "define", "prose", 0.7)
 
-    # Direct / conversational
+    # Direct / conversational — only clear greetings/thanks, never doc-context
     casual_signals = [
         "hello", "hi", "hey", "yo", "wassup", "sup", "what's up", "whats up",
         "thanks", "thank you", "who are you", "bonjour", "merci", "salut",
         "how are you", "what did you", "what did you say", "repeat",
     ]
     if any(s in q for s in casual_signals):
-        return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.8)
+        # Even casual signals shouldn't override when docs exist and query looks doc-related
+        if not session_has_docs:
+            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.8)
+        # With docs present: only truly casual (no doc words) → direct
+        doc_words = ["file", "document", "uploaded", "it", "this", "that", "the"]
+        if not any(w in q for w in doc_words):
+            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.8)
 
     # Self-referential (references the AI or conversation)
     self_ref = ["you just", "you said", "your answer", "what you", "last response", "what route"]
     if any(s in q for s in self_ref):
         return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.75, is_followup=True, followup_type="repeat")
 
-    # Default → RAG
-    return _make_heuristic(query, "rag", "extract_info", "extract", "prose", 0.6)
+    # Default → RAG (always rag when session has docs; otherwise rag anyway as safest)
+    _reasoning = (
+        "Heuristic classification: session has documents — defaulting to rag for ambiguous query."
+        if session_has_docs else
+        "Heuristic classification: matched 'rag' pattern in query."
+    )
+    return _make_heuristic(query, "rag", "extract_info", "extract", "prose", 0.6 if not session_has_docs else 0.75)
 
 
 def _make_heuristic(

@@ -1015,7 +1015,16 @@ Now generate for: "{q}" """
         history = state.get("conversation_history", [])
         route_log = state.get("_route_log", [])
 
-        print(f"📍 Route → ", end="")
+        # Check whether this session has documents — lets us bias ambiguous short
+        # messages (e.g. "its uploaded", "summarize it") toward rag when docs exist.
+        _session_id = state.get("session_id", "")
+        _user_id    = state.get("user_id")
+        try:
+            _session_has_docs = self.vs.has_documents(user_id=_user_id, session_id=_session_id)
+        except Exception:
+            _session_has_docs = False
+
+        print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
 
         # ── Pre-router: code generation guard ────────────────────────────────
         # Catches "write/make/give me code/function/script/algorithm for X"
@@ -1045,6 +1054,7 @@ Now generate for: "{q}" """
                 history,
                 route_log,
                 preferred_provider=state.get("preferred_provider"),
+                session_has_docs=_session_has_docs,
             )
             intent_hint = (
                 f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
@@ -1055,12 +1065,20 @@ Now generate for: "{q}" """
                 f"  language_intent: '{intent.language_intent}'\n"
                 f"  ambiguity_score: {intent.ambiguity_score:.2f}\n"
                 f"  suggested_route: {intent.suggested_route}\n"
+                f"  session_has_docs: {_session_has_docs}\n"
                 f"  reasoning: {intent.reasoning}"
             )
             # If classifier is very confident, trust it directly and skip the second LLM call
+            # Exception: if it chose "direct" but session has docs and query is short/ambiguous,
+            # override to "rag" — the classifier can't see session state.
             if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
-                print(f"{intent.suggested_route} (intent classifier, conf={intent.confidence:.2f})")
                 _r = intent.suggested_route
+                if _r == "direct" and _session_has_docs and intent.ambiguity_score >= 0.15:
+                    # Short or ambiguous message with docs present — use rag, not direct
+                    _r = "rag"
+                    print(f"rag (doc-bias override from direct, has_docs=True)")
+                else:
+                    print(f"{_r} (intent classifier, conf={intent.confidence:.2f})")
                 if _OBS_AVAILABLE:
                     _obs.log_routing(
                         session_id=state.get("session_id", ""),
@@ -1100,6 +1118,15 @@ Now generate for: "{q}" """
                 f"\nLAST ASSISTANT REPLY: {last_assistant[:300]}"
             )
 
+        _docs_context_line = (
+            "SESSION CONTEXT: The user HAS uploaded documents to this session. "
+            "Ambiguous or short messages that could be about the documents MUST default to rag, not direct. "
+            "Examples that must route to rag when docs exist: 'its uploaded', 'summarize it', "
+            "'what do you think', 'go ahead', 'yes', 'analyze it', 'what does it say', 'check the file'."
+            if _session_has_docs else
+            "SESSION CONTEXT: No documents have been uploaded yet. If the query seems document-related, route to rag anyway (retrieval will handle the empty state gracefully)."
+        )
+
         routing_prompt = f"""You are a query router for Bimlo Copilot. Pick exactly ONE route for the CURRENT QUERY.
 
 ROUTES:
@@ -1119,6 +1146,7 @@ CRITICAL RULES:
 4. When in doubt between direct and rag: AI/conversation topic → direct; document content → rag.
 5. Diagrams, schematics, wiring, rack layouts, floor plans → rag (processor already described them visually).
 6. TRUST the intent pre-analysis below — it is the result of a deep chain-of-thought analysis. Override it only when you see a clear contradiction.
+7. {_docs_context_line}
 {prior_context}
 {intent_hint}
 
@@ -1160,6 +1188,14 @@ Reply with ONE word only — the route name."""
         """Simple keyword-based routing when LLM unavailable."""
         query = state["query"].lower()
 
+        # Check session docs — when docs are present, ambiguous short messages go to rag
+        _fb_session_id = state.get("session_id", "")
+        _fb_user_id    = state.get("user_id")
+        try:
+            _fb_has_docs = self.vs.has_documents(user_id=_fb_user_id, session_id=_fb_session_id)
+        except Exception:
+            _fb_has_docs = False
+
         # Code generation — route to direct
         _CODE_VERBS = ["write", "make", "give me", "create", "generate", "build",
                        "code", "implement", "show me", "do", "écris", "fais", "crée"]
@@ -1184,12 +1220,8 @@ Reply with ONE word only — the route name."""
             print("transform (fallback)")
             return {**state, "route": "transform"}
 
-        # Direct answer — casual messages and anything that references the
-        # conversation itself rather than the documents.
-        # The fallback heuristic: if there are NO document-domain signals and
-        # NO comparison/transform signals, treat as direct.  This is intentionally
-        # broad — the LLM router handles nuance; the fallback just needs to avoid
-        # misrouting obvious non-document queries to RAG.
+        # Direct answer — only for clearly casual messages (greetings, thanks)
+        # NOT for short/ambiguous messages when session has documents.
         casual_keywords = [
             "hello", "hi", "hey", "yo", "wassup", "sup", "what's up", "whats up",
             "thanks", "thank you", "who are you", "bonjour", "merci", "salut",
@@ -1199,11 +1231,11 @@ Reply with ONE word only — the route name."""
             print("direct (fallback)")
             return {**state, "route": "direct"}
 
-        # If the query is short and contains no document-search signals,
-        # default to direct rather than RAG.
+        # Short questions with no doc signals → direct ONLY when session has no documents.
+        # When docs exist, short ambiguous messages ("its uploaded", "go ahead", "yes")
+        # should go to rag — the retrieval pipeline handles empty results gracefully.
         doc_signals = ["document", "file", "show", "find", "what does", "according",
                        "tell me about", "explain", "summarize", "summary", "report"]
-        # Report route in fallback
         report_kws = ["make a report", "create a report", "generate a report", "write a report",
                       "do a report", "make me a report", "rapport sur", "fais un rapport",
                       "produce a report", "build a report", "prepare a report"]
@@ -1213,8 +1245,8 @@ Reply with ONE word only — the route name."""
         is_short = len(query.split()) <= 8
         has_doc_signal = any(kw in query for kw in doc_signals)
         has_question_word = any(query.startswith(w) for w in ["what", "who", "when", "where", "how", "why", "which"])
-        if is_short and has_question_word and not has_doc_signal:
-            print("direct (fallback — short conversational question)")
+        if is_short and has_question_word and not has_doc_signal and not _fb_has_docs:
+            print("direct (fallback — short conversational question, no docs)")
             return {**state, "route": "direct"}
 
         # Iterative RAG for complex queries
@@ -1559,8 +1591,9 @@ Reply with ONE word only — the route name."""
             # Distinguish: is the current session store empty, or did the query just not match anything?
             # Only flag __NO_DOCS__ if the session has no documents in scope.
             session_id = state.get("session_id", "")
-            if not self.vs.has_documents(session_id):
-                print(f"⚠️  No documents available for session={session_id!r} — redirecting to direct answer")
+            user_id_cr = state.get("user_id")
+            if not self.vs.has_documents(user_id=user_id_cr, session_id=session_id):
+                print(f"⚠️  No documents available for user={user_id_cr!r} session={session_id!r} — redirecting to direct answer")
                 return {**state, "query": f"__NO_DOCS__:{state['query']}"}
             else:
                 print("⚠️  Retrieval found nothing for this query — proceeding to synthesis with no context")

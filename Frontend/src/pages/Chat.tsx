@@ -3648,15 +3648,26 @@ const Chat = () => {
   const docFileInputRef = useRef<HTMLInputElement>(null); // regular doc upload
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0); // track nested drag enter/leave
+  const pageDragCounterRef = useRef(0); // capture-phase count for page-wide overlay
   const [isChatDragOver, setIsChatDragOver] = useState(false);
   const chatDragCounterRef = useRef(0); // track nested drag enter/leave for chat area
 
   // Safety reset: if the user drags out of the browser window, clear the overlay
   useEffect(() => {
-    const reset = () => { dragCounterRef.current = 0; setIsDragOver(false); chatDragCounterRef.current = 0; setIsChatDragOver(false); };
+    const reset = () => {
+      dragCounterRef.current = 0;
+      pageDragCounterRef.current = 0;
+      setIsDragOver(false);
+      chatDragCounterRef.current = 0;
+      setIsChatDragOver(false);
+    };
+    const handleWindowDragLeave = (e: DragEvent) => { if (!e.relatedTarget) reset(); };
     window.addEventListener('dragend', reset);
-    document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) reset(); });
-    return () => { window.removeEventListener('dragend', reset); };
+    document.addEventListener('dragleave', handleWindowDragLeave);
+    return () => {
+      window.removeEventListener('dragend', reset);
+      document.removeEventListener('dragleave', handleWindowDragLeave);
+    };
   }, []);
 
   const handleFiles = async (files: FileList | File[]) => {
@@ -6269,6 +6280,10 @@ const Chat = () => {
     <div 
       className="h-screen flex bg-background relative overflow-hidden"
       style={{ ...(isDark && { background: "#07080f" }), transition: "background 0.15s ease" }}
+      onDragEnterCapture={e => { e.preventDefault(); pageDragCounterRef.current++; if (pageDragCounterRef.current === 1) setIsDragOver(true); }}
+      onDragLeaveCapture={e => { e.preventDefault(); pageDragCounterRef.current--; if (pageDragCounterRef.current <= 0) { pageDragCounterRef.current = 0; setIsDragOver(false); } }}
+      onDragOverCapture={e => e.preventDefault()}
+      onDropCapture={e => { e.preventDefault(); pageDragCounterRef.current = 0; setIsDragOver(false); }}
       onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; if (dragCounterRef.current === 1) setIsDragOver(true); }}
       onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current <= 0) { dragCounterRef.current = 0; setIsDragOver(false); } }}
       onDragOver={e => e.preventDefault()}
@@ -6283,7 +6298,7 @@ const Chat = () => {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="absolute inset-0 z-[9999] bg-background/50 backdrop-blur-[3px] flex items-center justify-center pointer-events-none"
+            className="fixed inset-0 z-[9999] bg-background/50 backdrop-blur-[3px] flex items-center justify-center pointer-events-none"
           >
             <motion.div
               initial={{ scale: 0.92, opacity: 0 }}
@@ -6314,7 +6329,6 @@ const Chat = () => {
               className="fixed top-4 left-0 right-0 flex justify-center z-50 pointer-events-none"
             >
               <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full border border-emerald-500/50 bg-emerald-950 text-emerald-300 text-xs font-medium shadow-sm">
-                <span>😊</span>
                 <span>{duplicateBanner}</span>
                 <button
                   onClick={() => {
@@ -7674,10 +7688,13 @@ const Chat = () => {
                   )} {/* end !msg.voiceBlobUrl */}
 
                   {msg.role === "assistant" && msg.sources && msg.sources.length > 0 && (() => {
-                    // Deduplicate by source_number — backend may emit dupes if same chunk cited multiple times
+                    // ── v11 Fact-Chip Source Cards ─────────────────────────────────────
+                    // Deduplicate by source_number
                     const seenNums = new Set<number>();
                     const citedSources = msg.sources.filter(s => {
-                      if (!(s as any).cited_facts?.length) return false;
+                      const hasChips = (s as any).fact_chips?.length > 0;
+                      const hasLegacy = (s as any).cited_facts?.length > 0;
+                      if (!hasChips && !hasLegacy) return false;
                       if (seenNums.has(s.source_number)) return false;
                       seenNums.add(s.source_number);
                       return true;
@@ -7687,32 +7704,28 @@ const Chat = () => {
                     return (
                       <div className="mt-3 space-y-2">
                         {citedSources.map((source) => {
-                          // sections: [{ title, lines, excerpt }] — grouped by ## heading from the output
-                          // Normalize shape, then merge sections with the same title
-                          const rawSections: Array<{ title: string; lines: string[]; excerpt: string }> =
-                            ((source as any).sections ?? []).map((s: any) => ({
-                              title:   s.title   ?? "",
-                              lines:   Array.isArray(s.lines) ? s.lines : (s.excerpt ? [s.excerpt] : []),
-                              excerpt: s.excerpt ?? "",
-                            }));
-                          // Merge duplicate titles: combine their lines, keep first excerpt
-                          const sectionsMap = new Map<string, { lines: string[]; excerpt: string }>();
-                          rawSections.forEach(sec => {
-                            const key = sec.title.trim();
-                            if (!sectionsMap.has(key)) {
-                              sectionsMap.set(key, { lines: [...sec.lines], excerpt: sec.excerpt });
-                            } else {
-                              const existing = sectionsMap.get(key)!;
-                              sec.lines.forEach(l => { if (!existing.lines.includes(l)) existing.lines.push(l); });
-                            }
-                          });
-                          const sections = Array.from(sectionsMap.entries()).map(([title, v]) => ({ title, ...v }));
                           const docExcerpt: string = (source as any).excerpt ?? "";
                           const sourceKey = `${msg.id}-${source.source_number}`;
                           const isExpanded = openSourceKey === sourceKey;
-
                           const isWiki = !!(source as any).wiki_url;
                           const wikiUrl: string = (source as any).wiki_url ?? "";
+                          const hasImages = !!(source as any).has_images;
+                          const hasTables = !!(source as any).has_tables;
+
+                          // Fact chips — v11 shape, with legacy fallback
+                          type FactChip = { label: string; value: string; raw_line: string; is_numeric: boolean };
+                          const factChips: FactChip[] = (() => {
+                            const raw = (source as any).fact_chips;
+                            if (Array.isArray(raw) && raw.length > 0) return raw as FactChip[];
+                            // Legacy fallback: synthesise chips from sections
+                            const secs = (source as any).sections ?? [];
+                            return secs.map((sec: any) => ({
+                              label:      sec.title ?? source.filename,
+                              value:      sec.excerpt ?? (sec.lines?.[0] ?? ""),
+                              raw_line:   sec.excerpt ?? (sec.lines?.[0] ?? ""),
+                              is_numeric: false,
+                            })).filter((c: FactChip) => c.value);
+                          })();
 
                           // ── Wikipedia source card ──────────────────────
                           if (isWiki) {
@@ -7731,15 +7744,10 @@ const Chat = () => {
                                   </span>
                                   <span className="flex-1 min-w-0">
                                     <span className="flex items-center gap-1.5">
-                                      <span className="text-[12px] font-semibold text-foreground truncate">
-                                        {source.filename}
-                                      </span>
+                                      <span className="text-[12px] font-semibold text-foreground truncate">{source.filename}</span>
                                       <ExternalLink className="h-3 w-3 shrink-0 text-blue-400/70 group-hover/wiki:text-blue-400 transition-colors" />
                                     </span>
                                     <span className="text-[10px] text-blue-400/50 truncate block">wikipedia.org</span>
-                                  </span>
-                                  <span className="text-[10px] text-blue-400/40 shrink-0">
-                                    <ExternalLink className="h-3 w-3" />
                                   </span>
                                 </div>
                                 {docExcerpt && (
@@ -7752,101 +7760,86 @@ const Chat = () => {
                             );
                           }
 
-                          // ── Regular document source card ───────────────
-                          const hasImages = !!(source as any).has_images;
-                          const hasTables = !!(source as any).has_tables;
+                          // ── Regular document source card (v11 fact-chip layout) ───────
                           return (
                             <div
                               key={source.source_number}
                               id={`source-${msg.id}-${source.source_number}`}
                               className="rounded-xl border border-primary/20 overflow-hidden scroll-mt-4"
                             >
-                              {/* Card header */}
-                              <div
-                                className="flex items-center gap-2 px-3 py-2 bg-primary/8 hover:bg-primary/12 transition-colors cursor-pointer"
-                                onClick={() => setOpenSourceKey(k => k === sourceKey ? null : sourceKey)}
-                              >
+                              {/* ── Card header ── */}
+                              <div className="flex items-center gap-2 px-3 py-2 bg-primary/8">
                                 <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-primary/20 text-primary font-bold text-[10px] shrink-0">
                                   {source.source_number}
                                 </span>
-                                <span className="flex-1 min-w-0">
-                                  <span className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="text-[12px] font-semibold text-foreground truncate">
-                                      {sections[0]?.title || source.filename}
-                                    </span>
-                                    {/* Filename badge — blue, inline, shown when title differs from filename */}
-                                    {sections[0]?.title && sections[0].title !== source.filename && (
-                                      <span
-                                        title={source.filename}
-                                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
-                                        style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
-                                        data-open-doc
-                                        onClick={(e) => { e.stopPropagation(); openDocumentAtExcerpt(source.filename, docExcerpt); }}
-                                      >
-                                        <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="shrink-0">
-                                          <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                                          <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                                        </svg>
-                                        {source.filename}
-                                      </span>
-                                    )}
-                                    {hasImages && (
-                                      <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
-                                        <ImageIcon className="h-2.5 w-2.5" />
-                                        visual
-                                      </span>
-                                    )}
-                                    {hasTables && (
-                                      <span title="Contains table data" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-teal-500/15 text-teal-400 text-[9px] font-medium shrink-0">
-                                        table
-                                      </span>
-                                    )}
-                                    <ExternalLink
-                                      className="h-3 w-3 shrink-0 text-primary hover:text-primary/60 transition-colors cursor-pointer"
-                                      data-open-doc
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        openDocumentAtExcerpt(source.filename, docExcerpt);
-                                      }}
-                                    />
+                                <span className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
+                                  {/* File icon + name */}
+                                  <span
+                                    title={source.filename}
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
+                                    style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
+                                    data-open-doc
+                                    onClick={(e) => { e.stopPropagation(); openDocumentAtExcerpt(source.filename, docExcerpt); }}
+                                  >
+                                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="shrink-0">
+                                      <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                                      <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                                    </svg>
+                                    {source.filename}
                                   </span>
+                                  {/* Chip count badge */}
+                                  {factChips.length > 0 && (
+                                    <span className="text-[9px] text-muted-foreground/50 shrink-0">
+                                      {factChips.length} fact{factChips.length !== 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                                  {hasImages && (
+                                    <span title="Contains diagram/figure descriptions" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[9px] font-medium shrink-0">
+                                      <ImageIcon className="h-2.5 w-2.5" />
+                                      visual
+                                    </span>
+                                  )}
+                                  {hasTables && (
+                                    <span title="Contains table data" className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-teal-500/15 text-teal-400 text-[9px] font-medium shrink-0">
+                                      table
+                                    </span>
+                                  )}
                                 </span>
-                                <span className="text-[10px] text-muted-foreground shrink-0 flex items-center gap-1">
-                                  <Eye className="h-3 w-3" />
-                                  {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                                </span>
+
                               </div>
 
-                              {/* Expandable — sections mirror ## headings from the output exactly */}
-                              <AnimatePresence>
-                                {isExpanded && sections.filter(s => s.lines.length > 0).length > 0 && (
-                                  <motion.div
-                                    initial={{ height: 0, opacity: 0 }}
-                                    animate={{ height: "auto", opacity: 1 }}
-                                    exit={{ height: 0, opacity: 0 }}
-                                    transition={{ duration: 0.18 }}
-                                    className="overflow-hidden"
-                                  >
-                                    <div className="bg-background/60">
-                                      {sections.filter(s => s.lines.length > 0).map((sec, si) => (
-                                        <div key={si} className="border-t border-primary/10">
-                                          {sec.lines.map((line, li) => (
-                                            <button
-                                              key={li}
-                                              className="w-full text-left px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-primary/5 transition-colors flex items-start gap-2 group/line"
-                                              data-open-doc
-                                              onClick={() => openDocumentAtExcerpt(source.filename, line)}
-                                            >
-                                              <span className="w-1 h-1 rounded-full bg-primary/40 mt-1.5 shrink-0 group-hover/line:bg-primary transition-colors" />
-                                              <span className="leading-relaxed">{line}</span>
-                                            </button>
-                                          ))}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </motion.div>
-                                )}
-                              </AnimatePresence>
+                              {/* ── Fact chips — always visible (no expand needed) ── */}
+                              {factChips.length > 0 && (
+                                <div className="px-3 py-2.5 flex flex-wrap gap-1.5 border-t border-primary/10 bg-background/40">
+                                  {factChips.map((chip, ci) => (
+                                    <button
+                                      key={ci}
+                                      title={chip.raw_line}
+                                      data-open-doc
+                                      onClick={() => openDocumentAtExcerpt(source.filename, chip.raw_line)}
+                                      className="group/chip inline-flex items-baseline gap-1 rounded-lg border transition-all hover:border-primary/40 hover:bg-primary/5 active:scale-95"
+                                      style={{
+                                        padding: "3px 8px 3px 6px",
+                                        background: "color-mix(in srgb, hsl(var(--primary)) 4%, transparent)",
+                                        borderColor: "color-mix(in srgb, hsl(var(--primary)) 16%, transparent)",
+                                      }}
+                                    >
+                                      {/* Label */}
+                                      <span className="text-[9px] font-medium text-muted-foreground/60 uppercase tracking-wide leading-none group-hover/chip:text-muted-foreground transition-colors whitespace-nowrap">
+                                        {chip.label}
+                                      </span>
+                                      {/* Divider */}
+                                      <span className="text-[8px] text-muted-foreground/30 leading-none">·</span>
+                                      {/* Value */}
+                                      <span className={`text-[11px] font-semibold leading-none whitespace-nowrap ${chip.is_numeric ? "text-primary" : "text-foreground/80"}`}>
+                                        {chip.value}
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+
+
                             </div>
                           );
                         })}
