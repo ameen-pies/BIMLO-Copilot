@@ -486,7 +486,7 @@ DOCUMENTS:
 {context}"""
 
         raw = _call_llm(prompt, system, self.api_key, self.base_url,
-                        max_tokens=1500, temperature=0.0)
+                        max_tokens=2500, temperature=0.0)
         if not raw:
             return None
 
@@ -494,16 +494,22 @@ DOCUMENTS:
         if not parsed or not isinstance(parsed, dict):
             print(f"   ⚠️  GraphAgent: could not parse extraction response")
             print(f"      Raw: {raw[:200]}")
-            return None
+            # Fallback: try regex extraction directly on chunk text
+            return self._regex_extract_fallback(chunks)
 
         if parsed.get("error") == "no_data":
-            print(f"   ℹ️  GraphAgent: no data — {parsed.get('reason', '')}")
-            return None
+            reason = parsed.get('reason', '')
+            print(f"   ℹ️  GraphAgent: LLM reported no_data — {reason}; trying regex fallback")
+            fallback = self._regex_extract_fallback(chunks)
+            if fallback:
+                print(f"   ✅ GraphAgent: regex fallback succeeded")
+            return fallback
 
         # Validate required fields
         if not parsed.get("labels") or not parsed.get("datasets"):
-            print(f"   ⚠️  GraphAgent: extraction missing labels/datasets")
-            return None
+            print(f"   ⚠️  GraphAgent: extraction missing labels/datasets — trying regex fallback")
+            fallback = self._regex_extract_fallback(chunks)
+            return fallback if fallback else None
 
         # Coerce all data values to numbers (guard against LLM returning strings)
         for ds in parsed.get("datasets", []):
@@ -878,7 +884,7 @@ DOCUMENTS:
             {"label": "Power & Infrastructure", "description": "Power load, cable length, equipment specs", "hint": "chart power and infrastructure metrics"},
           ]
         """
-        context = self._build_context(chunks, max_chars_per_chunk=1200)
+        context = self._build_context(chunks, max_chars_per_chunk=2500)
 
         system = (
             "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
@@ -1012,11 +1018,29 @@ Rules:
     # ── HELPERS ───────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_context(chunks: List[Dict], max_chars_per_chunk: int = 1500) -> str:
+    def _normalize_pdf_text(text: str) -> str:
+        """
+        Clean up common PDF-extraction artifacts so the LLM can read tables reliably:
+        - Replaces runs of 3+ spaces with a pipe separator (preserves column structure)
+        - Removes soft-hyphen line breaks (e.g. "through-\nput" → "throughput")
+        - Collapses 3+ blank lines to one
+        - Normalises unicode dash/minus variants to ASCII hyphen
+        """
+        text = re.sub(r"[\u2010-\u2015\u2212\u2212]", "-", text)
+        text = re.sub(r"-\n(\S)", r"\1", text)              # soft-hyphen continuation
+        text = re.sub(r"   +", " | ", text)                    # multi-space → pipe separator
+        text = "\n".join(line.rstrip() for line in text.splitlines())
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _build_context(chunks: List[Dict], max_chars_per_chunk: int = 3500) -> str:
         parts = []
         for i, c in enumerate(chunks, 1):
             m = c.get("metadata", {})
-            text = c.get("text", "")[:max_chars_per_chunk]
+            raw_text = c.get("text", "")
+            # Normalise PDF text before truncating so numeric columns are preserved
+            text = GraphAgent._normalize_pdf_text(raw_text)[:max_chars_per_chunk]
             parts.append(
                 f"[Source {i} | {m.get('filename', 'unknown')} | {m.get('doc_type', '')}]\n{text}"
             )

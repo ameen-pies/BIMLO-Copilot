@@ -319,8 +319,11 @@ function ServiceBadge({ label, status, icon: Icon, detail }: {
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
-function ExpandedChart({ data, color, label }: { data: number[]; color: string; label: string }) {
+function ExpandedChart({ data: rawData, color, label }: { data: number[]; color: string; label: string }) {
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  // Sanitize: replace non-finite values with 0, require at least 1 point
+  const data = (rawData ?? []).map(v => (typeof v === "number" && isFinite(v) ? v : 0));
   if (!data.length) return null;
 
   const W = 260, H = 90;
@@ -331,7 +334,9 @@ function ExpandedChart({ data, color, label }: { data: number[]; color: string; 
   const max = Math.max(...data, 1);
   const min = Math.min(...data, 0);
   const range = max - min || 1;
-  const peakIdx = data.indexOf(max);
+  // Safely find peak index; fall back to 0 if not found
+  const rawPeakIdx = data.indexOf(max);
+  const peakIdx = rawPeakIdx >= 0 ? rawPeakIdx : 0;
 
   const toX = (i: number) => padL + (i / Math.max(data.length - 1, 1)) * chartW;
   const toY = (v: number) => padT + chartH - ((v - min) / range) * chartH;
@@ -342,8 +347,8 @@ function ExpandedChart({ data, color, label }: { data: number[]; color: string; 
 
   // Y axis ticks
   const yTicks = [0, 0.5, 1].map(t => ({ v: Math.round(min + t * range), y: padT + chartH * (1 - t) }));
-  // X axis labels — show first, mid, last
-  const xLabels = [0, Math.floor((data.length - 1) / 2), data.length - 1];
+  // X axis labels — show first, mid, last (deduplicated for small datasets)
+  const xLabels = [...new Set([0, Math.floor((data.length - 1) / 2), data.length - 1])];
   const gradId = `exp-${color.replace(/[^a-z0-9]/gi, "")}`;
 
   return (
