@@ -675,97 +675,177 @@ DOCUMENTS:
     # ── STAGE 0: VAGUENESS + METRIC DISCOVERY ────────────────────────────
 
     _VAGUE_PATTERNS = [
-        # English
+        # ── English: bare verb + chart word (original) ────────────────────
         r"^(show|make|create|generate|draw|plot|give me|build)\s+(me\s+)?(a\s+)?(chart|graph|plot|visual)$",
         r"^(chart|graph|plot|visuali[zs]e)\s+(the\s+)?(data|documents?|everything|metrics|numbers|stats|statistics)$",
-        r"^(what|show).*(look like|visuali[zs]|chart|graph)",
+        r"^(what|show)\s+(me\s+|would\s+|does\s+|do\s+|will\s+)?(this|it|that|the\s+data|the\s+doc|the\s+file)?.*(look like|visuali[zs]e?d?)\s*$",
+        r"^(what|show)\s+(me\s+)?(a\s+)?(chart|graph|plot|visual)\s*$",
         r"^(all|every).*(metric|number|stat|data|value)",
-        # French
-        r"^(montre|cr[eé]e|g[eé]n[eè]re|fais|trace|dessine)\s+(moi\s+)?(un\s+)?(graphique|diagramme|courbe|visuel)$",
+
+        # ── English: verb + chart word + trailing filler ──────────────────
+        # Catches: "generate a chart from this file", "make me charts off my files",
+        #          "create a graph from my documents", "build me charts from these files", etc.
+        r"^(show|make|create|generate|draw|plot|give me|build)\s+(me\s+)?(a\s+|some\s+)?(chart|charts|graph|graphs|plot|plots|visual|visuals)\s+(from|off|for|using|out of|based on|with|of)?\s*(my\s+|this\s+|the\s+|these\s+|all\s+)?(file|files|doc|docs|document|documents|data|everything|it|them)?[.!?]*$",
+
+        # ── English: imperative + file/doc reference, no specific metric ──
+        # Catches: "chart my files", "visualize my documents", "plot the data from the file"
+        r"^(chart|graph|plot|visuali[zs]e)\s+(my\s+|this\s+|the\s+|these\s+)?(file|files|doc|docs|document|documents|data|it|them)[.!?]*$",
+
+        # ── English: "can you / could you" polite variants ────────────────
+        # Catches: "can you make a chart from this", "could you generate some graphs"
+        r"^(can|could)\s+you\s+(please\s+)?(show|make|create|generate|draw|plot|give me|build)\s+(me\s+)?(a\s+|some\s+)?(chart|charts|graph|graphs|plot|plots|visual|visuals)",
+
+        # ── English: "I want / I need / I'd like" ─────────────────────────
+        # Catches: "I want a chart from my files", "I need some graphs from this document"
+        r"^(i\s+)?(want|need|would like|'d like)\s+(a\s+|some\s+)?(chart|charts|graph|graphs|plot|plots|visual|visuals)\s*(from|off|for|of|using)?",
+
+        # ── French: trailing filler ───────────────────────────────────────
+        r"^(montre|cr[eé]e|g[eé]n[eè]re|fais|trace|dessine)\s+(moi\s+)?(un\s+|des\s+)?(graphique|graphiques|diagramme|courbe|visuel)",
         r"^(graphique|diagramme|visualis[ae])\s+(les?\s+)?(donn[eé]es?|documents?|m[eé]triques?|statistiques?)$",
         r"^(tout|tous|toutes)\s+(les?\s+)?(m[eé]trique|donn[eé]e|stat|nombre|valeur)",
-        # Arabic
-        r"^(أنشئ|اصنع|ارسم|أظهر|أنشأ)\s+(لي\s+)?(رسم|مخطط|بياني)$",
+
+        # ── Arabic ────────────────────────────────────────────────────────
+        r"^(أنشئ|اصنع|ارسم|أظهر|أنشأ)\s+(لي\s+)?(رسم|مخطط|بياني)",
         r"^(كل|جميع)\s+(البيانات|المقاييس|الأرقام|الإحصاءات)",
-        # Spanish
-        r"^(muestra|crea|genera|haz|traza|dibuja)\s+(me\s+)?(una?\s+)?(gráfica?|diagrama|visual)$",
+
+        # ── Spanish ───────────────────────────────────────────────────────
+        r"^(muestra|crea|genera|haz|traza|dibuja)\s+(me\s+)?(una?\s+|unos?\s+)?(gráfica?|gráficas?|diagrama|visual)",
         r"^(gráfica?|diagrama|visualiza)\s+(los?\s+)?(datos?|documentos?|métricas?|estadísticas?)$",
-        # German
-        r"^(zeig|erstell|generier|mal|zeichne)\s+(mir\s+)?(ein\s+)?(diagramm|grafik|chart|visual)$",
+
+        # ── German ────────────────────────────────────────────────────────
+        r"^(zeig|erstell|generier|mal|zeichne)\s+(mir\s+)?(ein\s+|einige\s+)?(diagramm|diagramme|grafik|chart|visual)",
         r"^(alle?|jede[rs]?)\s+(daten|metriken|zahlen|statistiken)",
     ]
 
     def _is_vague_request(self, query: str) -> bool:
         """
         Returns True when the query doesn't specify WHAT to chart.
-        Heuristic: short query with no domain nouns, or matches known vague patterns.
+
+        Three tiers:
+          1. Explicit vague patterns (regex) — language-aware, catches the most
+             common phrasings like "make a chart from this file".
+          2. Short query (≤6 words) with no domain noun — same as before.
+          3. Medium query (7-14 words) that is clearly a chart request but
+             contains only file/document nouns and no chartable metric noun —
+             e.g. "generate some charts from my uploaded documents please".
+             This tier prevents the LLM from just guessing when the user has
+             not specified what to visualize.
         """
         import re as _re
         q = query.strip().lower().rstrip("?.")
 
-        # Explicit vague patterns
+        # ── Tier 1: Explicit vague patterns ─────────────────────────────────
         for pat in self._VAGUE_PATTERNS:
             if _re.search(pat, q):
                 return True
 
-        # Short query (≤6 words) with no numeric hint and no specific noun
+        # Shared list of specific metric hints (used in tiers 2 & 3)
+        specific_hints = [
+            # English — generic
+            "revenue", "cost", "budget", "salary", "temperature", "speed",
+            "latency", "throughput", "loss", "power", "load", "rate",
+            "count", "total", "average", "percent", "ratio", "score",
+            "traffic", "bandwidth", "frequency", "voltage", "current",
+            "pressure", "distance", "weight", "height", "duration",
+            # Telecom / network
+            "downlink", "uplink", "rsrp", "rsrq", "sinr", "rssi",
+            "insertion", "fiber", "fibre", "strand", "strands", "trench",
+            "trenching", "span", "attenuation", "signal", "sector",
+            "bbu", "rrh", "antenna", "antennae", "mast", "tower",
+            "node", "site", "sites", "base station", "coverage",
+            "packet", "jitter", "availability", "alarm", "alarms",
+            "otdr", "odf", "splitter", "amplifier", "transceiver",
+            # Power / electrical
+            "dc", "ac", "watt", "kilowatt", "ampere", "volt", "battery",
+            "autonomy", "capacity", "utilisation", "utilization",
+            "shelter", "hvac", "cooling",
+            # BIM / construction / project management
+            "clash", "clashes", "conflict", "conflicts", "milestone", "milestones",
+            "completion", "schedule", "timeline", "deadline", "progress", "status",
+            "coordination", "model", "structural", "architectural", "mep",
+            "framing", "simulation", "review", "inspection", "phase", "phases",
+            "submittal", "rfi", "punch", "defect", "issue", "issues",
+            "quantity", "quantities", "takeoff", "area", "volume",
+            "storey", "storeys", "floor", "floors", "material", "materials",
+            "element", "elements", "wall", "slab", "column", "beam",
+            # French
+            "revenu", "coût", "budget", "salaire", "température", "vitesse",
+            "latence", "débit", "perte", "puissance", "charge", "taux",
+            "total", "moyenne", "pourcentage", "fréquence", "tension",
+            "pression", "distance", "poids", "durée", "trafic",
+            "fibre", "brin", "portée", "tranchée", "batterie",
+            # Arabic
+            "إيراد", "تكلفة", "ميزانية", "راتب", "سرعة", "كمون",
+            "إنتاجية", "طاقة", "حمل", "معدل", "مجموع", "متوسط",
+            "نسبة", "تردد", "ضغط", "مسافة", "وزن", "مدة",
+            # Spanish
+            "ingreso", "costo", "presupuesto", "salario", "velocidad",
+            "latencia", "rendimiento", "pérdida", "potencia", "carga",
+            "tasa", "total", "promedio", "porcentaje", "frecuencia",
+            "tensión", "presión", "distancia", "peso", "duración",
+            # German
+            "umsatz", "kosten", "budget", "gehalt", "geschwindigkeit",
+            "latenz", "durchsatz", "verlust", "leistung", "last",
+            "rate", "gesamt", "durchschnitt", "prozent", "frequenz",
+            # Italian / Portuguese (shared roots)
+            "entrate", "costo", "stipendio", "velocità", "latenza",
+            "rendimento", "potenza", "carico", "tasso", "totale",
+            "receita", "custo", "salário", "taxa", "frequência",
+        ]
+
+        # ── Tier 2: Short query (≤6 words) with no metric hint ───────────────
         words = q.split()
         if len(words) <= 6:
-            # If it mentions a specific metric word it's not vague (multilingual)
-            specific_hints = [
-                # English — generic
-                "revenue", "cost", "budget", "salary", "temperature", "speed",
-                "latency", "throughput", "loss", "power", "load", "rate",
-                "count", "total", "average", "percent", "ratio", "score",
-                "traffic", "bandwidth", "frequency", "voltage", "current",
-                "pressure", "distance", "weight", "height", "duration",
-                # Telecom / network (added)
-                "downlink", "uplink", "rsrp", "rsrq", "sinr", "rssi",
-                "insertion", "fiber", "fibre", "strand", "strands", "trench",
-                "trenching", "span", "attenuation", "signal", "sector",
-                "bbu", "rrh", "antenna", "antennae", "mast", "tower",
-                "node", "site", "sites", "base station", "coverage",
-                "packet", "jitter", "availability", "alarm", "alarms",
-                "otdr", "odf", "splitter", "amplifier", "transceiver",
-                # Power / electrical (added)
-                "dc", "ac", "watt", "kilowatt", "ampere", "volt", "battery",
-                "autonomy", "capacity", "utilisation", "utilization",
-                "shelter", "hvac", "cooling",
-                # BIM / construction / project management
-                "clash", "clashes", "conflict", "conflicts", "milestone", "milestones",
-                "completion", "schedule", "timeline", "deadline", "progress", "status",
-                "coordination", "model", "structural", "architectural", "mep",
-                "framing", "simulation", "review", "inspection", "phase", "phases",
-                "submittal", "rfi", "punch", "defect", "issue", "issues",
-                "quantity", "quantities", "takeoff", "area", "volume",
-                "storey", "storeys", "floor", "floors", "material", "materials",
-                "element", "elements", "wall", "slab", "column", "beam",
-                # French
-                "revenu", "coût", "budget", "salaire", "température", "vitesse",
-                "latence", "débit", "perte", "puissance", "charge", "taux",
-                "total", "moyenne", "pourcentage", "fréquence", "tension",
-                "pression", "distance", "poids", "durée", "trafic",
-                "fibre", "brin", "portée", "tranchée", "batterie",
-                # Arabic
-                "إيراد", "تكلفة", "ميزانية", "راتب", "سرعة", "كمون",
-                "إنتاجية", "طاقة", "حمل", "معدل", "مجموع", "متوسط",
-                "نسبة", "تردد", "ضغط", "مسافة", "وزن", "مدة",
-                # Spanish
-                "ingreso", "costo", "presupuesto", "salario", "velocidad",
-                "latencia", "rendimiento", "pérdida", "potencia", "carga",
-                "tasa", "total", "promedio", "porcentaje", "frecuencia",
-                "tensión", "presión", "distancia", "peso", "duración",
-                # German
-                "umsatz", "kosten", "budget", "gehalt", "geschwindigkeit",
-                "latenz", "durchsatz", "verlust", "leistung", "last",
-                "rate", "gesamt", "durchschnitt", "prozent", "frequenz",
-                # Italian / Portuguese (shared roots)
-                "entrate", "costo", "stipendio", "velocità", "latenza",
-                "rendimento", "potenza", "carico", "tasso", "totale",
-                "receita", "custo", "salário", "taxa", "frequência",
-            ]
             if not any(h in q for h in specific_hints):
                 return True
+
+        # ── Tier 3: Medium query (7-20 words) that is a chart request but ────
+        # contains ONLY file/document/data nouns and no chartable metric noun.
+        # This catches: "generate some charts from my uploaded documents please",
+        # "can you create charts off all the files i gave you", etc.
+        if 7 <= len(words) <= 20:
+            chart_request_words = {
+                "chart", "charts", "graph", "graphs", "plot", "plots",
+                "visual", "visuals", "visualize", "visualise", "graphique",
+                "diagramme", "رسم", "مخطط", "gráfica", "diagramm",
+            }
+            file_only_nouns = {
+                "file", "files", "doc", "docs", "document", "documents",
+                "data", "it", "them", "everything", "all", "my", "this",
+                "the", "these", "uploaded", "attached",
+                # French
+                "fichier", "fichiers", "document", "documents", "données",
+                # Arabic
+                "ملف", "ملفات", "وثيقة", "وثائق", "بيانات",
+            }
+            # Is it a chart request at all?
+            is_chart_request = any(w in q for w in chart_request_words)
+            # Does it mention a specific metric?
+            has_metric = any(h in q for h in specific_hints)
+
+            if is_chart_request and not has_metric:
+                # Double-check: are all non-verb nouns just file/doc words?
+                # Approximate check: no word beyond stop-words/verbs hints at a metric
+                meaningful_words = [
+                    w for w in words
+                    if w not in file_only_nouns
+                    and w not in chart_request_words
+                    and w not in {
+                        "a", "an", "the", "from", "off", "for", "using",
+                        "out", "of", "based", "on", "with", "me", "i",
+                        "you", "can", "could", "please", "want", "need",
+                        "make", "create", "generate", "show", "draw",
+                        "build", "give", "some", "any", "and", "or",
+                        "my", "your", "our", "their", "its",
+                        # French verbs/stop words
+                        "montre", "crée", "génère", "fais", "trace", "moi",
+                        "un", "une", "des", "les", "du", "de", "en",
+                        # Arabic particles
+                        "لي", "من", "في", "على", "هذا", "هذه",
+                    }
+                ]
+                if not meaningful_words:
+                    return True
 
         return False
 
