@@ -159,6 +159,10 @@ class AgentState(TypedDict):
     # voice call optimisation — skips expensive judge/source/retry nodes
     voice_mode: bool
 
+    # set to True when the user query arrived via voice transcription
+    # (frontend appends [voice_input=true] tag — stripped before LLM sees it)
+    voice_transcribed: bool
+
     # user-selected model provider — forwarded to call_llm
     preferred_provider: Optional[str]
 
@@ -645,6 +649,14 @@ class RAGEngine:
     def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
 
+        # Strip the [voice_input=true] sentinel the frontend appends after transcription.
+        # We detect it BEFORE storing anything so the clean query flows everywhere.
+        import re as _re_voice
+        voice_transcribed = bool(_re_voice.search(r'\[voice_input=true\]', user_query, _re_voice.IGNORECASE))
+        if voice_transcribed:
+            user_query = _re_voice.sub(r'\s*\[voice_input=true\]', '', user_query).strip()
+            print("🎙️  voice_transcribed=True — [voice_input=true] tag stripped from query")
+
         # Store callback on instance so node wrappers can access it without going through state
         # (state keys starting with _ are stripped by pydantic/langgraph)
         self._status_callback = status_callback or (lambda *_: None)
@@ -692,6 +704,7 @@ class RAGEngine:
             "user_id": user_id,
             "error": None,
             "voice_mode": voice_mode,
+            "voice_transcribed": voice_transcribed,
             "preferred_provider": preferred_provider,
         }
         
@@ -1723,7 +1736,8 @@ Respond with ONLY the rewritten query, nothing else."""
         # On retry the plan itself has been updated by _should_retry —
         # the fix instruction is already baked into plan.approach.
         # We pass an empty fix_instruction here so we don't double-inject it.
-        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="")
+        voice_transcribed = state.get("voice_transcribed", False)
+        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", voice_transcribed=voice_transcribed)
         
         # Build messages — prepend conversation history so the model can handle
         # modification requests ("make it shorter", "change X to Y") by seeing
@@ -1821,7 +1835,7 @@ Respond with ONLY the rewritten query, nothing else."""
             "confidence": _confidence(chunks),
         }
     
-    def _build_synthesis_prompt(self, query: str, context: str, plan: ResponsePlan, fix_instruction: str = "") -> str:
+    def _build_synthesis_prompt(self, query: str, context: str, plan: ResponsePlan, fix_instruction: str = "", voice_transcribed: bool = False) -> str:
         tone_map = {
             'casual': 'casual and friendly', 'conversational': 'conversational',
             'friendly': 'warm and friendly', 'professional': 'professional', 'technical': 'technical',
@@ -1860,8 +1874,18 @@ Respond with ONLY the rewritten query, nothing else."""
                 "Do NOT reproduce the raw [IMAGE ...] tag — describe what it contains instead."
             )
 
+        # Voice-transcribed queries: tell the model the input came via speech
+        voice_note = ""
+        if voice_transcribed:
+            voice_note = (
+                "\n\nVOICE INPUT NOTE: The user's message above was captured via voice and "
+                "automatically transcribed to text. Respond naturally as if you heard them speak — "
+                "never mention transcription, voice, audio, or the fact that you cannot hear. "
+                "Just answer their question directly and conversationally."
+            )
+
         return f"""You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a BIM engineering, telecom infrastructure, and DeepTwin AI company. You assist professionals in construction and telecom with technical document analysis. Answer ONLY using the documents below.
-Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}{visual_instruction}
+Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}{visual_instruction}{voice_note}
 
 CITATION RULE: After every sentence that uses information from a document, add [N] where N is the source number shown in the document headers below.
 

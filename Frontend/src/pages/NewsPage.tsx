@@ -88,6 +88,152 @@ function normalize(item: any) {
 const overlayGradient =
   "linear-gradient(to top,rgba(0,0,0,0.88) 0%,rgba(0,0,0,0.40) 55%,rgba(0,0,0,0.08) 100%)";
 
+// ── Markdown renderer for chat messages ─────────────────────────────────────
+// Converts common LLM markdown to JSX so text doesn't overflow the chat bubble.
+
+function renderMarkdown(text: string, dark: boolean): React.ReactNode {
+  const textColor     = dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)";
+  const mutedColor    = dark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.45)";
+  const codeColor     = dark ? "#7dd3fc"                : "#0369a1";
+  const codeBg        = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.07)";
+  const hrColor       = dark ? "rgba(255,255,255,0.1)"  : "rgba(0,0,0,0.1)";
+
+  // Split into lines for block-level processing
+  const lines = text.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let i = 0;
+
+  const inlineFormat = (raw: string, key: string | number): React.ReactNode => {
+    // Handle inline code, bold, italic in one pass
+    const parts: React.ReactNode[] = [];
+    const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|__[^_]+__|_[^_]+_)/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    let idx = 0;
+    while ((m = pattern.exec(raw)) !== null) {
+      if (m.index > last) parts.push(raw.slice(last, m.index));
+      const token = m[0];
+      if (token.startsWith("`")) {
+        parts.push(
+          <code key={`${key}-c${idx}`} style={{
+            fontFamily: "monospace", fontSize: "0.88em",
+            background: codeBg, color: codeColor,
+            borderRadius: 4, padding: "0.05em 0.32em",
+          }}>{token.slice(1, -1)}</code>
+        );
+      } else if (token.startsWith("**") || token.startsWith("__")) {
+        parts.push(<strong key={`${key}-b${idx}`} style={{ fontWeight: 700, color: textColor }}>{token.slice(2, -2)}</strong>);
+      } else {
+        parts.push(<em key={`${key}-i${idx}`} style={{ fontStyle: "italic" }}>{token.slice(1, -1)}</em>);
+      }
+      last = m.index + token.length;
+      idx++;
+    }
+    if (last < raw.length) parts.push(raw.slice(last));
+    return parts.length === 1 && typeof parts[0] === "string" ? parts[0] : <>{parts}</>;
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Blank line → small spacer (avoid double-spacing)
+    if (line.trim() === "") {
+      // only add spacer if previous node wasn't already a spacer
+      const last = nodes[nodes.length - 1];
+      if (last && (last as any)?.props?.["data-spacer"] !== "1") {
+        nodes.push(<div key={`sp-${i}`} data-spacer="1" style={{ height: "0.35em" }} />);
+      }
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^---+$/.test(line.trim()) || /^\*\*\*+$/.test(line.trim())) {
+      nodes.push(<hr key={`hr-${i}`} style={{ border: "none", borderTop: `1px solid ${hrColor}`, margin: "0.45em 0" }} />);
+      i++;
+      continue;
+    }
+
+    // Headings (###, ##, #)
+    const hMatch = line.match(/^(#{1,3})\s+(.+)/);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      const size  = level === 1 ? "0.9rem" : level === 2 ? "0.82rem" : "0.78rem";
+      nodes.push(
+        <div key={`h-${i}`} style={{
+          fontSize: size, fontWeight: 700, color: textColor,
+          marginTop: "0.55em", marginBottom: "0.2em", lineHeight: 1.3,
+          wordBreak: "break-word",
+        }}>
+          {inlineFormat(hMatch[2], `h-${i}`)}
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    // Bullet list item (-, *, •)
+    if (/^[\-\*•]\s+/.test(line)) {
+      // Collect consecutive bullet lines
+      const items: string[] = [];
+      while (i < lines.length && /^[\-\*•]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[\-\*•]\s+/, ""));
+        i++;
+      }
+      nodes.push(
+        <ul key={`ul-${i}`} style={{ margin: "0.25em 0", paddingLeft: "1.1em", listStyle: "none" }}>
+          {items.map((item, j) => (
+            <li key={j} style={{
+              display: "flex", alignItems: "flex-start", gap: "0.38em",
+              marginBottom: j < items.length - 1 ? "0.22em" : 0,
+              lineHeight: 1.5, wordBreak: "break-word",
+            }}>
+              <span style={{ color: "#3b9eff", fontSize: "0.8em", marginTop: "0.28em", flexShrink: 0 }}>●</span>
+              <span>{inlineFormat(item, `ul-${i}-${j}`)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Numbered list item
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      let num = 1;
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ""));
+        i++;
+      }
+      nodes.push(
+        <ol key={`ol-${i}`} style={{ margin: "0.25em 0", paddingLeft: "0.2em", listStyle: "none" }}>
+          {items.map((item, j) => (
+            <li key={j} style={{
+              display: "flex", alignItems: "flex-start", gap: "0.38em",
+              marginBottom: j < items.length - 1 ? "0.22em" : 0,
+              lineHeight: 1.5, wordBreak: "break-word",
+            }}>
+              <span style={{ color: mutedColor, fontSize: "0.78em", fontWeight: 700, marginTop: "0.22em", flexShrink: 0, minWidth: "1.2em" }}>{j + num}.</span>
+              <span>{inlineFormat(item, `ol-${i}-${j}`)}</span>
+            </li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // Regular paragraph line — wrap with word-break
+    nodes.push(
+      <div key={`p-${i}`} style={{ lineHeight: 1.55, wordBreak: "break-word", overflowWrap: "break-word" }}>
+        {inlineFormat(line, `p-${i}`)}
+      </div>
+    );
+    i++;
+  }
+
+  return <>{nodes}</>;
+}
+
 // ── IntersectionObserver infinite scroll ────────────────────────────────────
 
 function useInfiniteScroll(onLoadMore: () => void, enabled: boolean) {
@@ -795,7 +941,10 @@ function NewsChatPanel({
                     : "none",
                   fontSize: "0.73rem", lineHeight: 1.55,
                   color: msg.role === "user" ? "#fff" : dark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.78)",
-                  whiteSpace: "pre-wrap",
+                  whiteSpace: msg.role === "user" ? "pre-wrap" : "normal",
+                  wordBreak: "break-word",
+                  overflowWrap: "break-word",
+                  minWidth: 0,
                 }}>
                   {msg.loading ? (
                     <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
@@ -818,9 +967,13 @@ function NewsChatPanel({
                         ));
                       }}
                       render={(partial: string) => (
-                        <span style={{ whiteSpace: "pre-wrap" }}>{partial}</span>
+                        <div style={{ wordBreak: "break-word", overflowWrap: "break-word" }}>
+                          {renderMarkdown(partial, dark)}
+                        </div>
                       )}
                     />
+                  ) : msg.role === "assistant" ? (
+                    renderMarkdown(msg.content, dark)
                   ) : msg.content}
                 </div>
 
