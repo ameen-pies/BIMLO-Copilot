@@ -240,18 +240,54 @@ function zcr(buf: Float32Array): number {
   return crossings / buf.length;
 }
 
-// Strip markdown for cleaner TTS (no "hashtag" or asterisks read aloud)
+// Strip markdown for TTS — must match the aggressive backend version in voice_call.py
 function stripMarkdown(text: string): string {
   return text
-    .replace(/#{1,6}\s/g, "")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
+    // Fenced code blocks
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/~~~[\s\S]*?~~~/g, "")
+    // ATX headings
+    .replace(/^#{1,6}\s+/gm, "")
+    // Setext headings
+    .replace(/^[=-]{2,}\s*$/gm, "")
+    // Horizontal rules
+    .replace(/^\s*[-*_]{3,}\s*$/gm, "")
+    // Blockquotes
+    .replace(/^\s*>\s?/gm, "")
+    // Ordered lists
+    .replace(/^\s*\d+\.\s+/gm, "")
+    // Unordered lists
+    .replace(/^\s*[-*+]\s+/gm, "")
+    // Bold+italic
+    .replace(/\*{3}(.+?)\*{3}/g, "$1")
+    .replace(/_{3}(.+?)_{3}/g, "$1")
+    // Bold
+    .replace(/\*{2}(.+?)\*{2}/g, "$1")
+    .replace(/_{2}(.+?)_{2}/g, "$1")
+    // Italic
     .replace(/\*(.+?)\*/g, "$1")
-    .replace(/`{1,3}[^`]*`{1,3}/g, "")
+    .replace(/_(.+?)_/g, "$1")
+    // Inline code
+    .replace(/`+[^`]*`+/g, "")
+    // Links
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/>\s*/g, "")
-    .replace(/[-*+]\s/g, "")
-    .replace(/\n{2,}/g, ". ")
+    // Images
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+    // Reference links
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
+    // Footnotes/citations
+    .replace(/\[\^?[\w\d]+\]/g, "")
+    // HTML tags
+    .replace(/<[^>]+>/g, "")
+    // Table rows
+    .replace(/\|.*\|/g, "")
+    // Whitespace
+    .replace(/\n{2,}/g, " ")
     .replace(/\n/g, " ")
+    .replace(/ {2,}/g, " ")
+    // Final safety: stray asterisks/underscores/backticks/hashes
+    .replace(/(?<!\w)[*_`]+(?!\w)/g, "")
+    .replace(/(?<!\w)#+\s*/g, "")
     .trim();
 }
 
@@ -664,10 +700,11 @@ const CallPage: React.FC = () => {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          query:      `[Voice call — answer conversationally and concisely. Never say you cannot hear.]\n\nUser said: ${text}`,
+          query:      text,
           session_id: sessionRef.current,
           top_k:      3,
           voice_mode: true,
+          force_route: null,
         }),
         signal: ragAbortRef.current.signal,
       });
@@ -723,18 +760,22 @@ const CallPage: React.FC = () => {
       recorderRef.current = null;
       chunksRef.current   = [];
 
+      // Strip markdown client-side before sending to TTS —
+      // belt-and-suspenders on top of the backend's own stripping.
+      const ttsText = stripMarkdown(ragAnswer);
+
       // Hit /tts directly — saves one full round-trip vs /call/respond
       const ttsRes = await fetch(`${API}/tts`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ text: ragAnswer, voice: selectedVoice }),
+        body:    JSON.stringify({ text: ttsText, voice: selectedVoice }),
         signal:  ttsAbortRef.current.signal,
       });
       if (!ttsRes.ok) throw new Error("TTS failed");
       const ttsBytes = await ttsRes.arrayBuffer();
       if (!ttsBytes.byteLength || stateRef.current === "ended") return;
 
-      addTurn("assistant", ragAnswer);
+      addTurn("assistant", ttsText);
       // Convert ArrayBuffer → base64 in 8 KB chunks to avoid
       // "Maximum call stack size exceeded" from spreading large typed arrays.
       const answerB64 = (() => {
@@ -746,7 +787,7 @@ const CallPage: React.FC = () => {
         }
         return btoa(binary);
       })();
-      await speakWavRef.current!(answerB64, ragAnswer, false);
+      await speakWavRef.current!(answerB64, ttsText, false);
 
     } catch (err: any) {
       if (err?.name === "AbortError") {

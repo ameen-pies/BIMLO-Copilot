@@ -629,13 +629,31 @@ async def query_documents(
 
         print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns, preferred_provider={request.preferred_provider!r}]")
 
+        # In voice_mode, prepend a strong system instruction so the RAG engine
+        # generates plain conversational prose instead of markdown from the start.
+        effective_history = history
+        if request.voice_mode:
+            voice_system = {
+                "role": "system",
+                "content": (
+                    "VOICE MODE — your answer will be read aloud by a text-to-speech engine. "
+                    "Rules you MUST follow:\n"
+                    "- No markdown whatsoever: no *, **, _, __, #, `, bullets, numbered lists, or tables\n"
+                    "- Write in short, natural spoken sentences — like a knowledgeable friend on the phone\n"
+                    "- Max 4 sentences. Be concise and direct.\n"
+                    "- Same language as the user's question\n"
+                    "- Never open with 'Certainly', 'Of course', 'Sure', or 'Great question'"
+                ),
+            }
+            effective_history = [voice_system] + list(history)
+
         # Run the RAG engine with server-side history
         prev_route = _session_routes.get(session_id, "")
         route_log  = get_route_log(session_id)
         result = rag_engine.query(
             request.query,
             top_k=request.top_k,
-            conversation_history=history,
+            conversation_history=effective_history,
             prev_route=prev_route,
             route_log=route_log,
             force_route=request.force_route,
@@ -725,6 +743,23 @@ async def query_stream(
     prev_route = _session_routes.get(session_id, "")
     route_log  = get_route_log(session_id)
 
+    # In voice_mode, prepend a system instruction so RAG generates plain prose
+    effective_history = history
+    if request.voice_mode:
+        voice_system = {
+            "role": "system",
+            "content": (
+                "VOICE MODE — your answer will be read aloud by a text-to-speech engine. "
+                "Rules you MUST follow:\n"
+                "- No markdown whatsoever: no *, **, _, __, #, `, bullets, numbered lists, or tables\n"
+                "- Write in short, natural spoken sentences — like a knowledgeable friend on the phone\n"
+                "- Max 4 sentences. Be concise and direct.\n"
+                "- Same language as the user's question\n"
+                "- Never open with 'Certainly', 'Of course', 'Sure', or 'Great question'"
+            ),
+        }
+        effective_history = [voice_system] + list(history)
+
     print(f"🔧 /query-stream preferred_provider={request.preferred_provider!r}")
     # Thread-safe queue: background thread pushes SSE events, async generator reads them
     q: queue.Queue = queue.Queue()
@@ -745,7 +780,7 @@ async def query_stream(
             result = rag_engine.query(
                 request.query,
                 top_k=request.top_k,
-                conversation_history=history,
+                conversation_history=effective_history,
                 prev_route=prev_route,
                 route_log=route_log,
                 status_callback=status_callback,
