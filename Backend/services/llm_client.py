@@ -68,7 +68,7 @@ def _call_cf_worker(
 
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            resp = requests.post(url, headers=headers, json=payload, timeout=(10, 45))
 
             if resp.status_code == 200:
                 raw = resp.json().get("response") or ""
@@ -78,7 +78,7 @@ def _call_cf_worker(
                 return (raw if isinstance(raw, str) else str(raw)), None
 
             elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, 2))
                 continue
 
             else:
@@ -135,12 +135,12 @@ def _call_groq(
 
     for attempt in range(3):
         try:
-            resp = requests.post(_GROQ_API_URL, headers=headers, json=payload, timeout=60)
+            resp = requests.post(_GROQ_API_URL, headers=headers, json=payload, timeout=(10, 45))
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
                 return raw if isinstance(raw, str) else str(raw)
             elif resp.status_code == 429:
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, 2))
             else:
                 print(f"⚠️  llm_client: Groq {resp.status_code}: {resp.text[:120]}")
                 break

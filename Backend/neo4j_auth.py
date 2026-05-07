@@ -1099,39 +1099,53 @@ def delete_report(report_id: str, user: Dict = Depends(require_user)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def init_neo4j():
-    """Call this once at app startup to verify connection and create constraints."""
+    """Call this once at app startup to verify connection and create constraints.
+    Retries up to 15 times with 10s delay to handle slow Neo4j startup in Docker.
+    """
     if not _NEO4J_AVAILABLE:
         print("⚠️  neo4j driver missing — run: pip install neo4j")
         print("    Auth endpoints will return 503 until the package is installed.")
         return
-    try:
-        get_driver().verify_connectivity()
-        _setup_constraints()
-        # Clean up expired tokens left over from previous runs
+
+    max_retries = 15
+    retry_delay = 10  # seconds
+
+    for attempt in range(1, max_retries + 1):
         try:
-            now = time.time()
-            result = _run(
-                "MATCH (t:Token) WHERE t.expires_at < $now DETACH DELETE t RETURN count(t) AS n",
-                {"now": now},
-            )
-            n = result[0]["n"] if result else 0
-            if n:
-                print(f"🧹 Neo4j: purged {n} expired token(s)")
+            global _driver
+            _driver = None  # reset driver so we get a fresh connection each retry
+            get_driver().verify_connectivity()
+            _setup_constraints()
+            # Clean up expired tokens left over from previous runs
+            try:
+                now = time.time()
+                result = _run(
+                    "MATCH (t:Token) WHERE t.expires_at < $now DETACH DELETE t RETURN count(t) AS n",
+                    {"now": now},
+                )
+                n = result[0]["n"] if result else 0
+                if n:
+                    print(f"🧹 Neo4j: purged {n} expired token(s)")
+            except Exception as e:
+                print(f"⚠️  Token cleanup failed (non-fatal): {e}")
+            print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
+            _seed_admin()
+            return  # success — exit retry loop
         except Exception as e:
-            print(f"⚠️  Token cleanup failed (non-fatal): {e}")
-        print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
-        _seed_admin()
-    except Exception as e:
-        print(f"❌ Neo4j connection FAILED: {e}")
-        print("─" * 60)
-        print("  Checklist:")
-        print("  1. Is Neo4j running? (neo4j start  or  check Desktop)")
-        print(f"  2. Is the URI correct? Current: {NEO4J_URI}")
-        print(f"     • Local:  bolt://127.0.0.1:7687")
-        print(f"     • AuraDB: neo4j+s://<id>.databases.neo4j.io")
-        print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
-        print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
-        print("─" * 60)
+            if attempt < max_retries:
+                print(f"⏳ Neo4j not ready (attempt {attempt}/{max_retries}) — retrying in {retry_delay}s... ({e})")
+                time.sleep(retry_delay)
+            else:
+                print(f"❌ Neo4j connection FAILED after {max_retries} attempts: {e}")
+                print("─" * 60)
+                print("  Checklist:")
+                print("  1. Is Neo4j running? (neo4j start  or  check Desktop)")
+                print(f"  2. Is the URI correct? Current: {NEO4J_URI}")
+                print(f"     • Local:  bolt://127.0.0.1:7687")
+                print(f"     • AuraDB: neo4j+s://<id>.databases.neo4j.io")
+                print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
+                print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
+                print("─" * 60)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

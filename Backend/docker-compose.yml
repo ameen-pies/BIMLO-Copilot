@@ -1,0 +1,62 @@
+services:
+  # Vector Database
+  chroma:
+    image: chromadb/chroma:latest
+    volumes:
+      - chroma_data:/chroma/data
+    ports:
+      - "8001:8000"
+
+  # Graph Database
+  neo4j:
+    image: neo4j:latest
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 15s
+      retries: 20
+      start_period: 120s
+
+  # Backend API
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - CHROMA_HOST=chroma
+      - NEO4J_URI=bolt://neo4j:7687
+      - WIKI_USER_AGENT=BimloRAG/1.0
+        # Hugging Face cache settings to persist models and avoid re-downloading on restarts
+      - HF_HOME=/root/.cache/huggingface
+      - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface/sentence_transformers
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+      # Disable Hugging Face progress bars for cleaner logs
+      - HF_HUB_DISABLE_PROGRESS_BARS=1
+    volumes:
+      # Persist Hugging Face cache to avoid re-downloading models on container restarts
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+
+  # Frontend
+  frontend:
+    build: ../Frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  chroma_data:
+  neo4j_data:
+  hf_cache:

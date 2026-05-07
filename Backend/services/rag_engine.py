@@ -169,6 +169,10 @@ class AgentState(TypedDict):
     # internal: stores chunks from prior iterative_rag iterations for merge in rerank_merge
     _prev_retrieved_chunks: List[Dict]
 
+    # doc scope from intent classifier — resolved filename, positional hint, or ""
+    # "" means search all docs; non-empty restricts retrieval to a specific doc
+    _doc_scope: str
+
 
 MAX_ITER = 3
 MAX_RETRIES = 1  # Max retries for quality issues (was 2 — caused up to 7 LLM calls per query)
@@ -498,9 +502,13 @@ def _build_context(chunks: List[Dict]) -> str:
         if m.get("has_tables"):
             flags.append("has table data")
         flag_str = f" | {', '.join(flags)}" if flags else ""
+        chunk_text = c['text']
+        # Use full text for smaller chunks; cap very large ones to avoid context overflow
+        # 3000 chars ~ 750 tokens — safe for most LLMs with 5 chunks
+        display_text = chunk_text if len(chunk_text) <= 3000 else chunk_text[:3000]
         parts.append(
             f"[Source {i} | {m.get('filename')} | {m.get('doc_type')}{flag_str}]\n"
-            f"{c['text'][:1200]}"
+            f"{display_text}"
         )
     return "\n\n".join(parts)
 
@@ -550,7 +558,17 @@ def _confidence(chunks: List[Dict]) -> float:
 def _is_good_retrieval(chunks: List[Dict]) -> bool:
     if len(chunks) < MIN_CHUNKS:
         return False
-    good = [c for c in chunks if (c.get("distance") or 1.0) < RELEVANCE_THRESHOLD]
+    # After reranking, chunks have rerank_score (0-1, higher=better) and distance=(1-score).
+    # Before reranking, chunks have raw embedding distance (0-2, lower=better).
+    # We accept a chunk as "good" if either:
+    #   (a) rerank_score >= 0.35  (post-rerank: model thinks it's relevant)
+    #   (b) distance < RELEVANCE_THRESHOLD  (pre-rerank fallback)
+    def _chunk_is_good(c: Dict) -> bool:
+        rerank_score = c.get("rerank_score")
+        if rerank_score is not None:
+            return float(rerank_score) >= 0.35
+        return (c.get("distance") or 1.0) < RELEVANCE_THRESHOLD
+    good = [c for c in chunks if _chunk_is_good(c)]
     return len(good) >= MIN_CHUNKS
 
 
@@ -599,6 +617,58 @@ def _clean_answer(text: str) -> str:
 
     return text.strip()
 
+
+
+def _resolve_doc_scope(scope_hint: str, all_docs: List[Dict], query: str = "") -> str:
+    """
+    Resolve a doc_scope hint (from the intent classifier) to an exact filename.
+
+    Handles three cases without hardcoding:
+      1. Exact/partial filename match  → return that filename
+      2. Positional hint ("first", "second", "1", …) → return docs[idx].filename
+      3. Pronoun/generic with one doc  → return the only doc's filename
+
+    Returns "" if scope is ambiguous or can't be resolved, meaning: search all docs.
+    """
+    if not scope_hint or not all_docs:
+        return ""
+
+    filenames = [d.get("filename", "") for d in all_docs if d.get("filename")]
+    if not filenames:
+        return ""
+
+    scope_lower = scope_hint.lower().strip()
+
+    # ── 1. Exact or substring filename match ──────────────────────────────────
+    for fname in filenames:
+        if scope_lower == fname.lower() or scope_lower in fname.lower() or fname.lower() in scope_lower:
+            return fname
+
+    # ── 2. Positional ordinals ────────────────────────────────────────────────
+    _ordinal_map = {
+        "first": 0,   "1st": 0,   "1": 0,
+        "second": 1,  "2nd": 1,   "2": 1,
+        "third": 2,   "3rd": 2,   "3": 2,
+        "fourth": 3,  "4th": 3,   "4": 3,
+        "premier": 0, "première": 0,
+        "deuxième": 1, "second": 1,
+        "troisième": 2,
+        "الأول": 0, "الأولى": 0,
+        "الثاني": 1, "الثانية": 1,
+        "الثالث": 2,
+    }
+    if scope_lower in _ordinal_map:
+        idx = _ordinal_map[scope_lower]
+        if idx < len(filenames):
+            return filenames[idx]
+
+    # ── 3. Generic pronoun with single doc in session ─────────────────────────
+    _pronouns = {"it", "this", "that", "the file", "the document",
+                 "ce fichier", "ce document", "هذا", "هذه", "له"}
+    if scope_lower in _pronouns and len(filenames) == 1:
+        return filenames[0]
+
+    return ""
 
 
 class RAGEngine:
@@ -706,6 +776,7 @@ class RAGEngine:
             "voice_mode": voice_mode,
             "voice_transcribed": voice_transcribed,
             "preferred_provider": preferred_provider,
+            "_doc_scope": "",
         }
         
         print(f"\n{'='*80}")
@@ -1037,6 +1108,13 @@ Now generate for: "{q}" """
         except Exception:
             _session_has_docs = False
 
+        # Fetch the doc list once — used by both the intent classifier (for doc_scope)
+        # and (if needed) fallback logic below.
+        try:
+            all_docs = self.vs.list_documents(user_id=_user_id, session_id=_session_id)
+        except Exception:
+            all_docs = []
+
         print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
 
         # ── Pre-router: code generation guard ────────────────────────────────
@@ -1062,12 +1140,16 @@ Now generate for: "{q}" """
         # ── Stage 1: Intent classifier (separate LLM call, chain-of-thought) ──
         try:
             from intent_classifier import classify_intent
+            # Pass the actual list of uploaded filenames so the classifier can
+            # resolve doc_scope ("the first one", "report.pdf", "it") accurately.
+            _uploaded_filenames = [d.get("filename", "") for d in all_docs if d.get("filename")]
             intent = classify_intent(
                 query,
                 history,
                 route_log,
                 preferred_provider=state.get("preferred_provider"),
                 session_has_docs=_session_has_docs,
+                uploaded_docs=_uploaded_filenames,
             )
             intent_hint = (
                 f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
@@ -1078,20 +1160,24 @@ Now generate for: "{q}" """
                 f"  language_intent: '{intent.language_intent}'\n"
                 f"  ambiguity_score: {intent.ambiguity_score:.2f}\n"
                 f"  suggested_route: {intent.suggested_route}\n"
+                f"  doc_scope: '{intent.doc_scope}'\n"
                 f"  session_has_docs: {_session_has_docs}\n"
                 f"  reasoning: {intent.reasoning}"
             )
             # If classifier is very confident, trust it directly and skip the second LLM call
             # Exception: if it chose "direct" but session has docs and query is short/ambiguous,
-            # override to "rag" — the classifier can't see session state.
+            # override to "rag" — UNLESS it's a meta-awareness query (converse_meta).
             if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
                 _r = intent.suggested_route
-                if _r == "direct" and _session_has_docs and intent.ambiguity_score >= 0.15:
+                if (_r == "direct"
+                        and intent.primary_intent != "converse_meta"
+                        and _session_has_docs
+                        and intent.ambiguity_score >= 0.15):
                     # Short or ambiguous message with docs present — use rag, not direct
                     _r = "rag"
                     print(f"rag (doc-bias override from direct, has_docs=True)")
                 else:
-                    print(f"{_r} (intent classifier, conf={intent.confidence:.2f})")
+                    print(f"{_r} (intent classifier, conf={intent.confidence:.2f}, doc_scope={intent.doc_scope!r})")
                 if _OBS_AVAILABLE:
                     _obs.log_routing(
                         session_id=state.get("session_id", ""),
@@ -1100,7 +1186,7 @@ Now generate for: "{q}" """
                         confidence=getattr(intent, "confidence", 0.8),
                         forced=False,
                     )
-                return {**state, "route": _r, "_intent": intent.to_dict()}
+                return {**state, "route": _r, "_intent": intent.to_dict(), "_doc_scope": intent.doc_scope}
         except Exception as e:
             print(f"[intent_classifier error: {e}] ", end="")
             intent_hint = ""
@@ -1150,7 +1236,7 @@ ROUTES:
 - analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
 - graph: the user wants a chart, graph, or visual plot of data extracted from the documents. Detect this intent in ANY language. EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik; IT: grafico; PT: gráfico.
 - report: the user explicitly asks to PRODUCE a standalone written report/PDF/document — "make a report on X", "generate a report", "rapport sur X". Must be an explicit creation request, NOT a summary or question.
-- define: the user asks the MEANING of a specific technical term, acronym, or concept — "what is X?", "define X", "what does X mean?", "explain X" where X is a single term. Answer using document context.
+- define: the user asks the MEANING of a standalone technical term or acronym IN ISOLATION — only when there are no documents OR the query is clearly about a generic concept with zero reference to any uploaded file. CRITICAL: "What is the host company of this file?" → rag (asks about doc content). "What is BIM?" with no docs → define. If the query references "this", "the file", "this document", "in this", "of this", or any uploaded filename → rag, NOT define.
 
 CRITICAL RULES:
 1. Any query about what the AI just said/did, referencing "you", "your answer", "what you said" → ALWAYS direct.
@@ -1187,11 +1273,26 @@ Reply with ONE word only — the route name."""
                     except Exception:
                         route = "rag"
 
+            # ── Post-route safety guard: never send to define when the query is about doc content ──
+            # "what is the host company of this file?" is a RAG question, not a define question.
+            if route == "define" and _session_has_docs:
+                _doc_ref_words = ["this", "the file", "the document", "this file", "this document",
+                                  "it", "here", "uploaded", "given", "provided", "attached", "in this",
+                                  "of this", "هذا", "هذه", "الملف", "ce fichier", "ce document"]
+                _q_lower = query.lower()
+                if any(w in _q_lower for w in _doc_ref_words):
+                    route = "rag"
+                    print(f" [define→rag: query references doc content with docs present]", end="")
+
             print(route)
             try:
-                return {**state, "route": route, "_intent": intent.to_dict()}  # type: ignore[name-defined]
+                _doc_scope = getattr(intent, "doc_scope", "")  # type: ignore[name-defined]
             except Exception:
-                return {**state, "route": route}
+                _doc_scope = ""
+            try:
+                return {**state, "route": route, "_intent": intent.to_dict(), "_doc_scope": _doc_scope}  # type: ignore[name-defined]
+            except Exception:
+                return {**state, "route": route, "_doc_scope": _doc_scope}
 
         except Exception as e:
             print(f"routing_error, using fallback → ", end="")
@@ -1418,8 +1519,6 @@ Reply with ONE word only — the route name."""
 
         print(f"🔎 [retrieve_vector] #{iteration} (+{top_k} candidates) → ", end="")
 
-        # If the query explicitly names a file, restrict search to that file only
-        filter_dict = None
         session_id = state.get("session_id", "")
         user_id = state.get("user_id")
         all_docs = self.vs.list_documents(user_id=user_id, session_id=session_id)
@@ -1433,12 +1532,31 @@ Reply with ONE word only — the route name."""
                     "retrieval_iterations": iteration,
                 }
 
-        for doc in all_docs:
-            fname = doc.get("filename", "")
-            if fname and fname.lower() in query.lower():
-                filter_dict = {"filename": fname}
-                print(f"[filtered to {fname}] ", end="")
-                break
+        # ── Doc-scope filtering ───────────────────────────────────────────────
+        # Priority: 1) intent classifier doc_scope  2) exact filename in query text
+        # doc_scope may be an exact filename or a positional hint like "first"/"second".
+        filter_dict = None
+        _doc_scope = state.get("_doc_scope", "")
+
+        if _doc_scope:
+            # Try to match doc_scope against the actual doc list
+            resolved = _resolve_doc_scope(
+                scope_hint=_doc_scope,
+                all_docs=all_docs,
+                query=query,
+            )
+            if resolved:
+                filter_dict = {"filename": resolved}
+                print(f"[scope→{resolved}] ", end="")
+        
+        if filter_dict is None:
+            # Fallback: exact filename substring match in the raw query text
+            for doc in all_docs:
+                fname = doc.get("filename", "")
+                if fname and fname.lower() in query.lower():
+                    filter_dict = {"filename": fname}
+                    print(f"[filtered to {fname}] ", end="")
+                    break
 
         # Fetch MORE candidates than top_k so the reranker has room to work
         try:
@@ -1618,30 +1736,57 @@ Reply with ONE word only — the route name."""
         return state
 
     def rewrite_query(self, state: AgentState) -> AgentState:
-        """Rewrite query to improve retrieval."""
+        """
+        Rewrite query to improve retrieval.
+        Uses context about what was already retrieved and what docs exist
+        so it can form genuinely different, targeted search terms.
+        """
         original = state["query"]
+        existing_chunks = state.get("retrieved_chunks", [])
         
         print(f"🔄 Rewriting query for better retrieval → ", end="")
         
         if not self.llm.enabled:
             print("(LLM disabled)")
             return state
-        
-        prompt = f"""The following query didn't retrieve good results. Rewrite it to be more specific and searchable.
 
-Original query: {original}
+        # Build context about what we already found (or didn't find)
+        retrieved_info = ""
+        if existing_chunks:
+            filenames = list(dict.fromkeys(
+                c.get("metadata", {}).get("filename", "") for c in existing_chunks if c.get("metadata", {}).get("filename")
+            ))
+            top_excerpt = existing_chunks[0].get("text", "")[:300] if existing_chunks else ""
+            retrieved_info = (
+                f"\nDocuments found so far: {', '.join(filenames)}"
+                f"\nBest retrieved excerpt so far:\n\"{top_excerpt}\""
+                f"\nProblem: these results don't fully answer the question."
+            )
+        else:
+            retrieved_info = "\nProblem: no relevant chunks were retrieved at all."
 
-Respond with ONLY the rewritten query, nothing else."""
+        prompt = f"""You are helping a technical document search system improve its query.
+
+ORIGINAL QUERY: {original}
+{retrieved_info}
+
+Your job: rewrite the query to find DIFFERENT, more relevant content.
+Strategies:
+- Use different keywords or synonyms for the same concept
+- Break a complex question into its most searchable core
+- Use domain-specific terminology a technical document would use
+- If the original is a question, rewrite as the kind of phrase that would appear as an answer in a document
+
+Reply with ONLY the rewritten search query. No explanation."""
         
         rewritten = self.llm.chat(
             [{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
+            temperature=0.4,
+        ).strip().strip('"')
         
         print(f'"{rewritten}"')
         self._emit("rewrite_query", "✏️", f"Searching for: {rewritten[:60]}…")
         
-        # Add to sub-queries for tracking
         sub_queries = state["sub_queries"] + [rewritten]
         
         return {
@@ -1657,37 +1802,37 @@ Respond with ONLY the rewritten query, nothing else."""
     def judge_plan(self, state: AgentState) -> AgentState:
         """
         Ask the judge to plan how to respond.
-        History is passed so the judge can detect language shifts across turns.
-        In voice_mode: skip the LLM call and use a fast conversational preset plan.
+        Passes enough context (history + doc content) for the judge to make
+        genuinely useful decisions about structure, style, and key points.
         """
         query = state["query"]
         chunks = state["retrieved_chunks"]
         history = state.get("conversation_history", [])
 
         if state.get("voice_mode"):
-            # Fast preset: conversational, concise, no citations needed for speech
             plan = self.judge._fallback_plan(query)
-            # Override defaults to match voice expectations
             plan = ResponsePlan(**{
                 **plan.to_dict(),
                 "target_tone":         "conversational",
                 "response_style":      "concise",
                 "max_response_length": "brief",
-                "should_cite_sources": False,  # citations are meaningless spoken aloud
+                "should_cite_sources": False,
             })
             print("⚡ judge_plan: voice_mode preset (conversational/concise/no-cite)")
             return {**state, "response_plan": plan}
 
         print(f"🧠 Judge planning response → ", end="")
 
-        # Build conversation context for judge (last 3 turns)
-        history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
+        # Pass more history context — 300 chars per message, last 6 messages
+        history_texts = [
+            f"{m['role'].upper()}: {m['content'][:300]}"
+            for m in history[-6:]
+        ]
 
         plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
 
-        print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style}")
+        print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style} | key_points={len(plan.key_points_to_include)}")
 
-        # Emit what the judge plans to cover
         if plan.key_points_to_include:
             pts = plan.key_points_to_include[:2]
             label = " & ".join(pts) if len(pts) > 1 else pts[0]
@@ -1752,7 +1897,7 @@ Respond with ONLY the rewritten query, nothing else."""
             answer = self.llm.chat(
                 history_msgs + [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=1200,
+                max_tokens=2000,
             )
         else:
             answer = self._fallback_synthesis(chunks, plan)
@@ -1842,67 +1987,93 @@ Respond with ONLY the rewritten query, nothing else."""
         }
         tone = tone_map.get(plan.target_tone, plan.target_tone)
 
-        # Surface the approach/correction directive if present
+        # ── Translate plan fields into concrete formatting instructions ─────────
+        # response_style and max_response_length are meaningless unless we translate them
+        style_instruction = ""
+        if plan.response_style == "concise":
+            style_instruction = "Keep the answer tight: 2-4 sentences or a short bullet list. Cut anything that doesn't directly answer the question."
+        elif plan.response_style == "bullet_points":
+            style_instruction = "Structure the answer as a clean bullet list. Each bullet = one distinct fact or item. No walls of text."
+        elif plan.response_style == "narrative":
+            style_instruction = "Write in flowing prose paragraphs. No bullet points unless listing 4+ items."
+        elif plan.response_style == "technical":
+            style_instruction = "Use precise technical language. Preserve exact values, standards codes, and technical terms from the documents. Use bullets for spec lists."
+        elif plan.response_style == "detailed":
+            style_instruction = "Be thorough. Cover all relevant aspects found in the documents. Use sections if there are 3+ distinct topics."
+        else:
+            style_instruction = "Match the format to the content: short answer for simple questions, structured for complex ones."
+
+        length_instruction = ""
+        if plan.max_response_length == "brief":
+            length_instruction = "Length: 1-3 sentences maximum. Be direct."
+        elif plan.max_response_length == "comprehensive":
+            length_instruction = "Length: Cover the topic fully. Don't omit relevant details from the documents."
+        else:
+            length_instruction = "Length: As long as needed to fully answer, no longer."
+
+        # ── Key points to cover (from judge's analysis of the docs) ───────────
+        key_points_block = ""
+        if plan.key_points_to_include:
+            pts = "\n".join(f"  - {p}" for p in plan.key_points_to_include[:6])
+            key_points_block = f"\nKey aspects to address:\n{pts}\n"
+
+        # ── Approach and correction directives ─────────────────────────────────
         approach_block = ""
         if plan.approach and "CORRECTION REQUIRED" in plan.approach:
-            approach_block = f"\n\n⚠️  CORRECTION: {plan.approach.split('CORRECTION REQUIRED:')[-1].strip()}\n"
+            approach_block = f"\n⚠️ CORRECTION REQUIRED: {plan.approach.split('CORRECTION REQUIRED:')[-1].strip()}\n"
         elif plan.approach:
-            approach_block = f"\nApproach: {plan.approach}\n"
+            approach_block = f"\nStrategy: {plan.approach}\n"
 
-        # Things to avoid
         avoid_block = ""
         if plan.things_to_avoid:
-            avoid_block = f"\nAvoid: {', '.join(plan.things_to_avoid[:5])}\n"
+            avoid_block = f"\nDo NOT: {'; '.join(plan.things_to_avoid[:5])}\n"
 
-        # Detect whether any retrieved chunk has image or table descriptions
-        # so we can add a specific instruction for handling them.
-        has_visual_chunks = any(
-            "[IMAGE " in c.get("text", "") or "[TABLE " in c.get("text", "")
-            for c in (plan._chunks if hasattr(plan, "_chunks") else [])
-        )
-        # Fallback: check if context string itself contains these markers
-        if not has_visual_chunks:
-            has_visual_chunks = "[IMAGE " in context or "[TABLE " in context
+        if fix_instruction:
+            approach_block += f"\n{fix_instruction}\n"
 
+        # ── Visual content ─────────────────────────────────────────────────────
+        has_visual_chunks = "[IMAGE " in context or "[TABLE " in context
         visual_instruction = ""
         if has_visual_chunks:
             visual_instruction = (
-                "\n\nVISUAL CONTENT NOTE: Some sources contain [IMAGE on page N: <description>] "
-                "and [TABLE on page N] blocks. These are AI-generated descriptions of diagrams, "
-                "schematics, or tables found in the document. Treat them as factual content — "
-                "reference them naturally in your answer (e.g. 'The wiring diagram on page 3 shows…'). "
-                "Do NOT reproduce the raw [IMAGE ...] tag — describe what it contains instead."
+                "\n\nVISUAL CONTENT: Some sources contain [IMAGE on page N: <description>] and [TABLE on page N] blocks. "
+                "These are AI-generated descriptions of diagrams/tables in the document. Treat them as factual content — "
+                "reference them naturally (e.g. 'The wiring diagram on page 3 shows…'). Never reproduce the raw tag."
             )
 
-        # Voice-transcribed queries: tell the model the input came via speech
         voice_note = ""
         if voice_transcribed:
             voice_note = (
-                "\n\nVOICE INPUT NOTE: The user's message above was captured via voice and "
-                "automatically transcribed to text. Respond naturally as if you heard them speak — "
-                "never mention transcription, voice, audio, or the fact that you cannot hear. "
-                "Just answer their question directly and conversationally."
+                "\n\nVOICE INPUT: The user spoke this question — respond naturally and conversationally. "
+                "Never mention transcription or voice."
             )
 
-        return f"""You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a BIM engineering, telecom infrastructure, and DeepTwin AI company. You assist professionals in construction and telecom with technical document analysis. Answer ONLY using the documents below.
-Language: {plan.target_language}. Tone: {tone}. Style: {plan.response_style}. Length: {plan.max_response_length}.{approach_block}{avoid_block}{fix_instruction}{visual_instruction}{voice_note}
+        return f"""You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI digital twins). You help professionals in construction and telecom analyse technical documents.
 
-CITATION RULE: After every sentence that uses information from a document, add [N] where N is the source number shown in the document headers below.
+Language: {plan.target_language} | Tone: {tone}
+{style_instruction}
+{length_instruction}{approach_block}{key_points_block}{avoid_block}{visual_instruction}{voice_note}
 
-OUTPUT STRUCTURE — follow this exactly:
-- Break the answer into sections using ## headings for each major topic
-- Under each heading: 2-3 short sentences MAX, or a bullet list — not both
-- Use bullet points (- item) when listing 3 or more items
-- Each bullet MUST have real text content: **Label**: description [N]
-- NEVER output a bullet with no text — if you have nothing to say, omit the bullet entirely
-- NEVER output a line that is only a citation marker like "- [1]" or just "-"
-- Never write a wall of text — if a paragraph exceeds 3 sentences, split it or use bullets
-- Leave a blank line between every section
-- Use **bold** for key terms, numbers, technical standards
-- NEVER label sections "Source 1" or "Document 2" — use the actual subject matter
+CORE RULES:
+1. Answer DIRECTLY — never start with "Introduction to X", "Overview of X", generic definitions, or preamble. The first sentence must address the question.
+2. Extract and use ALL relevant information from every source. Do not stop at the first paragraph. If page 3 or source 4 has the answer, use it.
+3. Be SPECIFIC: quote exact values, names, codes, standards, section numbers, dates from the documents. Never generalize when the document has specifics.
+4. If the question asks for one specific fact (e.g. "who is the host company?", "what is the wind speed?"), state that fact immediately in the first sentence — then add context if useful.
+5. Never invent information. If something is not in the documents, say so clearly.
+6. NEVER add unsolicited advice, disclaimers, or generic background that wasn't asked for.
 
-{query}
+FORMATTING:
+- Simple/factual questions: answer in 1-3 sentences. No sections needed.
+- Multi-part or complex questions: use ## headings for each distinct topic, then bullets or prose under each.
+- Use **bold** for key terms, values, and technical codes.
+- Bullet lists only when there are 3+ discrete items to enumerate.
+- Never use a bullet that is just a citation marker. Never leave a heading empty.
 
+CITATIONS: After every sentence drawn from a document, add [N] where N matches the source number in the headers below. Cite precisely — do not add [1] to every sentence blindly.
+
+USER QUESTION: {query}
+
+DOCUMENTS:
 {context}
 
 Answer in {plan.target_language}:"""

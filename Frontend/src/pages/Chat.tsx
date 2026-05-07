@@ -4212,7 +4212,8 @@ const Chat = () => {
           );
         }
         return convs.map(c =>
-          c.id === convId ? { ...c, title: smartTitle, titleLocked: true } : c
+          // Also update initialTitle so the topbar TypewriterText re-renders immediately
+          c.id === convId ? { ...c, title: smartTitle, initialTitle: smartTitle, titleLocked: true } : c
         );
       });
     } catch {
@@ -6555,7 +6556,7 @@ const Chat = () => {
           <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center">
             <p className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem]">
               <TypewriterText
-                key={activeConversation?.id ?? "new-conversation"}
+                key={(activeConversation?.id ?? "new-conversation") + "-" + (activeConversation?.title ?? "")}
                 text={activeConversation?.initialTitle ?? activeConversation?.title ?? "New conversation"}
                 speed={28}
                 render={partial => <span className="inline-block align-middle">{partial}</span>}

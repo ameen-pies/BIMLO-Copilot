@@ -195,46 +195,57 @@ class LLMJudge:
         
         docs_section = ""
         if retrieved_docs:
+            # Give the judge enough content to actually reason about what's in the docs
             docs_formatted = "\n\n".join([
-                f"Document {i+1}:\n{doc.get('text', '')[:400]}..."
-                for i, doc in enumerate(retrieved_docs[:5])
+                f"Document {i+1} [{doc.get('metadata', {}).get('filename', 'unknown')}]:\n{doc.get('text', '')[:800]}"
+                for i, doc in enumerate(retrieved_docs[:4])
             ])
-            docs_section = f"\n\nAVAILABLE DOCUMENTS:\n{docs_formatted}"
+            docs_section = f"\n\nRETRIEVED DOCUMENT EXCERPTS:\n{docs_formatted}"
         
         history_section = ""
         if conversation_history and len(conversation_history) > 0:
-            history_section = f"\n\nRECENT CONVERSATION:\n" + "\n".join(conversation_history[-3:])
+            history_section = f"\n\nRECENT CONVERSATION:\n" + "\n".join(str(h)[:300] for h in conversation_history[-4:])
         
-        return f"""You are a response planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, a company specialising in BIM engineering (3D–7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies, and DeepTwin AI digital twins. Users are professionals in BTP/construction and telecom. Analyze the query and output a JSON plan.
+        return f"""You are a response planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom, DeepTwin AI). Users are professionals in BTP/construction and telecom asking questions about their uploaded technical documents.
 
 QUERY: {user_query}
 {docs_section}
 {history_section}
 
-IMPORTANT LANGUAGE RULE:
-- If the user explicitly requests a specific output language (e.g. "translate to French", "respond in Spanish", "باللغة العربية"), set target_language to that requested language — this overrides everything else.
-- If the user explicitly requests a specific format, tone, or style, honour it exactly.
-- Otherwise, mirror the query language: respond in whatever language the user wrote in.
-- Example: query in English, no language request → target_language = "en"
-- Example: query in English but says "translate to French" → target_language = "fr"
-- Example: query in Arabic → target_language = "ar"
+Analyse the query and the document excerpts above, then output a JSON plan.
 
-IMPORTANT SOURCE CITATION RULE:
-- should_cite_sources = true whenever the query asks for ANY information from documents — facts, values, specs, descriptions, names, dates, quantities, explanations. When in doubt → true.
-- should_cite_sources = false ONLY for: translation, rewriting, paraphrasing, summarising into another language, or casual greetings/small talk. These are the ONLY exceptions.
+LANGUAGE RULE:
+- Mirror the query language exactly. If query is in French → "fr". Arabic → "ar". English → "en".
+- If user explicitly requests a different output language, use that instead.
+
+DIRECTNESS RULE:
+- Set approach to describe HOW to answer this specific question, not generic advice.
+- If the query is a simple factual question ("who is X", "what is the value of Y"), set response_style="concise" and max_response_length="brief".
+- If the query asks to summarize or list many things, set response_style="detailed" and max_response_length="comprehensive".
+- If the query asks for comparison or analysis, set response_style="technical".
+
+KEY POINTS RULE:
+- key_points_to_include must list the ACTUAL specific things the user wants to know, based on the query and documents above. Not generic placeholders.
+- Example for "what type of maps are in this file?": ["list each map type mentioned", "describe what each map is used for", "include any associated values or zones"]
+- Example for "what is the host company?": ["state the company name directly", "include any relevant contact or project details if present"]
+- Example for "summarize this file": ["main subject and purpose of document", "key technical parameters and values", "standards or norms referenced", "project location and context"]
+
+SOURCE CITATION RULE:
+- should_cite_sources = true for ANY question about document content (facts, values, names, specs, descriptions).
+- should_cite_sources = false ONLY for: pure translation requests, greetings, or small talk.
 
 Respond ONLY with this JSON:
 {{
-  "target_language": "<ISO 639-1 code of the QUERY language>",
+  "target_language": "<ISO 639-1 code>",
   "target_language_confidence": 0.0-1.0,
   "target_tone": "casual|friendly|professional|technical|conversational",
   "tone_reasoning": "one sentence",
   "response_style": "concise|detailed|bullet_points|narrative|technical",
   "should_cite_sources": true|false,
   "max_response_length": "brief|medium|comprehensive",
-  "key_points_to_include": ["point 1"],
+  "key_points_to_include": ["specific point 1", "specific point 2"],
   "things_to_avoid": ["thing 1"],
-  "approach": "one sentence describing how to answer",
+  "approach": "concrete description of how to answer THIS specific question",
   "reasoning": "one sentence of overall reasoning"
 }}"""
     
@@ -250,19 +261,28 @@ Respond ONLY with this JSON:
         docs_section = ""
         if retrieved_docs:
             docs_formatted = "\n\n".join([
-                f"Document {i+1}:\n{doc.get('text', '')[:400]}..."
-                for i, doc in enumerate(retrieved_docs[:5])
+                f"Document {i+1} [{doc.get('metadata', {}).get('filename', 'unknown')}]:\n{doc.get('text', '')[:600]}"
+                for i, doc in enumerate(retrieved_docs[:3])
             ])
-            docs_section = f"\n\nSOURCE DOCUMENTS:\n{docs_formatted}"
+            docs_section = f"\n\nSOURCE DOCUMENTS (for hallucination check):\n{docs_formatted}"
         
-        return f"""You are a response evaluator for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). Score this RAG response.
+        return f"""You are a response evaluator for Bimlo Copilot (BIM engineering, telecom, DeepTwin AI). Evaluate this RAG response strictly.
 
 QUERY: {user_query}
-PLAN: language={plan.target_language}, tone={plan.target_tone}, style={plan.response_style}
-RESPONSE: {generated_response}
+PLAN: language={plan.target_language}, tone={plan.target_tone}, style={plan.response_style}, length={plan.max_response_length}
+RESPONSE:
+{generated_response}
 {docs_section}
 
-Check: correct language? correct tone? any hallucinations? good quality?
+EVALUATE on these criteria:
+1. Does it DIRECTLY answer what was asked? (not a definition, not generic background — the actual answer)
+2. Is the language correct? ({plan.target_language})
+3. Does it contain any claims NOT supported by the source documents? (hallucination)
+4. Is the length appropriate? (brief questions should get brief answers — not padded sections)
+5. Does it start with a direct answer rather than an introduction/preamble?
+6. Are important specific values/names/facts from the documents included if they were asked for?
+
+SCORING: Be strict. A response that answers a simple factual question with 3 sections and an introduction should score 0.4 or lower.
 
 Respond ONLY with this JSON:
 {{
@@ -270,13 +290,13 @@ Respond ONLY with this JSON:
   "language_correct": true|false,
   "tone_correct": true|false,
   "has_hallucination": true|false,
-  "hallucination_details": "description or null",
+  "hallucination_details": "specific claim not in documents, or null",
   "uses_sources_correctly": true|false,
   "overall_score": 0.0-1.0,
   "is_acceptable": true|false,
   "issues": ["issue 1"],
-  "specific_problems": ["problem 1"],
-  "how_to_fix": "one sentence instruction if not acceptable",
+  "specific_problems": ["concrete problem 1"],
+  "how_to_fix": "specific actionable instruction for retry",
   "reasoning": "one sentence"
 }}"""
     

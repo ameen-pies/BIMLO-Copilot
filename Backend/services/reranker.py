@@ -8,7 +8,7 @@ Pipeline:
 
 Model: BAAI/bge-reranker-v2-m3
   - Best-in-class multilingual reranker (handles French, Arabic, English)
-  - ~560 MB download on first use (cached locally by HuggingFace)
+  - ~560 MB download on first use (cached via HF_HOME volume in Docker)
   - Runs on CPU fine for batches of 20 chunks
   - Outputs raw logits (unbounded floats) — we sigmoid-normalize to 0–1
     so scores are human-readable AND compatible with _is_good_retrieval()
@@ -17,6 +17,10 @@ Env vars:
   RERANKER_MODEL   — HuggingFace model ID   (default: BAAI/bge-reranker-v2-m3)
   RERANKER_ENABLED — set "0" to disable     (default: enabled if model loads)
   RERANKER_FETCH_K — candidates to fetch    (default: 20)
+
+Docker performance note:
+  Mount a named volume at $HF_HOME (/root/.cache/huggingface) so the model
+  survives restarts without a 500s re-download.  See docker-compose.yml.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import os
 import math
 import time
+import threading
 from typing import List, Dict, Optional
 
 _RERANKER_MODEL   = os.getenv("RERANKER_MODEL",   "BAAI/bge-reranker-v2-m3")
@@ -31,38 +36,72 @@ _RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "1").strip() != "0"
 _FETCH_K          = int(os.getenv("RERANKER_FETCH_K", "20"))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lazy-load the cross-encoder so startup is never blocked
+# Model state
 # ─────────────────────────────────────────────────────────────────────────────
 
 _cross_encoder = None
 _load_attempted = False
+_load_lock      = threading.Lock()   # prevents double-load if two requests race
+
+
+def _load_model() -> None:
+    """
+    Load the cross-encoder into the global _cross_encoder slot.
+    Safe to call from any thread; uses _load_lock to prevent races.
+    """
+    global _cross_encoder, _load_attempted
+
+    with _load_lock:
+        if _load_attempted:
+            return
+        _load_attempted = True
+
+        if not _RERANKER_ENABLED:
+            print("ℹ️  reranker: disabled via RERANKER_ENABLED=0")
+            return
+
+        try:
+            from sentence_transformers import CrossEncoder
+            cache_dir = os.getenv("HF_HOME", None)  # respects Docker volume env var
+            print(f"⏳ reranker: loading {_RERANKER_MODEL}"
+                  f"{' (cached at ' + cache_dir + ')' if cache_dir else ' (first run downloads ~560 MB)'}…")
+            t0 = time.time()
+            _cross_encoder = CrossEncoder(
+                _RERANKER_MODEL,
+                max_length=512,
+                cache_folder=cache_dir,   # uses HF_HOME volume — no re-download on restart
+            )
+            print(f"✅ reranker: {_RERANKER_MODEL} ready ({time.time() - t0:.1f}s)")
+        except ImportError:
+            print("⚠️  reranker: sentence-transformers not installed — run: pip install sentence-transformers")
+        except Exception as e:
+            print(f"⚠️  reranker: failed to load model ({e}) — falling back to vector-only retrieval")
 
 
 def _get_cross_encoder():
-    global _cross_encoder, _load_attempted
-    if _load_attempted:
-        return _cross_encoder
-    _load_attempted = True
-
-    if not _RERANKER_ENABLED:
-        print("ℹ️  reranker: disabled via RERANKER_ENABLED=0")
-        return None
-
-    try:
-        from sentence_transformers import CrossEncoder
-        print(f"⏳ reranker: loading {_RERANKER_MODEL} (first run downloads ~560 MB)…")
-        t0 = time.time()
-        _cross_encoder = CrossEncoder(_RERANKER_MODEL, max_length=512)
-        print(f"✅ reranker: {_RERANKER_MODEL} ready ({time.time()-t0:.1f}s)")
-    except ImportError:
-        print("⚠️  reranker: sentence-transformers not installed — run: pip install sentence-transformers")
-        _cross_encoder = None
-    except Exception as e:
-        print(f"⚠️  reranker: failed to load model ({e}) — falling back to vector-only retrieval")
-        _cross_encoder = None
-
+    """Return the loaded model, triggering a synchronous load if not ready yet."""
+    if not _load_attempted:
+        _load_model()
     return _cross_encoder
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Eager pre-warm on import — model loads in a background thread at startup
+# so the FIRST real query never has to wait for the 560 MB download.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _prewarm() -> None:
+    """Called once at module import time from a daemon thread."""
+    _load_model()
+
+if _RERANKER_ENABLED:
+    _prewarm_thread = threading.Thread(target=_prewarm, daemon=True, name="reranker-prewarm")
+    _prewarm_thread.start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _sigmoid(x: float) -> float:
     """Normalize a raw logit to 0–1 probability."""
@@ -127,7 +166,7 @@ def rerank(query: str, chunks: List[Dict], top_k: int = 5) -> List[Dict]:
         f"🏆 reranker: {len(chunks)} → {len(result)} chunks "
         f"(top score: {result[0]['rerank_score']:.3f}, "
         f"bottom: {result[-1]['rerank_score']:.3f}, "
-        f"{time.time()-t0:.2f}s)"
+        f"{time.time() - t0:.2f}s)"
     )
 
     return result

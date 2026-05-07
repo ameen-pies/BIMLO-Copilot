@@ -55,6 +55,12 @@ class IntentAnalysis:
     suggested_route:   str        # direct | rag | iterative_rag | transform | analytics | graph | report | define
     confidence:        float      # 0–1
     reasoning:         str        # chain-of-thought (debug)
+    # ── Document scope resolution ──────────────────────────────────────────────
+    # When the user targets a specific document (by name, position, or pronoun),
+    # this field carries the resolved reference so retrieve_vector can filter.
+    # Examples: "contract.pdf", "the first one", "the report", "it", ""
+    # Empty string means: no specific document targeted → search all docs.
+    doc_scope:         str        # "" | exact filename | positional hint e.g. "first"
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -79,11 +85,13 @@ CONVERSATION HISTORY (last 4 turns, oldest first):
 
 SESSION ROUTE HISTORY: {route_history}
 
+UPLOADED DOCUMENTS IN THIS SESSION: {uploaded_docs_block}
+
 CURRENT QUERY: {query}
 
 TASK — output ONLY this JSON object, no preamble, no backticks:
 {{
-  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | translate_content | aggregate_stats>",
+  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | converse_meta | translate_content | aggregate_stats>",
   "secondary_intent": "<same enum or empty string>",
   "target_entity": "<the document name, term, concept, or data point the user cares about — empty if none>",
   "operation": "<action verb: extract | compare | define | visualise | generate | modify | converse | translate | aggregate>",
@@ -94,24 +102,41 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
   "ambiguity_score": <0.0–1.0>,
   "suggested_route": "<one of: direct | rag | iterative_rag | transform | analytics | graph | report | define>",
   "confidence": <0.0–1.0>,
-  "reasoning": "<2–4 sentence chain-of-thought: what signals did you see, why did you pick this route>"
+  "doc_scope": "<exact filename from the uploaded docs list if the user clearly targets ONE specific document; positional hint like 'first' or 'second' if they reference position; empty string if they want ALL docs or the scope is unclear>",
+  "reasoning": "<2–4 sentence chain-of-thought: what signals did you see, why did you pick this route, and which document (if any) are they targeting>"
 }}
 
 ROUTING RULES (apply these strictly when choosing suggested_route):
 - direct: casual/conversational, memory recall ("what did you just say"), self-referential ("what route did you use"), edits to last reply ("make it shorter", "rephrase that")
-- rag: information extraction or question answering FROM documents (most common)
-- iterative_rag: comparison or cross-document analysis (signals: "compare", "vs", "difference between", "across")
+- direct [converse_meta]: queries that ask about the AI's own awareness or perception of an uploaded file — NOT about its content.
+    Signals (any language): "do you see this", "can you read this", "did you get the file", "is the file there",
+    "do you have access", "هل ترى هذا", "tu vois ce fichier", "tu peux lire ça", "avez-vous reçu",
+    "peux-tu voir", "est-ce que tu as reçu", "vois-tu le document".
+    These are meta-questions about the AI's state — NEVER route them to rag.
+    Set primary_intent="converse_meta", suggested_route="direct".
+- rag: ANY question about document content — a specific fact, a section, a value, a person, a location, a date, what something says, what something means in context of the document, how something works according to the document. This is the DEFAULT route for all document questions.
+- iterative_rag: questions that explicitly require looking across MULTIPLE different documents simultaneously — comparisons, differences, aggregations across files. Signals: "compare", "vs", "difference between", "across all files", "between the two documents". Do NOT use for questions that can be answered from one document.
 - transform: full document translation or complete rewrite/reformat (user wants the whole doc in another form)
 - analytics: numerical aggregation across ALL docs (signals: "total", "average", "how many across", "statistics")
 - graph: explicit request for a visual chart/plot (signals: "chart", "graph", "plot", "visualise", "graphique", "رسم بياني", "diagramme")
 - report: explicit request to PRODUCE a standalone written report/PDF/document (signals: "make a report", "generate a report", "rapport sur", "create a report")
-- define: asking the MEANING of a specific technical term or acronym (signals: "what is X", "define X", "what does X mean", "explain X")
+- define: asking the MEANING of a standalone technical term or acronym WITH NO reference to any uploaded document — ONLY when the user is clearly asking about a generic concept in isolation (e.g. "what is BIM?" with no docs, "define IFC"). NEVER use define if: (1) the session has uploaded documents AND the query references file content, (2) the query contains words like "this file", "this document", "it", "here", "the file", "in this", "of this". "What is the host company of this file?" → rag. "What is BIM?" with no docs → define.
+
+DOC SCOPE RULES (for the "doc_scope" field):
+- If the user names a specific file (partial or full name), set doc_scope to that filename exactly as it appears in UPLOADED DOCUMENTS.
+- If the user uses a positional reference ("the first one", "the first file", "le premier", "الأول"), set doc_scope to "first", "second", etc.
+- If the user uses a pronoun ("it", "this one", "that file") AND there is only one uploaded document, set doc_scope to that document's filename.
+- If there are multiple documents and the pronoun is ambiguous, set doc_scope to "" (search all).
+- If the user says "both", "all", "all of them", or implies cross-document scope, set doc_scope to "".
 
 CRITICAL OVERRIDE RULES:
 1. Any query about what the AI just said/did → direct (is_followup=true, followup_type=modify or repeat)
-2. "translate" alone on a short phrase → transform; "translate [specific term]" with explanation → define
-3. When ambiguity_score > 0.6, set suggested_route to the safest option (rag for document queries, direct for conversation)
-4. Mixed-language queries are fine — detect the INTENT not the language
+2. Any query asking IF the AI can see/read/access a file → direct with primary_intent=converse_meta. NEVER rag.
+3. "translate" alone on a short phrase → transform; "translate [specific term]" with explanation → define
+4. When ambiguity_score > 0.6, set suggested_route to the safest option (rag for document queries, direct for conversation)
+5. Mixed-language queries are fine — detect the INTENT not the language
+6. When multiple docs are uploaded and the user clearly targets only ONE (by name or position) → set doc_scope accordingly so retrieval is scoped correctly.
+7. Questions like "what is X" where X is something IN a document (company name, person, zone, standard) → rag, not define.
 """
 
 
@@ -123,6 +148,7 @@ def classify_intent(
     route_log: Optional[List[Dict]] = None,
     preferred_provider: Optional[str] = None,
     session_has_docs: bool = False,
+    uploaded_docs: Optional[List[str]] = None,
 ) -> IntentAnalysis:
     """
     Classify the intent of a query using the LLM.
@@ -135,18 +161,26 @@ def classify_intent(
         preferred_provider: Optional provider hint to honor user-selected model.
         session_has_docs:   True if the session has documents in the vector store.
                             When True, ambiguous/short messages default to rag.
+        uploaded_docs:      List of filenames currently uploaded in the session.
+                            Used for doc_scope resolution (which doc is being targeted).
 
     Returns:
-        IntentAnalysis with suggested_route and rich metadata.
+        IntentAnalysis with suggested_route, doc_scope, and rich metadata.
     """
     try:
         from llm_client import call_llm, check_llm_available
         available, _ = check_llm_available()
         if not available:
-            return _heuristic_classify(query, history, route_log, session_has_docs)
+            return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs)
 
         history_block = _format_history(history or [])
         route_history = _format_route_log(route_log or [])
+
+        # Format the uploaded doc list so the LLM can reason about doc_scope
+        if uploaded_docs:
+            uploaded_docs_block = "\n".join(f"  {i+1}. {name}" for i, name in enumerate(uploaded_docs))
+        else:
+            uploaded_docs_block = "(none uploaded yet)"
 
         # Build a session-state hint so the LLM knows whether docs exist
         docs_hint = (
@@ -155,7 +189,9 @@ def classify_intent(
             "(e.g. 'its uploaded', 'summarize it', 'what do you think', 'go ahead', "
             "'yes', 'analyze it', 'check the file') MUST be classified as rag, not direct. "
             "Only classify as direct if the message is clearly conversational with zero "
-            "relation to any document (greetings, thanks, AI self-reference)."
+            "relation to any document (greetings, thanks, AI self-reference). "
+            "EXCEPTION: queries asking IF the AI can see/access/read the file are direct "
+            "(primary_intent=converse_meta) — they are about AI perception, not doc content."
             if session_has_docs else
             "\nSESSION STATE: No documents have been uploaded yet. "
             "Classify document-related requests as rag anyway — the retrieval "
@@ -165,6 +201,7 @@ def classify_intent(
         prompt = _CLASSIFIER_PROMPT_TEMPLATE.format(
             history_block=history_block,
             route_history=route_history,
+            uploaded_docs_block=uploaded_docs_block,
             query=query,
         ) + docs_hint
 
@@ -180,8 +217,12 @@ def classify_intent(
         result = _parse_result(raw)
 
         # Post-parse safety net: if session has docs and classifier said "direct"
-        # but ambiguity is non-trivial, override to rag.
-        if session_has_docs and result.suggested_route == "direct" and result.ambiguity_score >= 0.2:
+        # but ambiguity is non-trivial, override to rag — UNLESS it's a meta-awareness
+        # query (converse_meta), which must always stay direct.
+        if (session_has_docs
+                and result.suggested_route == "direct"
+                and result.ambiguity_score >= 0.2
+                and result.primary_intent != "converse_meta"):
             result.suggested_route = "rag"
             result.reasoning += " [overridden direct→rag: session has docs and query is ambiguous]"
 
@@ -189,7 +230,7 @@ def classify_intent(
 
     except Exception as e:
         logger.warning(f"intent_classifier LLM call failed: {e}")
-        return _heuristic_classify(query, history, route_log, session_has_docs)
+        return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -269,6 +310,7 @@ def _parse_result(raw: str) -> IntentAnalysis:
         suggested_route  = suggested,
         confidence       = float(data.get("confidence", 0.7)),
         reasoning        = str(data.get("reasoning", "")),
+        doc_scope        = str(data.get("doc_scope", "")),
     )
 
 
@@ -277,6 +319,7 @@ def _heuristic_classify(
     history: Optional[List[Dict]],
     route_log: Optional[List[Dict]],
     session_has_docs: bool = False,
+    uploaded_docs: Optional[List[str]] = None,
 ) -> IntentAnalysis:
     """
     Fast heuristic fallback — no LLM required.
@@ -284,6 +327,22 @@ def _heuristic_classify(
     When session_has_docs=True, short/ambiguous messages default to rag.
     """
     q = query.lower().strip()
+
+    # ── Meta-awareness: "do you see this file?", "can you read it?", etc. ──────
+    # These ask about the AI's perception — never route to rag regardless of docs.
+    _meta_signals = [
+        "do you see", "can you see", "can you read", "do you have access",
+        "did you get", "is the file there", "do you have the file",
+        "tu vois", "tu peux voir", "tu peux lire", "tu as reçu", "avez-vous reçu",
+        "peux-tu voir", "peux-tu lire", "est-ce que tu vois", "est-ce que tu as",
+        "هل ترى", "هل يمكنك رؤية", "هل تستطيع قراءة", "هل وصلك",
+    ]
+    if any(s in q for s in _meta_signals):
+        return _make_heuristic(query, "direct", "converse_meta", "converse", "prose", 0.90,
+                               doc_scope="")
+
+    # ── Doc scope: heuristic resolution when one doc clearly targeted ──────────
+    _doc_scope = _resolve_doc_scope_heuristic(q, uploaded_docs or [])
 
     # Code generation — always direct, before anything else
     _code_verbs = ["write", "make", "give me", "create", "generate", "build",
@@ -303,7 +362,8 @@ def _heuristic_classify(
         "gráfico", "diagrama", "visualizar", "diagramm", "grafik",
     ]
     if any(s in q for s in graph_signals):
-        return _make_heuristic(query, "graph", "visualise_data", "visualise", "chart", 0.8)
+        return _make_heuristic(query, "graph", "visualise_data", "visualise", "chart", 0.8,
+                               doc_scope=_doc_scope)
 
     # Report generation
     report_signals = [
@@ -312,7 +372,8 @@ def _heuristic_classify(
         "produce a report", "build a report", "prepare a report", "un rapport",
     ]
     if any(s in q for s in report_signals):
-        return _make_heuristic(query, "report", "generate_report", "generate", "pdf", 0.85)
+        return _make_heuristic(query, "report", "generate_report", "generate", "pdf", 0.85,
+                               doc_scope=_doc_scope)
 
     # Transform / translate
     transform_signals = [
@@ -320,7 +381,8 @@ def _heuristic_classify(
         "summarise in", "summarize in", "résume en", "résumer en",
     ]
     if any(s in q for s in transform_signals):
-        return _make_heuristic(query, "transform", "translate_content", "translate", "prose", 0.75)
+        return _make_heuristic(query, "transform", "translate_content", "translate", "prose", 0.75,
+                               doc_scope=_doc_scope)
 
     # Analytics
     analytics_signals = ["analytics", "statistiques", "total", "average", "count", "how many across"]
@@ -332,9 +394,20 @@ def _heuristic_classify(
     if any(s in q for s in compare_signals):
         return _make_heuristic(query, "iterative_rag", "compare_docs", "compare", "prose", 0.75)
 
-    # Define
-    define_signals = ["what is ", "what does ", "define ", "explain ", "meaning of ", "qu'est-ce que"]
-    if any(s in q for s in define_signals) and len(q.split()) <= 10:
+    # Define — ONLY for standalone terminology questions with no doc context.
+    # Never trigger define when session has docs — "what is the host company of this file"
+    # is a RAG question, not a Wikipedia lookup.
+    define_signals = ["what is ", "what does ", "define ", "meaning of ", "qu'est-ce que"]
+    _doc_ref_words = ["this", "the file", "the document", "this file", "this document",
+                      "it", "here", "uploaded", "given", "provided", "attached",
+                      "هذا", "هذه", "الملف", "ce fichier", "ce document"]
+    _is_pure_term = (
+        any(s in q for s in define_signals)
+        and len(q.split()) <= 8
+        and not session_has_docs                          # no docs → Wikipedia is fine
+        and not any(w in q for w in _doc_ref_words)      # no doc reference words
+    )
+    if _is_pure_term:
         return _make_heuristic(query, "define", "define_term", "define", "prose", 0.7)
 
     # Direct / conversational — only clear greetings/thanks, never doc-context
@@ -355,7 +428,8 @@ def _heuristic_classify(
     # Self-referential (references the AI or conversation)
     self_ref = ["you just", "you said", "your answer", "what you", "last response", "what route"]
     if any(s in q for s in self_ref):
-        return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.75, is_followup=True, followup_type="repeat")
+        return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.75,
+                               is_followup=True, followup_type="repeat")
 
     # Default → RAG (always rag when session has docs; otherwise rag anyway as safest)
     _reasoning = (
@@ -363,7 +437,45 @@ def _heuristic_classify(
         if session_has_docs else
         "Heuristic classification: matched 'rag' pattern in query."
     )
-    return _make_heuristic(query, "rag", "extract_info", "extract", "prose", 0.6 if not session_has_docs else 0.75)
+    return _make_heuristic(query, "rag", "extract_info", "extract", "prose",
+                           0.6 if not session_has_docs else 0.75, doc_scope=_doc_scope)
+
+
+def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
+    """
+    Heuristic doc-scope resolver: returns a filename or positional hint if the
+    query clearly targets one specific document, else returns "".
+
+    No LLM needed — exact filename substring match + ordinal word detection.
+    The LLM path in the full classifier handles ambiguous/natural-language cases.
+    """
+    if not uploaded_docs:
+        return ""
+
+    # Exact / partial filename match (case-insensitive)
+    for fname in uploaded_docs:
+        if fname.lower() in q:
+            return fname
+
+    # Positional ordinals — map word → 0-based index
+    ordinals = {
+        "first": 0,  "premier": 0, "première": 0, "الأول": 0,  "الأولى": 0,
+        "second": 1, "deuxième": 1, "الثاني": 1, "الثانية": 1,
+        "third": 2,  "troisième": 2, "الثالث": 2,
+        "fourth": 3, "quatrième": 3, "الرابع": 3,
+        "1st": 0, "2nd": 1, "3rd": 2, "4th": 3,
+    }
+    for word, idx in ordinals.items():
+        if word in q and idx < len(uploaded_docs):
+            return uploaded_docs[idx]
+
+    # Single-doc session + pronoun → unambiguously the only doc
+    if len(uploaded_docs) == 1:
+        pronouns = ["it", "this", "that", "the file", "the document", "له", "هذا", "هذه", "ce fichier", "ce document"]
+        if any(p in q for p in pronouns):
+            return uploaded_docs[0]
+
+    return ""
 
 
 def _make_heuristic(
@@ -375,6 +487,7 @@ def _make_heuristic(
     confidence: float,
     is_followup: bool = False,
     followup_type: str = "none",
+    doc_scope: str = "",
 ) -> IntentAnalysis:
     return IntentAnalysis(
         primary_intent   = primary_intent,
@@ -389,4 +502,5 @@ def _make_heuristic(
         suggested_route  = route,
         confidence       = confidence,
         reasoning        = f"Heuristic classification: matched '{route}' pattern in query.",
+        doc_scope        = doc_scope,
     )
