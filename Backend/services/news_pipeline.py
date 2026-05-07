@@ -404,20 +404,20 @@ def _persist_node(state: PipelineState) -> PipelineState:
     )
 
     # Atomic rotation
+    # shutil.move() is used instead of os.rename() because os.rename fails
+    # with [Errno 18] across Docker filesystem boundaries (volume vs container layer)
     if os.path.exists(_PREV_DIR):
         shutil.rmtree(_PREV_DIR)
     if os.path.exists(CACHE_DIR):
-        # Move seen_urls.json OUT before rotation so it survives
         _seen = os.path.join(CACHE_DIR, "seen_urls.json")
         _seen_tmp = _seen + ".bak"
         if os.path.exists(_seen):
             shutil.copy2(_seen, _seen_tmp)
-        os.rename(CACHE_DIR, _PREV_DIR)
-        # Restore seen_urls into build dir (it's already written above but let's be safe)
+        shutil.move(CACHE_DIR, _PREV_DIR)
         if os.path.exists(_seen_tmp):
             shutil.copy2(_seen_tmp, os.path.join(_BUILD_DIR, "seen_urls.json"))
             os.remove(_seen_tmp)
-    os.rename(_BUILD_DIR, CACHE_DIR)
+    shutil.move(_BUILD_DIR, CACHE_DIR)
 
     logger.info(f"✅ persist_node: cache live — {len(pages)} pages, run_id={run_id}")
     return state

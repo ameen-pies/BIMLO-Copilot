@@ -24,9 +24,7 @@ Requirements:
 
 import re
 import json
-import time
 import hashlib
-import random
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -124,7 +122,7 @@ EXTENDED_QUERY_PAGES = [
     ],
 ]
 
-MAX_RESULTS_PER_QUERY = 8
+MAX_RESULTS_PER_QUERY = 5
 CACHE_TTL_HOURS       = 6
 JUDGE_SCORE_THRESHOLD = 0.28
 LLM_WORKERS           = 8   # concurrent judge+enrich calls
@@ -219,105 +217,296 @@ def _extract_json(raw: str) -> dict:
     raise ValueError(f"Could not extract JSON from: {text[:200]!r}")
 
 
-# ── DDG search (concurrent) ────────────────────────────────────────────────────
+# ── RSS search backend (replaces SearXNG / DDG) ────────────────────────────────
+#
+# Google News RSS works from any IP — no API key, no datacenter blocks.
+# Category-specific trade feeds are used as fallback when GNews is empty.
 
-def _search_one(entry: dict, ddgs_instance, seen_local: set) -> List[RawArticle]:
-    """Search a single query and return raw articles. Thread-safe per ddgs instance."""
-    results = []
-    for attempt in range(3):
+import urllib.parse
+
+_GNEWS_RSS_BASE = "https://news.google.com/rss/search"
+
+_CATEGORY_RSS: dict = {
+    "5G": [
+        "https://feeds.feedburner.com/TelecomRamblings",
+        "https://www.rcrwireless.com/feed",
+        "https://www.fiercewireless.com/rss/xml",
+    ],
+    "Fiber": [
+        "https://www.fiercetelecom.com/rss/xml",
+        "https://www.telecompetitor.com/feed/",
+    ],
+    "Regulation": [
+        "https://www.fiercetelecom.com/rss/xml",
+        "https://www.rcrwireless.com/feed",
+    ],
+    "Construction": [
+        "https://www.constructiondive.com/feeds/news/",
+        "https://www.enr.com/rss/news",
+    ],
+    "General": [
+        "https://www.rcrwireless.com/feed",
+        "https://www.fiercetelecom.com/rss/xml",
+    ],
+    "BIM": [
+        "https://www.autodesk.com/blogs/aec/feed/",
+        "https://www.aecmag.com/feed",
+    ],
+    "Digital Twin": [
+        "https://www.iotforall.com/feed",
+        "https://www.digitaltwinconsortium.org/feed/",
+    ],
+    "AI Construction": [
+        "https://www.constructiondive.com/feeds/news/",
+        "https://www.enr.com/rss/news",
+    ],
+}
+
+
+def _fetch_rss(url: str, timeout: int = 10) -> list:
+    """Return a list of feedparser entry dicts, or [] on any error."""
+    try:
+        import feedparser
+        feed = feedparser.parse(url, request_headers={"User-Agent": "BimloRAG/1.0"})
+        return feed.entries or []
+    except Exception as e:
+        logger.warning(f"RSS fetch failed for {url}: {e}")
+        return []
+
+
+def _extract_rss_image(entry) -> Optional[str]:
+    """
+    Pull a thumbnail URL from a feedparser entry using every common RSS
+    image convention (tried in order of reliability):
+      1. <media:content> / <media:thumbnail>  — most trade feeds
+      2. <enclosure>                           — podcast-style but used by some news sites
+      3. og:image in the entry HTML summary   — Google News aggregator entries
+    Returns None if nothing is found.
+    """
+    # 1. media:content / media:thumbnail (feedparser exposes as .media_content / .media_thumbnail)
+    for attr in ("media_thumbnail", "media_content"):
+        media = getattr(entry, attr, None) or entry.get(attr)
+        if media and isinstance(media, list) and media[0].get("url"):
+            return media[0]["url"]
+
+    # 2. <enclosure> tags (feedparser exposes as .enclosures)
+    for enc in getattr(entry, "enclosures", []) or entry.get("enclosures", []):
+        if enc.get("type", "").startswith("image/") and enc.get("href"):
+            return enc["href"]
+
+    # 3. og:image embedded inside the HTML summary/content block
+    #    Google News wraps the thumbnail as <img src="..."> inside the <description>
+    for field in ("summary", ):
+        html = entry.get(field, "") or ""
+        if html:
+            m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if m:
+                candidate = m.group(1)
+                # Skip tiny tracking pixels (< 10px usually have w= or h= params)
+                if not re.search(r'[?&][wh]=\d{1,2}\b', candidate):
+                    return candidate
+
+    return None
+
+
+# OG image in-memory cache so repeated pipeline runs don't re-fetch the same URLs
+_og_cache: dict = {}
+_og_cache_lock = threading.Lock()
+
+
+def _fetch_og_image(article_url: str, timeout: int = 6) -> Optional[str]:
+    """
+    Fetch just the <head> of an article page and extract og:image.
+    Uses a streaming GET so we stop downloading as soon as </head> appears.
+    Results are cached in-process to avoid redundant requests on re-runs.
+    Returns None on any error or if no og:image is found.
+    """
+    if not article_url or article_url.startswith("#"):
+        return None
+
+    with _og_cache_lock:
+        if article_url in _og_cache:
+            return _og_cache[article_url]
+
+    try:
+        import requests
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; BimloBot/1.0; +https://bimlo.tech)"
+            ),
+            "Accept": "text/html",
+        }
+        # Stream response and stop as soon as we have the <head>
+        head_html = ""
+        with requests.get(article_url, headers=headers, timeout=timeout,
+                          stream=True, allow_redirects=True) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_content(chunk_size=4096, decode_unicode=True):
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", errors="ignore")
+                head_html += chunk
+                if "</head>" in head_html.lower() or len(head_html) > 32_000:
+                    break
+
+        # og:image
+        m = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            head_html, re.IGNORECASE
+        )
+        if not m:
+            # reversed attribute order
+            m = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                head_html, re.IGNORECASE
+            )
+        # twitter:image fallback
+        if not m:
+            m = re.search(
+                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+                head_html, re.IGNORECASE
+            )
+
+        result = m.group(1).strip() if m else None
+
+        with _og_cache_lock:
+            _og_cache[article_url] = result
+        return result
+
+    except Exception as e:
+        logger.debug(f"og:image fetch failed for {article_url}: {e}")
+        with _og_cache_lock:
+            _og_cache[article_url] = None
+        return None
+
+
+def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
+    """Normalise a feedparser entry into a RawArticle dict."""
+    url = entry.get("link", "")
+    if not url or url in seen_local:
+        return None
+    seen_local.add(url)
+
+    published_at = datetime.utcnow().isoformat()
+    if entry.get("published_parsed"):
         try:
-            results = list(ddgs_instance.news(
-                entry["query"],
-                max_results=MAX_RESULTS_PER_QUERY,
-                safesearch="off",
-                timelimit="m",
-            ))
-            break
-        except Exception as e:
-            if "Ratelimit" in str(e) and attempt < 2:
-                wait = random.uniform(6, 12) * (attempt + 1)
-                logger.warning(f"DDG rate limited — retry in {wait:.0f}s")
-                time.sleep(wait)
-            else:
-                logger.warning(f"DDG failed for '{entry['query']}': {e}")
-                break
-
-    articles: List[RawArticle] = []
-    for r in results:
-        url = r.get("url", "")
-        if not url or url in seen_local:
-            continue
-        seen_local.add(url)
-
-        try:
-            raw_date = r.get("date", "")
-            if isinstance(raw_date, (int, float)):
-                published_at = datetime.utcfromtimestamp(raw_date).isoformat()
-            elif raw_date:
-                published_at = str(raw_date)
-            else:
-                published_at = datetime.utcnow().isoformat()
+            import calendar
+            published_at = datetime.utcfromtimestamp(
+                calendar.timegm(entry.published_parsed)
+            ).isoformat()
         except Exception:
-            published_at = datetime.utcnow().isoformat()
+            pass
 
-        parts      = url.split("/")
-        source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
-        title      = r.get("title", "")[:200]
-        image      = r.get("image") or None
+    parts = url.split("/")
+    source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
+    source = (
+        entry.get("source", {}).get("title")
+        or (parts[2] if len(parts) >= 3 else "Unknown")
+    )
+    title = (entry.get("title") or "")[:200]
 
-        articles.append({
-            "title":        title,
-            "url":          url,
-            "image_url":    image,
-            "raw_text":     r.get("body", "")[:2000],
-            "category":     entry["category"],
-            "source":       r.get("source", "Unknown"),
-            "source_url":   source_url,
-            "published_at": published_at,
-        })
+    body = ""
+    if entry.get("summary"):
+        body = entry.summary
+    elif entry.get("content"):
+        body = entry.content[0].get("value", "")
+
+    body = re.sub(r"<[^>]+>", " ", body)
+    body = re.sub(r"\s{2,}", " ", body).strip()
+
+    if not title:
+        return None
+
+    # ── Image resolution: RSS media tags first, og:image fallback ─────────────
+    image_url = _extract_rss_image(entry)
+    if not image_url:
+        image_url = _fetch_og_image(url)
+
+    return {
+        "title":        title,
+        "url":          url,
+        "image_url":    image_url,
+        "raw_text":     body[:2000],
+        "category":     query_entry["category"],
+        "source":       source,
+        "source_url":   source_url,
+        "published_at": published_at,
+    }
+
+
+def _search_gnews_rss(query_entry: dict, seen_local: set) -> List[RawArticle]:
+    """Query Google News RSS — never blocked from datacenter IPs."""
+    params = urllib.parse.urlencode({
+        "q":    query_entry["query"],
+        "hl":   "en-US",
+        "gl":   "US",
+        "ceid": "US:en",
+    })
+    url = f"{_GNEWS_RSS_BASE}?{params}"
+    entries = _fetch_rss(url)
+    articles = []
+    for e in entries[:MAX_RESULTS_PER_QUERY]:
+        art = _entry_to_raw(e, query_entry, seen_local)
+        if art:
+            articles.append(art)
+    return articles
+
+
+def _search_category_rss(query_entry: dict, seen_local: set) -> List[RawArticle]:
+    """Fallback: keyword-filtered trade publication RSS feeds."""
+    cat = query_entry.get("category", "General")
+    feeds = _CATEGORY_RSS.get(cat, _CATEGORY_RSS["General"])
+    keywords = query_entry["query"].lower().split()
+    articles = []
+    for feed_url in feeds:
+        if len(articles) >= MAX_RESULTS_PER_QUERY:
+            break
+        for e in _fetch_rss(feed_url):
+            if len(articles) >= MAX_RESULTS_PER_QUERY:
+                break
+            title_l   = (e.get("title") or "").lower()
+            summary_l = (e.get("summary") or "").lower()
+            if any(kw in title_l or kw in summary_l for kw in keywords):
+                art = _entry_to_raw(e, query_entry, seen_local)
+                if art:
+                    articles.append(art)
+    return articles
+
+
+def _search_one_query(query_entry: dict, seen_local: set) -> List[RawArticle]:
+    """Google News RSS primary → category trade feeds fallback."""
+    articles = _search_gnews_rss(query_entry, seen_local)
+    if not articles:
+        logger.info(f"  GNews empty for '{query_entry['query']}' — trying category feeds")
+        articles = _search_category_rss(query_entry, seen_local)
+    logger.info(f"  '{query_entry['query']}' → {len(articles)} articles")
     return articles
 
 
 def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
     """
-    Run all queries concurrently using multiple DDGS sessions.
-    DDG sessions are not thread-safe — each worker gets its own.
+    Run all queries concurrently via RSS and return de-duped raw articles.
+    Drop-in replacement for the old SearXNG / DDG version — no sidecar needed.
     """
-    DDGS = None
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        pass
-    if DDGS is None:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            logger.error("ddgs not installed. Run: pip install ddgs")
-            return []
-
-    seen_local: set = set()
-    seen_lock = threading.Lock()
     all_articles: List[RawArticle] = []
-    results_lock = threading.Lock()
+    global_seen: set = set()
 
-    def worker(entry):
-        # Each thread gets its own DDGS session
-        with DDGS() as ddgs:
-            # Add a small random stagger to avoid burst rate-limits
-            time.sleep(random.uniform(0.2, 1.2))
-            arts = _search_one(entry, ddgs, seen_local)
-            with results_lock:
-                all_articles.extend(arts)
-
-    with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
-        futures = [pool.submit(worker, q) for q in queries]
-        for f in as_completed(futures):
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(_search_one_query, entry, set()): entry
+            for entry in queries
+        }
+        for future in as_completed(futures):
             try:
-                f.result()
+                results = future.result()
             except Exception as e:
-                logger.warning(f"Search worker error: {e}")
+                logger.warning(f"Query worker error: {e}")
+                continue
+            for art in results:
+                if art["url"] not in global_seen:
+                    global_seen.add(art["url"])
+                    all_articles.append(art)
 
-    logger.info(f"DDG fetch done — {len(all_articles)} raw articles from {len(queries)} queries")
+    logger.info(f"fetch_raw_articles: {len(all_articles)} total unique articles (RSS backend)")
     return all_articles
 
 
@@ -445,7 +634,7 @@ def stream_briefing(
         call_llm   = None
         logger.warning("llm_client not found — serving raw articles without scoring")
 
-    # 1. Fetch all raw articles (concurrent DDG)
+    # 1. Fetch all raw articles (concurrent RSS)
     logger.info(f"🔍 Fetching raw articles for {len(queries)} queries…")
     raw_articles = fetch_raw_articles(queries)
 

@@ -44,7 +44,7 @@ requests==2.31.0
 httpx==0.26.0
 
 # News / web search
-duckduckgo-search==5.3.1
+feedparser>=6.0.11
 beautifulsoup4==4.12.3
 
 # Wikipedia enrichment

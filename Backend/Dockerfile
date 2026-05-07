@@ -5,14 +5,22 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set work directory
-WORKDIR /app
-
-# Install system dependencies (needed for some AI libs and networking)
+# ── FIX: DDG requires proper SSL cert chain + CA bundle ──────────────────────
+# python:3.11-slim strips ca-certificates; without them DDG HTTPS fails
+# silently and the retry loop burns through all attempts → rate-limit errors.
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    ca-certificates \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# ── FIX: Point Python's SSL to the system cert store ────────────────────────
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+# Set work directory
+WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
