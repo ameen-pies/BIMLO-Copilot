@@ -612,12 +612,30 @@ const S = {
 
 // ─── News Pipeline Card ───────────────────────────────────────────────────────
 
-function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; onTrigger: () => void }) {
+function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; onTrigger: () => Promise<void> }) {
   const [now, setNow] = useState(Date.now());
+  const [triggering, setTriggering] = useState(false);
+  const [triggered, setTriggered]   = useState<"success" | "error" | null>(null);
+
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  const handleTrigger = async () => {
+    if (triggering) return;
+    setTriggering(true);
+    setTriggered(null);
+    try {
+      await onTrigger();
+      setTriggered("success");
+    } catch {
+      setTriggered("error");
+    } finally {
+      setTriggering(false);
+      setTimeout(() => setTriggered(null), 3500);
+    }
+  };
 
   const np = health?.news_pipeline;
   const isRunning = np?.running ?? false;
@@ -696,11 +714,58 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
 
       {/* Trigger button */}
       <button
-        onClick={onTrigger}
-        style={{ ...S.btn("ghost"), width: "100%", justifyContent: "center", gap: 6, fontSize: 11, padding: "7px 12px", border: "1px solid hsl(var(--border))" }}
+        onClick={handleTrigger}
+        disabled={triggering || isRunning}
+        style={{
+          ...S.btn("ghost"),
+          width: "100%", justifyContent: "center", gap: 6, fontSize: 11,
+          padding: "7px 12px",
+          border: `1px solid ${
+            triggered === "success" ? "#22c55e55"
+            : triggered === "error" ? "#ef444455"
+            : triggering ? "#f59e0b55"
+            : "hsl(var(--border))"
+          }`,
+          background: triggered === "success"
+            ? "rgba(34,197,94,0.08)"
+            : triggered === "error"
+            ? "rgba(239,68,68,0.08)"
+            : triggering
+            ? "rgba(245,158,11,0.08)"
+            : "transparent",
+          color: triggered === "success"
+            ? "#22c55e"
+            : triggered === "error"
+            ? "#ef4444"
+            : triggering
+            ? "#f59e0b"
+            : "hsl(var(--muted-foreground))",
+          cursor: (triggering || isRunning) ? "not-allowed" : "pointer",
+          transition: "all 0.25s ease",
+          opacity: isRunning ? 0.5 : 1,
+        }}
       >
-        <RefreshCw size={11} />
-        Trigger Manual Refresh
+        {triggering ? (
+          <>
+            <RefreshCw size={11} style={{ animation: "spin 0.7s linear infinite" }} />
+            Triggering…
+          </>
+        ) : triggered === "success" ? (
+          <>
+            <CheckCircle2 size={11} />
+            Pipeline triggered!
+          </>
+        ) : triggered === "error" ? (
+          <>
+            <XCircle size={11} />
+            Trigger failed
+          </>
+        ) : (
+          <>
+            <RefreshCw size={11} />
+            Trigger Manual Refresh
+          </>
+        )}
       </button>
     </div>
   );
@@ -1091,11 +1156,10 @@ export default function AdminPage() {
 
           {/* News Pipeline Status */}
           <NewsPipelineCard health={health} onTrigger={async () => {
-            try {
-              const { token } = JSON.parse(localStorage.getItem("bimlo_auth") || "{}");
-              await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(token || "") });
-              setTimeout(loadHealth, 2000);
-            } catch {}
+            const { token } = JSON.parse(localStorage.getItem("bimlo_auth") || "{}");
+            const res = await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(token || "") });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            setTimeout(loadHealth, 2000);
           }} />
         </div>
 

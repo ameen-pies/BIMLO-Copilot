@@ -4,22 +4,29 @@ news_chat_agent.py
 Fully standalone news intelligence agent for the Bimlo news panel.
 
 Completely separate from the RAG engine — does NOT touch the vector
-store or telecom documents at all.
+store, llm_client.py, or the main RAG quota at all.
 
 What it does:
-  1. Pulls ALL cached articles from news_pipeline (titles, summaries,
-     ai_impact, article_url, category, source, published_at).
-  2. For any article the user has pinned, fetches the FULL article
+  1. For any article the user has pinned, fetches the FULL article
      content from its URL via requests + BeautifulSoup so the LLM
      has the real text, not just a 300-char snippet.
-  3. Builds a self-contained system prompt with that context and
-     calls call_llm(prompt=, system_prompt=) — the correct signature.
-  4. Maintains per-session conversation history (totally separate
+  2. Builds a self-contained system prompt with that context and
+     calls the DEDICATED NEWS CF WORKER (CF_NEWS_URL) directly.
+  3. Maintains per-session conversation history (totally separate
      from _sessions in main.py — no cross-contamination).
 
 Endpoint: POST /api/news/chat
+
+LLM routing:
+  → CF_NEWS_URL (dedicated Bimlo News Cloudflare Worker, own AI quota)
+  llm_client.py is never imported or touched.
+
+Required env vars:
+  CF_NEWS_URL     — e.g. https://bimlo.helaliaminhelali.workers.dev
+  CF_NEWS_API_KEY — the shared secret you set on that worker
 """
 
+import os
 import re
 import uuid
 import logging
@@ -28,16 +35,22 @@ from collections import deque
 from datetime import datetime
 from typing import List, Optional, Dict
 
+import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 logger = logging.getLogger("news_chat_agent")
 router = APIRouter()
 
+# ── Dedicated news worker config ───────────────────────────────────────────────
+
+_CF_NEWS_URL     = os.getenv("CF_NEWS_URL", "").rstrip("/")
+_CF_NEWS_API_KEY = os.getenv("CF_NEWS_API_KEY", "")
+
 # ── Session memory — isolated from main RAG sessions ──────────────────────────
 
-MAX_HISTORY = 16
-_sessions: Dict[str, deque] = {}
+MAX_HISTORY    = 16
+_sessions:      Dict[str, deque] = {}
 _sessions_lock = threading.Lock()
 
 
@@ -67,9 +80,9 @@ class PinnedArticle(BaseModel):
 
 
 class NewsChatRequest(BaseModel):
-    query:            str
-    session_id:       Optional[str]                 = None
-    pinned_articles:  Optional[List[PinnedArticle]] = []
+    query:           str
+    session_id:      Optional[str]                 = None
+    pinned_articles: Optional[List[PinnedArticle]] = []
 
 
 class NewsChatResponse(BaseModel):
@@ -102,9 +115,8 @@ def _fetch_article_text(url: str, char_limit: int = 1500) -> str:
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
-
         for tag in soup(["script", "style", "nav", "footer", "header",
-                          "aside", "form", "noscript", "iframe"]):
+                         "aside", "form", "noscript", "iframe"]):
             tag.decompose()
 
         body = (
@@ -124,7 +136,6 @@ def _fetch_article_text(url: str, char_limit: int = 1500) -> str:
     except Exception as e:
         logger.warning(f"Could not fetch {url}: {e}")
         return ""
-
 
 
 # ── Context builder ────────────────────────────────────────────────────────────
@@ -149,8 +160,10 @@ def _build_pinned_context(pinned: List[PinnedArticle]) -> str:
             block += f"Full article text (fetched live):\n{full}\n"
             logger.info(f"Fetched full text for pinned article '{a.title[:50]}' ({len(full)} chars)")
         else:
-            # Mark clearly as a limited snippet so the LLM knows not to invent details
-            block += "[NOTE: Full article could not be fetched. Only the cached preview below is available. Do NOT invent or assume any specific numbers, statistics, or details not present in this snippet.]\n"
+            block += (
+                "[NOTE: Full article could not be fetched. Only the cached preview below is available. "
+                "Do NOT invent or assume any specific numbers, statistics, or details not present in this snippet.]\n"
+            )
             if a.rawSummary:
                 block += f"Cached preview (300 chars max): {a.rawSummary}\n"
             if a.aiImpact:
@@ -167,51 +180,105 @@ def _build_pinned_context(pinned: List[PinnedArticle]) -> str:
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 _SYSTEM_TEMPLATE = """\
-You are Bimlo, the AI analyst of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D–7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. Today: {today}.
-You are embedded in a live industry news feed covering telecom and construction sectors. The user has pinned specific articles for discussion and their content is provided below.
+You are Bimlo, the AI analyst of BIMLO TECHNOLOGIE — a company specialising in BIM engineering \
+(3D–7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies \
+(rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. \
+Today: {today}.
+You are embedded in a live industry news feed covering telecom and construction sectors. \
+The user has pinned specific articles for discussion and their content is provided below.
 
 CRITICAL RULES — follow these exactly:
-1. Only reference facts, figures, statistics, and details that are explicitly present in the provided article text. Never invent, assume, or fill in numbers or data not in the text.
-2. If an article shows [NOTE: Full article could not be fetched], only a short cached preview is available. Limit your analysis strictly to what the preview states. Do not extrapolate specific figures from a headline or snippet.
-3. If the user asks for a specific detail (e.g. a percentage, price, or statistic) that is not in the provided content, say clearly: "That detail isn't in the article text I have access to — you can read the full article at the source link."
-4. Analyse through the lens of BIM, telecom infrastructure, and digital construction. Highlight implications for BTP/construction professionals and telecom engineers where relevant.
+1. Only reference facts, figures, statistics, and details that are explicitly present in the \
+provided article text. Never invent, assume, or fill in numbers or data not in the text.
+2. If an article shows [NOTE: Full article could not be fetched], only a short cached preview is \
+available. Limit your analysis strictly to what the preview states. Do not extrapolate specific \
+figures from a headline or snippet.
+3. If the user asks for a specific detail (e.g. a percentage, price, or statistic) that is not in \
+the provided content, say clearly: "That detail isn't in the article text I have access to — you \
+can read the full article at the source link."
+4. Analyse through the lens of BIM, telecom infrastructure, and digital construction. Highlight \
+implications for BTP/construction professionals and telecom engineers where relevant.
 5. Be concise and expert. Cite which article you are drawing from when referencing specific claims.
 """
 
 
-# ── LLM call ───────────────────────────────────────────────────────────────────
+# ── News worker HTTP call ──────────────────────────────────────────────────────
+
+def _call_news_worker(
+    prompt:        str,
+    system_prompt: str   = "",
+    max_tokens:    int   = 900,
+    temperature:   float = 0.4,
+) -> str:
+    """
+    POST a single LLM request to the dedicated Bimlo News CF Worker.
+    Never touches llm_client.py — completely isolated quota.
+    Raises on misconfiguration or HTTP errors.
+    """
+    if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
+        raise RuntimeError(
+            "CF_NEWS_URL or CF_NEWS_API_KEY is not set. "
+            "Add both to your .env to enable the news LLM worker."
+        )
+
+    payload: dict = {
+        "prompt":      prompt,
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+    }
+    if system_prompt:
+        payload["systemPrompt"] = system_prompt
+
+    resp = httpx.post(
+        f"{_CF_NEWS_URL}/",
+        headers={
+            "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+            "Content-Type":  "application/json",
+        },
+        json=payload,
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+    text = resp.json().get("response", "").strip()
+    if not text:
+        raise RuntimeError("News worker returned an empty response")
+    return text
+
 
 def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str:
     """
-    Uses call_llm(prompt=, system_prompt=) — the correct llm_client.py signature.
-    History is folded into the prompt as a plain transcript.
+    Build full prompt (transcript + user turn) and call the news worker.
+    Returns a safe error string instead of raising so the endpoint never 500s.
     """
+    transcript = ""
+    if history:
+        for turn in history[-6:]:
+            role = "User" if turn["role"] == "user" else "Bimlo"
+            transcript += f"{role}: {turn['content']}\n"
+        transcript += "\n"
+
+    prompt = f"{transcript}User: {user_message}\nBimlo:"
+
     try:
-        from llm_client import call_llm, check_llm_available
-
-        available, provider = check_llm_available()
-        if not available:
-            return "⚠️ LLM not configured — please set GROQ_API_KEY."
-
-        transcript = ""
-        if history:
-            for turn in history[-6:]:
-                role = "User" if turn["role"] == "user" else "Bimlo"
-                transcript += f"{role}: {turn['content']}\n"
-            transcript += "\n"
-
-        prompt = f"{transcript}User: {user_message}\nBimlo:"
-
-        return call_llm(
+        return _call_news_worker(
             prompt=prompt,
             system_prompt=system_prompt,
             max_tokens=900,
             temperature=0.4,
-        ).strip()
-
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"[news_chat] worker HTTP {e.response.status_code}: {e.response.text[:200]}")
+        return f"⚠️ News worker error ({e.response.status_code}). Please try again."
+    except httpx.TimeoutException:
+        logger.error("[news_chat] worker timed out after 30s")
+        return "⚠️ News worker timed out. Please try again."
+    except RuntimeError as e:
+        logger.error(f"[news_chat] config error: {e}")
+        return f"⚠️ {e}"
     except Exception as e:
-        logger.error(f"LLM call failed: {e}")
-        return f"⚠️ Error: {e}"
+        logger.error(f"[news_chat] unexpected error: {e}")
+        return f"⚠️ Could not reach news worker: {e}"
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────
@@ -220,6 +287,7 @@ def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str
 async def news_chat(req: NewsChatRequest):
     """
     Standalone news intelligence endpoint — isolated from /query and the RAG engine.
+    Calls CF_NEWS_URL (dedicated news worker) — never depletes main RAG quota.
     Only sends pinned article content to the LLM — nothing else.
     """
     sid     = req.session_id or str(uuid.uuid4())
@@ -228,18 +296,15 @@ async def news_chat(req: NewsChatRequest):
 
     logger.info(
         f"[news_chat] sid={sid} | pinned={len(pinned)} | "
-        f"turns={len(history)//2} | q={req.query[:80]!r}"
+        f"turns={len(history) // 2} | q={req.query[:80]!r}"
     )
 
-    # System prompt — no feed dump, just role + date
     system_prompt = _SYSTEM_TEMPLATE.format(
         today=datetime.utcnow().strftime("%B %d, %Y"),
     )
 
-    # Pinned article context (fetches full article text over HTTP)
     pinned_block = _build_pinned_context(pinned)
 
-    # Compose user message
     user_msg = (
         f"{pinned_block}\n\nMy question: {req.query}"
         if pinned_block else req.query

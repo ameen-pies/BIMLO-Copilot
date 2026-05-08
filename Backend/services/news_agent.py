@@ -507,7 +507,30 @@ def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
                     all_articles.append(art)
 
     logger.info(f"fetch_raw_articles: {len(all_articles)} total unique articles (RSS backend)")
-    return all_articles
+
+    # Drop articles older than 90 days (configurable via NEWS_MAX_AGE_DAYS env var)
+    import os as _os
+    max_age_days = int(_os.getenv("NEWS_MAX_AGE_DAYS", "90"))
+    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+    fresh = []
+    for art in all_articles:
+        pub = art.get("published_at", "")
+        if not pub:
+            fresh.append(art)
+            continue
+        try:
+            pub_dt = datetime.fromisoformat(pub.rstrip("Z").split("+")[0])
+            if pub_dt >= cutoff:
+                fresh.append(art)
+        except (ValueError, AttributeError):
+            fresh.append(art)
+
+    if len(fresh) < len(all_articles):
+        logger.info(
+            f"fetch_raw_articles: age-filtered {len(all_articles) - len(fresh)} "
+            f"articles older than {max_age_days} days → {len(fresh)} remaining"
+        )
+    return fresh
 
 
 # ── Merged judge + enrich (one LLM call) ──────────────────────────────────────
@@ -550,6 +573,17 @@ def _judge_and_enrich_one(
             temperature=0.25,
             task="evaluate",
         )
+        # call_llm implementations differ: some return str, some return dict.
+        # Normalise to str before JSON extraction.
+        if isinstance(raw, dict):
+            raw = (
+                raw.get("response")
+                or raw.get("text")
+                or raw.get("content")
+                or raw.get("message")
+                or str(raw)
+            )
+        raw = str(raw)
         parsed = _extract_json(raw)
         score  = float(parsed.get("score", 0.5))
 

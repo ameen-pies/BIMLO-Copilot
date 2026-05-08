@@ -6,9 +6,18 @@ pre-computed paginated cache that all users read from.
 
 Architecture:
   APScheduler (every 4 days)
-      → LangGraph pipeline (search → enrich → dedup → paginate → persist)
+      → LangGraph pipeline (search → enrich → filter → dedup → paginate → persist)
       → data/news_cache/page_0.json … page_N.json + meta.json
       → FastAPI serves pages directly, zero LLM per user request
+
+LLM routing:
+  ALL LLM calls go exclusively to the dedicated Bimlo News CF Worker
+  (CF_NEWS_URL / CF_NEWS_API_KEY). llm_client.py is never imported here.
+  This keeps the news pipeline quota 100% separate from the main RAG workers.
+
+Required env vars:
+  CF_NEWS_URL     — e.g. https://bimlo.helaliaminhelali.workers.dev
+  CF_NEWS_API_KEY — the shared secret you set on that worker
 
 Public API (used by main.py):
     from news_pipeline import (
@@ -43,13 +52,18 @@ logger = logging.getLogger("news_pipeline")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-CACHE_DIR      = os.getenv("NEWS_CACHE_DIR",  os.path.join("data", "news_cache"))
-PAGE_SIZE      = int(os.getenv("NEWS_PAGE_SIZE",  "10"))
-CYCLE_DAYS     = int(os.getenv("NEWS_CYCLE_DAYS",  "4"))
-MAX_SEEN_URLS  = 2000   # prune seen_urls.json after this many entries
+CACHE_DIR     = os.getenv("NEWS_CACHE_DIR", os.path.join("data", "news_cache"))
+PAGE_SIZE     = int(os.getenv("NEWS_PAGE_SIZE",  "10"))
+CYCLE_DAYS    = int(os.getenv("NEWS_CYCLE_DAYS", "4"))
+MAX_SEEN_URLS = 2000   # prune seen_urls.json after this many entries
 
-_BUILD_DIR     = CACHE_DIR + "_building"
-_PREV_DIR      = CACHE_DIR + "_prev"
+_BUILD_DIR = CACHE_DIR + "_building"
+_PREV_DIR  = CACHE_DIR + "_prev"
+
+# ── Dedicated news worker ──────────────────────────────────────────────────────
+
+_CF_NEWS_URL     = os.getenv("CF_NEWS_URL", "").rstrip("/")
+_CF_NEWS_API_KEY = os.getenv("CF_NEWS_API_KEY", "")
 
 # ── Thread-safety ──────────────────────────────────────────────────────────────
 
@@ -68,6 +82,78 @@ class PipelineState(TypedDict):
     errors:       List[str]
 
 
+# ── News worker callable ───────────────────────────────────────────────────────
+#
+# _news_llm() is a drop-in replacement for llm_client.call_llm().
+# It is passed directly into news_agent._judge_and_enrich_one() as the
+# `call_llm` argument, so the signature must match exactly:
+#
+#   call_llm(prompt, system_prompt, max_tokens, temperature, task=None)
+#
+# The `task` kwarg is accepted but ignored — the worker auto-selects the model.
+
+def _news_llm(
+    prompt:        str,
+    system_prompt: str   = "",
+    max_tokens:    int   = 300,
+    temperature:   float = 0.25,
+    task:          str   = "",      # accepted for API compat, not forwarded
+) -> str:
+    """
+    Send a single LLM request to the dedicated Bimlo News CF Worker.
+    Raises RuntimeError if the worker is misconfigured or returns an error.
+    This is the ONLY function that makes LLM calls in the news pipeline.
+    llm_client.py is never imported.
+    """
+    import httpx
+
+    if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
+        raise RuntimeError(
+            "CF_NEWS_URL or CF_NEWS_API_KEY not set — "
+            "news pipeline cannot call LLM worker."
+        )
+
+    payload: dict = {
+        "prompt":      prompt,
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+    }
+    if system_prompt:
+        payload["systemPrompt"] = system_prompt
+
+    resp = httpx.post(
+        f"{_CF_NEWS_URL}/",
+        headers={
+            "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+            "Content-Type":  "application/json",
+        },
+        json=payload,
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+
+    raw_response = resp.json().get("response", "")
+    # CF Workers AI binding sometimes returns a nested dict (e.g. {"text": "..."})
+    # instead of a plain string — normalise it defensively.
+    if isinstance(raw_response, dict):
+        raw_response = (
+            raw_response.get("response")
+            or raw_response.get("text")
+            or raw_response.get("content")
+            or raw_response.get("message")
+            or ""
+        )
+    text = str(raw_response).strip()
+    if not text:
+        raise RuntimeError("News worker returned an empty response")
+    return text
+
+
+def _news_llm_available() -> bool:
+    """Config check only — no network call."""
+    return bool(_CF_NEWS_URL and _CF_NEWS_API_KEY)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _fingerprint(title: str) -> str:
@@ -75,7 +161,7 @@ def _fingerprint(title: str) -> str:
 
 
 def _write_atomic(path: str, data: dict) -> None:
-    """Write JSON atomically: write .tmp then os.replace (POSIX-atomic)."""
+    """Write JSON atomically via .tmp + os.replace (POSIX-atomic)."""
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -106,16 +192,75 @@ def _load_seen_set() -> dict:
 
 
 def _save_seen_set(seen: dict) -> None:
-    # Prune to last MAX_SEEN_URLS entries so the file stays lightweight
-    seen["urls"]         = seen["urls"][-MAX_SEEN_URLS:]
-    seen["fingerprints"] = seen["fingerprints"][-MAX_SEEN_URLS:]
-    seen["updated_at"]   = datetime.utcnow().isoformat() + "Z"
+    # Prune stale entries: drop URLs/fingerprints that were added more than
+    # MAX_ARTICLE_AGE_DAYS ago so they can be re-discovered if re-published.
+    # Fall back to simple length-cap if timestamps are unavailable.
+    cutoff_iso = (datetime.utcnow() - timedelta(days=MAX_ARTICLE_AGE_DAYS)).isoformat()
+    timestamps = seen.get("timestamps", {})
+
+    if timestamps:
+        # Build a pruned view keeping only entries newer than cutoff
+        kept_urls = [u for u in seen["urls"]         if timestamps.get(u, "9999") >= cutoff_iso]
+        kept_fps  = [f for f in seen["fingerprints"] if timestamps.get(f, "9999") >= cutoff_iso]
+        seen["urls"]         = kept_urls[-MAX_SEEN_URLS:]
+        seen["fingerprints"] = kept_fps[-MAX_SEEN_URLS:]
+    else:
+        seen["urls"]         = seen["urls"][-MAX_SEEN_URLS:]
+        seen["fingerprints"] = seen["fingerprints"][-MAX_SEEN_URLS:]
+
+    seen["updated_at"] = datetime.utcnow().isoformat() + "Z"
     # seen_urls lives in CACHE_DIR (not the build dir) so it persists across rotations
     os.makedirs(CACHE_DIR, exist_ok=True)
     _write_atomic(_seen_path(), seen)
 
 
 # ── LangGraph nodes ────────────────────────────────────────────────────────────
+
+MAX_ARTICLE_AGE_DAYS = int(os.getenv("NEWS_MAX_AGE_DAYS", "90"))   # 3 months default
+
+
+def _age_filter_node(state: PipelineState) -> PipelineState:
+    """
+    Drop any article whose published_at is older than MAX_ARTICLE_AGE_DAYS.
+    Also purges stale entries from seen_urls.json so they can be re-fetched
+    once they would reappear as "new" (they won't — they're too old — but
+    this prevents the seen-set from growing forever with dead URLs).
+    Runs right after search_node, before enrich, so we don't waste LLM calls
+    on articles nobody wants to read.
+    """
+    raw   = state["raw_articles"]
+    if not raw:
+        return state
+
+    cutoff = datetime.utcnow() - timedelta(days=MAX_ARTICLE_AGE_DAYS)
+    fresh, stale = [], []
+
+    for art in raw:
+        pub = art.get("published_at", "")
+        if not pub:
+            fresh.append(art)   # no date → keep (benefit of the doubt)
+            continue
+        try:
+            # Handle ISO strings with or without trailing 'Z' / timezone offset
+            pub_clean = pub.rstrip("Z").split("+")[0].split("-")
+            # re-join only the date+time part (YYYY-MM-DDTHH:MM:SS)
+            pub_dt = datetime.fromisoformat(pub.rstrip("Z").split("+")[0])
+            if pub_dt >= cutoff:
+                fresh.append(art)
+            else:
+                stale.append(art)
+        except (ValueError, AttributeError):
+            fresh.append(art)   # unparseable date → keep
+
+    removed = len(stale)
+    if removed:
+        logger.info(
+            f"   age_filter_node: removed {removed} articles older than "
+            f"{MAX_ARTICLE_AGE_DAYS} days (cutoff={cutoff.date()})"
+        )
+    logger.info(f"   age_filter_node: {len(raw)} → {len(fresh)} articles kept")
+    return {**state, "raw_articles": fresh}
+
 
 def _search_node(state: PipelineState) -> PipelineState:
     """Fetch raw articles from ALL query buckets (PAGE_0 + all EXTENDED pages)."""
@@ -134,24 +279,24 @@ def _search_node(state: PipelineState) -> PipelineState:
 
 
 def _enrich_node(state: PipelineState) -> PipelineState:
-    """Judge + enrich all raw articles concurrently via LLM."""
+    """
+    Judge + enrich all raw articles concurrently via the dedicated news LLM worker.
+    Passes _news_llm as the call_llm callable — never imports llm_client.
+    """
     raw = state["raw_articles"]
     if not raw:
         return {**state, "enriched": []}
 
-    try:
-        from llm_client import call_llm, check_llm_available
-        available, provider = check_llm_available()
-        logger.info(f"   enrich_node: LLM provider = {provider if available else 'unavailable'}")
-    except ImportError:
-        available = False
-        call_llm  = None
+    available = _news_llm_available()
+    logger.info(
+        f"   enrich_node: news worker = "
+        f"{'configured → ' + _CF_NEWS_URL if available else 'NOT CONFIGURED — serving raw articles'}"
+    )
 
     from news_agent import _judge_and_enrich_one
 
-    if not available or call_llm is None:
-        # Fail-open: keep all raw articles without scoring
-        logger.warning("   enrich_node: no LLM — serving raw articles")
+    if not available:
+        logger.warning("   enrich_node: CF_NEWS_URL/CF_NEWS_API_KEY not set — fail-open, no scoring")
         enriched = []
         for idx, art in enumerate(raw):
             uid = f"art_{idx}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
@@ -177,8 +322,9 @@ def _enrich_node(state: PipelineState) -> PipelineState:
     errors   = list(state["errors"])
 
     with ThreadPoolExecutor(max_workers=8) as pool:
+        # Pass _news_llm as the call_llm callable — matches the expected signature
         futures = {
-            pool.submit(_judge_and_enrich_one, art, call_llm, idx): art
+            pool.submit(_judge_and_enrich_one, art, _news_llm, idx): art
             for idx, art in enumerate(raw)
         }
         for future in as_completed(futures):
@@ -196,27 +342,31 @@ def _enrich_node(state: PipelineState) -> PipelineState:
     return {**state, "enriched": enriched, "errors": errors}
 
 
-
-
 def _filter_node(state: PipelineState) -> PipelineState:
     """
-    LLM-powered content filter — removes articles that are inappropriate,
-    off-topic, NSFW, or have nothing to do with telecom/construction/tech industry.
-    Falls back to a fast keyword blocklist if LLM is unavailable.
+    Content filter — removes articles that are inappropriate, off-topic,
+    NSFW, or unrelated to telecom/construction/tech.
+
+    Two layers:
+      1. Fast keyword blocklist (no LLM call, instant)
+      2. LLM batch moderation via the news worker (batches of 15)
+    Falls back gracefully to keyword-only if worker is unavailable.
     """
     items = state["enriched"]
     if not items:
         return {**state, "enriched": []}
 
-    # ── Fast keyword pre-filter (catches obvious stuff instantly) ──────────────
+    # ── Layer 1: keyword pre-filter ────────────────────────────────────────────
     BLOCKLIST = [
         "porn", "pornhub", "onlyfans", "xxx", "nsfw", "nude", "nudity",
         "escort", "sex tape", "leaked video", "adult film", "adult content",
         "gambling", "casino", "betting odds", "sportsbook", "lottery jackpot",
         "celebrity gossip", "divorce", "affair", "cheating scandal",
         "crypto scam", "get rich quick", "make money fast", "lewd", "tabloid", "clickbait",
-        "political opinion", "election", "vote", "partisan", "congress", "senate", "white house", "president", "prime minister",
-        "drugs", "marijuana", "cannabis", "opioid", "heroin", "cocaine", "methamphetamine", "fentanyl",
+        "political opinion", "election", "vote", "partisan", "congress", "senate",
+        "white house", "president", "prime minister",
+        "drugs", "marijuana", "cannabis", "opioid", "heroin", "cocaine",
+        "methamphetamine", "fentanyl",
     ]
 
     def _keyword_clean(art: dict) -> bool:
@@ -233,19 +383,15 @@ def _filter_node(state: PipelineState) -> PipelineState:
     if kw_removed:
         logger.info(f"   filter_node: keyword pre-filter removed {kw_removed} articles")
 
-    # ── LLM batch filter ───────────────────────────────────────────────────────
-    try:
-        from llm_client import call_llm, check_llm_available
-        available, provider = check_llm_available()
-    except ImportError:
-        available = False
-
-    if not available or not pre_filtered:
-        logger.info(f"   filter_node: LLM unavailable — keyword filter only, {len(pre_filtered)} articles kept")
+    # ── Layer 2: LLM batch moderation via news worker ──────────────────────────
+    if not _news_llm_available() or not pre_filtered:
+        logger.info(
+            f"   filter_node: news worker {'unavailable' if not _news_llm_available() else 'skip (empty)'}"
+            f" — keyword filter only, {len(pre_filtered)} articles kept"
+        )
         return {**state, "enriched": pre_filtered}
 
-    # Batch articles into groups of 15 to save LLM calls
-    BATCH = 15
+    BATCH    = 15
     accepted = []
 
     for batch_start in range(0, len(pre_filtered), BATCH):
@@ -269,31 +415,40 @@ def _filter_node(state: PipelineState) -> PipelineState:
         )
 
         try:
-            raw = call_llm(prompt=prompt, system_prompt="You are a content moderation assistant. Be strict but fair.", max_tokens=100, temperature=0.0)
-            raw = raw.strip().lower()
+            raw_resp = _news_llm(
+                prompt=prompt,
+                system_prompt="You are a content moderation assistant. Be strict but fair.",
+                max_tokens=100,
+                temperature=0.0,
+            )
+            raw_resp = raw_resp.strip().lower()
 
-            if raw == "none" or not raw:
-                rejected_indices = set()
+            if raw_resp == "none" or not raw_resp:
+                rejected_indices: set = set()
             else:
                 rejected_indices = set()
-                for part in re.split(r"[,\s]+", raw):
+                for part in re.split(r"[,\s]+", raw_resp):
                     part = part.strip().rstrip(".")
                     if part.isdigit():
-                        rejected_indices.add(int(part) - 1)  # convert to 0-based
+                        rejected_indices.add(int(part) - 1)   # convert to 0-based
 
             kept    = [a for i, a in enumerate(batch) if i not in rejected_indices]
             removed = len(batch) - len(kept)
             if removed:
-                logger.info(f"   filter_node: LLM rejected {removed} articles in batch starting at {batch_start}")
+                logger.info(
+                    f"   filter_node: news worker rejected {removed} articles "
+                    f"in batch starting at {batch_start}"
+                )
             accepted.extend(kept)
 
         except Exception as e:
-            logger.warning(f"   filter_node: LLM batch failed ({e}) — keeping batch as-is")
+            logger.warning(f"   filter_node: news worker batch failed ({e}) — keeping batch as-is")
             accepted.extend(batch)
 
     total_removed = len(items) - len(accepted)
     logger.info(f"   filter_node: {len(items)} → {len(accepted)} articles ({total_removed} total removed)")
     return {**state, "enriched": accepted}
+
 
 def _dedup_node(state: PipelineState) -> PipelineState:
     """
@@ -306,16 +461,17 @@ def _dedup_node(state: PipelineState) -> PipelineState:
     if not items:
         return {**state, "deduped": []}
 
-    seen = _load_seen_set()
+    seen         = _load_seen_set()
     seen_url_set = set(seen["urls"])
     seen_fp_set  = set(seen["fingerprints"])
+    if "timestamps" not in seen:
+        seen["timestamps"] = {}
+    now_iso = datetime.utcnow().isoformat()
 
-    deduped      = []
-    new_urls     = []
-    new_fps      = []
-
-    # Within-run dedup set (URL only — handles same article from two queries)
-    within_run_urls = set()
+    deduped         = []
+    new_urls        = []
+    new_fps         = []
+    within_run_urls = set()   # handles same article from two different queries
 
     for art in items:
         url = art.get("article_url", "")
@@ -329,13 +485,18 @@ def _dedup_node(state: PipelineState) -> PipelineState:
         new_urls.append(url)
         new_fps.append(fp)
 
-    # Persist the updated seen set
     seen["urls"]         += new_urls
     seen["fingerprints"] += new_fps
+    for u in new_urls:
+        seen["timestamps"][u] = now_iso
+    for f in new_fps:
+        seen["timestamps"][f] = now_iso
     _save_seen_set(seen)
 
-    logger.info(f"   dedup_node: {len(items)} → {len(deduped)} after dedup "
-                f"({len(items) - len(deduped)} removed)")
+    logger.info(
+        f"   dedup_node: {len(items)} → {len(deduped)} after dedup "
+        f"({len(items) - len(deduped)} removed)"
+    )
     return {**state, "deduped": deduped}
 
 
@@ -349,19 +510,21 @@ def _paginate_node(state: PipelineState) -> PipelineState:
         reverse=True,
     )
     pages = [
-        sorted_items[i : i + PAGE_SIZE]
+        sorted_items[i: i + PAGE_SIZE]
         for i in range(0, len(sorted_items), PAGE_SIZE)
-        if sorted_items[i : i + PAGE_SIZE]   # skip empty tail
+        if sorted_items[i: i + PAGE_SIZE]
     ]
 
-    logger.info(f"   paginate_node: {len(items)} articles → {len(pages)} pages "
-                f"of up to {PAGE_SIZE}")
+    logger.info(
+        f"   paginate_node: {len(items)} articles → {len(pages)} pages "
+        f"of up to {PAGE_SIZE}"
+    )
     return {**state, "pages": pages}
 
 
 def _persist_node(state: PipelineState) -> PipelineState:
     """
-    Atomic rotation:
+    Atomic cache rotation:
       1. Write everything to CACHE_DIR_building/
       2. Move CACHE_DIR          → CACHE_DIR_prev  (fallback during next build)
       3. Move CACHE_DIR_building → CACHE_DIR        (goes live instantly)
@@ -371,7 +534,6 @@ def _persist_node(state: PipelineState) -> PipelineState:
 
     os.makedirs(_BUILD_DIR, exist_ok=True)
 
-    # Write each page
     for i, page in enumerate(pages):
         _write_atomic(
             os.path.join(_BUILD_DIR, f"page_{i}.json"),
@@ -386,7 +548,6 @@ def _persist_node(state: PipelineState) -> PipelineState:
     now      = datetime.utcnow()
     next_run = now + timedelta(days=CYCLE_DAYS)
 
-    # Write meta
     _write_atomic(
         os.path.join(_BUILD_DIR, "meta.json"),
         {
@@ -399,17 +560,15 @@ def _persist_node(state: PipelineState) -> PipelineState:
             "page_size":   PAGE_SIZE,
             "cycle_days":  CYCLE_DAYS,
             "status":      "ready",
-            "errors":      state["errors"][:20],  # keep first 20 errors for diagnostics
+            "errors":      state["errors"][:20],
         },
     )
 
-    # Atomic rotation
-    # shutil.move() is used instead of os.rename() because os.rename fails
-    # with [Errno 18] across Docker filesystem boundaries (volume vs container layer)
+    # shutil.move instead of os.rename — avoids [Errno 18] across Docker FS boundaries
     if os.path.exists(_PREV_DIR):
         shutil.rmtree(_PREV_DIR)
     if os.path.exists(CACHE_DIR):
-        _seen = os.path.join(CACHE_DIR, "seen_urls.json")
+        _seen     = os.path.join(CACHE_DIR, "seen_urls.json")
         _seen_tmp = _seen + ".bak"
         if os.path.exists(_seen):
             shutil.copy2(_seen, _seen_tmp)
@@ -423,7 +582,7 @@ def _persist_node(state: PipelineState) -> PipelineState:
     return state
 
 
-# ── Build and compile the LangGraph pipeline ──────────────────────────────────
+# ── LangGraph pipeline ─────────────────────────────────────────────────────────
 
 def _build_graph():
     try:
@@ -433,26 +592,27 @@ def _build_graph():
         return None
 
     g = StateGraph(PipelineState)
-    g.add_node("search",   _search_node)
-    g.add_node("enrich",   _enrich_node)
-    g.add_node("filter",   _filter_node)
-    g.add_node("dedup",    _dedup_node)
-    g.add_node("paginate", _paginate_node)
-    g.add_node("persist",  _persist_node)
+    g.add_node("search",     _search_node)
+    g.add_node("age_filter", _age_filter_node)
+    g.add_node("enrich",     _enrich_node)
+    g.add_node("filter",     _filter_node)
+    g.add_node("dedup",      _dedup_node)
+    g.add_node("paginate",   _paginate_node)
+    g.add_node("persist",    _persist_node)
 
     g.set_entry_point("search")
-    g.add_edge("search",   "enrich")
-    g.add_edge("enrich",   "filter")
+    g.add_edge("search",     "age_filter")
+    g.add_edge("age_filter", "enrich")
+    g.add_edge("enrich",     "filter")
     g.add_edge("filter",   "dedup")
     g.add_edge("dedup",    "paginate")
     g.add_edge("paginate", "persist")
-    from langgraph.graph import END
     g.add_edge("persist",  END)
 
     return g.compile()
 
 
-_graph = None
+_graph      = None
 _graph_lock = threading.Lock()
 
 
@@ -482,8 +642,7 @@ def run_news_pipeline(force: bool = False) -> None:
         return
 
     _running = True
-    # Write a .running flag so status endpoint can detect in-progress state
-    _flag = os.path.join(CACHE_DIR, ".running")
+    _flag    = os.path.join(CACHE_DIR, ".running")
     os.makedirs(CACHE_DIR, exist_ok=True)
     try:
         open(_flag, "w").close()
@@ -508,7 +667,6 @@ def _execute(force: bool = False) -> None:
     logger.info(f"🚀 Pipeline starting — run_id={run_id}, force={force}")
 
     if force:
-        # Wipe the persistent seen set so old articles can reappear
         try:
             sp = _seen_path()
             if os.path.exists(sp):
@@ -531,7 +689,10 @@ def _execute(force: bool = False) -> None:
         # Fallback: run nodes manually without LangGraph
         logger.warning("LangGraph unavailable — running pipeline manually")
         state = initial_state
-        for node_fn in [_search_node, _enrich_node, _filter_node, _dedup_node, _paginate_node, _persist_node]:
+        for node_fn in [
+            _search_node, _age_filter_node, _enrich_node, _filter_node,
+            _dedup_node, _paginate_node, _persist_node,
+        ]:
             state = node_fn(state)
         return
 
@@ -545,7 +706,6 @@ def get_meta() -> Optional[dict]:
     """Return meta.json or None if no cache exists yet."""
     path = os.path.join(CACHE_DIR, "meta.json")
     if not os.path.exists(path):
-        # Try previous cycle as fallback
         path = os.path.join(_PREV_DIR, "meta.json")
     return _read_json(path, None)
 
@@ -553,8 +713,7 @@ def get_meta() -> Optional[dict]:
 def get_page(page_num: int) -> Optional[dict]:
     """
     Return a single page dict or None.
-    Falls back to _prev if the active cache doesn't have this page
-    (e.g. during a rebuild or on first boot).
+    Falls back to _prev if the active cache doesn't have this page.
     """
     for base in [CACHE_DIR, _PREV_DIR]:
         path = os.path.join(base, f"page_{page_num}.json")
@@ -569,8 +728,8 @@ def get_status() -> dict:
     meta = get_meta()
     return {
         "running":     _running,
-        "last_run_at": meta.get("run_at")      if meta else None,
-        "next_run_at": meta.get("next_run_at") if meta else None,
+        "last_run_at": meta.get("run_at")         if meta else None,
+        "next_run_at": meta.get("next_run_at")    if meta else None,
         "total_pages": meta.get("total_pages", 0) if meta else 0,
         "total_items": meta.get("total_items", 0) if meta else 0,
         "status":      meta.get("status", "no_cache") if meta else "no_cache",
