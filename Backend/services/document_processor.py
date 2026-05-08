@@ -53,6 +53,23 @@ class DocumentProcessor:
         self._vision_max_dim = int(os.getenv("VISION_MAX_DIM", "1024"))
         self._skip_vision  = os.getenv("SKIP_VISION", "0").strip() == "1"
 
+    # Supported standalone image extensions
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+
+    # Vision prompt for standalone user-uploaded images (screenshots, photos, diagrams)
+    _IMAGE_UPLOAD_PROMPT = (
+        "You are analysing a user-uploaded image — it could be a screenshot, photo, "
+        "diagram, chart, floor plan, whiteboard, or any visual content. "
+        "Provide a thorough, structured description:\n"
+        "1. What type of image is this? (screenshot, photo, diagram, chart, etc.)\n"
+        "2. What is the main subject or content?\n"
+        "3. Describe all visible text, labels, numbers, or annotations verbatim.\n"
+        "4. Describe the layout, structure, colours, and key visual elements.\n"
+        "5. If it shows data (chart/table), describe the values and trends.\n"
+        "6. If it shows UI/software, describe what interface or state is shown.\n"
+        "Be thorough — your description is the only way this image's content becomes searchable."
+    )
+
     # ── Public entry point ────────────────────────────────────────────────
 
     def process_document(self, file_path: str) -> List[Dict]:
@@ -61,6 +78,7 @@ class DocumentProcessor:
         For PDFs: uses pdfplumber (text + tables + image descriptions).
         For DOCX: uses python-docx (text + image descriptions).
         For TXT:  plain text read.
+        For images (PNG/JPG/WEBP/GIF/etc.): vision LLM description → searchable chunks.
         """
         ext = os.path.splitext(file_path)[1].lower()
 
@@ -70,10 +88,137 @@ class DocumentProcessor:
             text = self._extract_docx(file_path)
         elif ext == ".txt":
             text = self._extract_txt(file_path)
+        elif ext in self.IMAGE_EXTS:
+            return self._process_standalone_image(file_path)
         else:
             raise ValueError(f"Unsupported file type: {ext}")
 
         metadata = self._extract_metadata(text, file_path)
+        return self._create_chunks(text, metadata)
+
+    def process_image_bytes(self, image_bytes: bytes, filename: str) -> List[Dict]:
+        """
+        Process a raw image from bytes (e.g. uploaded directly via /upload).
+        Returns chunks the same way process_document() does.
+        """
+        import tempfile
+        ext = os.path.splitext(filename)[1].lower()
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        try:
+            return self._process_standalone_image(tmp_path, override_filename=filename)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    # ── Standalone image processing ───────────────────────────────────────
+
+    def _process_standalone_image(self, file_path: str, override_filename: str = None) -> List[Dict]:
+        """
+        Process a standalone uploaded image file (PNG, JPG, WEBP, etc.).
+
+        Steps:
+          1. Load + downscale via PIL (same as _pdfplumber_image_to_pil)
+          2. Call vision LLM with a richer user-image prompt
+          3. Build a single chunk whose text is:
+               [UPLOADED IMAGE: <filename>]
+               <full vision description>
+          4. Tag the chunk with doc_type="image" and has_images=True
+             so the RAG engine and frontend treat it correctly.
+
+        Returns a list with one or more chunks (usually just one for images).
+        Falls back to a minimal placeholder chunk if vision is unavailable.
+        """
+        from PIL import Image
+
+        filename = override_filename or os.path.basename(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+
+        # ── Load image ────────────────────────────────────────────────────
+        try:
+            img = Image.open(file_path).convert("RGB")
+        except Exception as e:
+            print(f"⚠️  Could not open image '{filename}': {e}")
+            # Return a minimal placeholder so the upload doesn't hard-fail
+            return [{
+                "text": f"[UPLOADED IMAGE: {filename}] (could not be read)",
+                "chunk_id": 0,
+                "metadata": {
+                    "filename": filename,
+                    "doc_type": "image",
+                    "has_images": True,
+                    "image_width": 0,
+                    "image_height": 0,
+                },
+            }]
+
+        orig_w, orig_h = img.size
+        # Downscale for vision API (keep costs reasonable)
+        max_d = self._vision_max_dim
+        if max(orig_w, orig_h) > max_d:
+            scale = max_d / max(orig_w, orig_h)
+            img = img.resize((int(orig_w * scale), int(orig_h * scale)))
+
+        b64 = self._pil_to_b64(img)
+
+        # ── Vision description ────────────────────────────────────────────
+        description = ""
+        if b64 and not self._skip_vision and self._api_key:
+            try:
+                payload = {
+                    "prompt": self._IMAGE_UPLOAD_PROMPT,
+                    "image":  b64,
+                    "model":  self._vision_model,
+                    "max_tokens": 600,       # richer description for standalone images
+                    "temperature": 0.1,
+                    "task": "vision",
+                }
+                headers = {
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type":  "application/json",
+                }
+                import requests as _req
+                resp = _req.post(self._api_url, headers=headers, json=payload, timeout=45)
+                if resp.status_code == 200:
+                    raw = (resp.json().get("response") or "").strip()
+                    import re
+                    description = re.sub(r"\s+", " ", raw).strip().strip('"').strip("'")
+                    print(f"   🖼️  Vision description for '{filename}': {len(description)} chars")
+                else:
+                    print(f"   ⚠️  Vision LLM returned {resp.status_code} for '{filename}'")
+            except Exception as e:
+                print(f"   ⚠️  Vision call failed for '{filename}': {e}")
+
+        if not description:
+            description = (
+                f"Uploaded image file '{filename}' "
+                f"({orig_w}×{orig_h}px). "
+                "Vision description unavailable — "
+                "ask the user to describe what they see if needed."
+            )
+
+        # ── Build searchable text blob ────────────────────────────────────
+        # We include filename + dimensions so simple "find the image" queries work.
+        text = (
+            f"[UPLOADED IMAGE: {filename}]\n"
+            f"Dimensions: {orig_w}×{orig_h} pixels\n"
+            f"Format: {ext.lstrip('.')}\n\n"
+            f"Visual description:\n{description}"
+        )
+
+        metadata = {
+            "filename":     filename,
+            "doc_type":     "image",
+            "has_images":   True,
+            "image_width":  orig_w,
+            "image_height": orig_h,
+        }
+
+        # Images are usually small enough to fit in one chunk; split if very
+        # long description (e.g. dense diagram with lots of text annotations).
         return self._create_chunks(text, metadata)
 
     # ── Text extraction ───────────────────────────────────────────────────

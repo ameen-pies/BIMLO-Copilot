@@ -54,6 +54,7 @@ export interface UploadResponse {
   session_id?: string;
   chunks_processed: number;
   cad_summary?: Record<string, unknown>;
+  is_image?: boolean;   // true when the upload was a standalone image file
   message: string;
 }
 
@@ -411,6 +412,30 @@ class APIClient {
     });
   }
 
+  /**
+   * Fetch raw image bytes for an uploaded image document.
+   *
+   * Per-user isolation:
+   *   - Requires sessionId; backend verifies doc belongs to this session
+   *   - Returns the raw image as a Blob that can be used with URL.createObjectURL()
+   *
+   * Use this to populate the document viewer when doc_type is an image extension.
+   */
+  async getImageDocument(documentId: string, sessionId: string): Promise<Blob> {
+    const url = `${this.baseURL}/documents/${documentId}/image?session_id=${encodeURIComponent(sessionId)}`;
+    let token: string | null = null;
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('bimlo_auth');
+        if (stored) token = JSON.parse(stored).token ?? null;
+      } catch { /* ignore */ }
+    }
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`Image fetch failed: ${response.statusText}`);
+    return response.blob();
+  }
+
   // ==========================================================================
   // HEALTH CHECK
   // ==========================================================================
@@ -446,6 +471,7 @@ export const {
   deleteDocument,
   getDocumentContent,
   downloadDocument,
+  getImageDocument,
   query,
   queryStream,
   generateReport,

@@ -3741,6 +3741,12 @@ const Chat = () => {
             cadSummary: res.cad_summary,
           });
         }
+        // If the server confirmed it processed this as an image, ensure the blob map
+        // has the correct type so the viewer opens as an image (not text).
+        if (res.is_image && !blobUrlMapRef.current.has(res.document_id)) {
+          const objectUrl = URL.createObjectURL(file);
+          blobUrlMapRef.current.set(res.document_id, { url: objectUrl, type: 'image' });
+        }
         setPendingDocIds(prev => [...prev, res.document_id]);
         setDocuments(prev => prev
           .filter(d => d.document_id !== placeholderId)
@@ -4231,9 +4237,16 @@ const Chat = () => {
 
     const base = getApiBase();
     const sessionQuery = sessionIdRef.current ? `?session_id=${encodeURIComponent(sessionIdRef.current)}` : "";
-    const res = await fetch(`${base}/documents/${doc.document_id}/download${sessionQuery}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
+
+    let blob: Blob;
+    if (type === "image") {
+      // Images are served from the dedicated /image endpoint (returns raw bytes, not text)
+      blob = await (api as any).getImageDocument(doc.document_id, sessionIdRef.current ?? "");
+    } else {
+      const res = await fetch(`${base}/documents/${doc.document_id}/download${sessionQuery}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      blob = await res.blob();
+    }
     const url = URL.createObjectURL(blob);
     blobUrlMapRef.current.set(doc.document_id, { url, type });
     return { url, type };

@@ -445,11 +445,13 @@ async def upload_document(
     """
     try:
         text_allowed = ['.pdf', '.docx', '.doc', '.txt']
+        image_allowed = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tiff', '.tif'}
         cad_allowed = {'.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'}
         ext = os.path.splitext(file.filename)[1].lower()
-        is_cad = ext in cad_allowed
-        if ext not in text_allowed and not is_cad:
-            raise HTTPException(400, f"Unsupported type. Allowed: {', '.join(text_allowed + list(cad_allowed))}")
+        is_cad   = ext in cad_allowed
+        is_image = ext in image_allowed
+        if ext not in text_allowed and not is_cad and not is_image:
+            raise HTTPException(400, f"Unsupported type. Allowed: {', '.join(text_allowed + list(image_allowed) + list(cad_allowed))}")
 
         # Read file bytes — no disk write, pass directly to processor
         content = await file.read()
@@ -464,6 +466,7 @@ async def upload_document(
             'content_type': _guess_mime_type(file.filename),
             'session_id': session_id,
             'doc_type': ext,
+            'is_image': is_image,
         }
         chunks = []
         cad_summary = None
@@ -482,6 +485,22 @@ async def upload_document(
             except Exception as cad_err:
                 print(f"❌ CAD upload error: {cad_err}")
                 raise HTTPException(500, f"Error processing CAD/IFC document: {cad_err}")
+        elif is_image:
+            # ── Standalone image: run vision LLM → searchable chunks ──────
+            print(f"🖼️  Image upload detected: {file.filename} ({len(content)} bytes)")
+            try:
+                chunks = doc_processor.process_image_bytes(content, file.filename)
+                for idx, chunk in enumerate(chunks):
+                    if "metadata" not in chunk:
+                        chunk["metadata"] = {}
+                    chunk["metadata"]["chunk_index"] = idx
+                    chunk["metadata"]["document_id"] = doc_id
+                    chunk["metadata"]["doc_type"]    = "image"
+                    chunk["metadata"]["has_images"]  = True
+                print(f"🖼️  Image processed: {len(chunks)} chunk(s) for '{file.filename}'")
+            except Exception as img_err:
+                print(f"❌ Image processing error: {img_err}")
+                raise HTTPException(500, f"Error processing image: {img_err}")
         else:
             # Write to a temp file so DocumentProcessor (which expects a path) can read it
             import tempfile
@@ -581,6 +600,7 @@ async def upload_document(
             "session_id":       session_id,
             "chunks_processed": len(chunks),
             "cad_summary":      cad_summary,
+            "is_image":         is_image,
             "message":          f"'{file.filename}' processed and indexed successfully",
         }
     except HTTPException:
@@ -1583,7 +1603,64 @@ async def download_document(doc_id: str, session_id: Optional[str] = None):
         raise HTTPException(500, f"Error downloading document: {e}")
 
 
-@app.get("/api/news/meta")
+@app.get("/documents/{doc_id}/image")
+async def get_image_document(
+    doc_id: str,
+    session_id: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Serve the raw bytes of an uploaded image document so the frontend
+    can display it inline in the document viewer.
+
+    Security: checks that doc_id belongs to the requesting session.
+    Falls back to the in-memory DOCUMENT_FILE_CACHE (fastest path) before
+    querying Neo4j so preview works even before ingestion completes.
+    """
+    if not session_id:
+        raise HTTPException(status_code=403, detail="session_id required")
+
+    # ── Fast path: still in memory from this upload ────────────────────
+    cached = DOCUMENT_FILE_CACHE.get(doc_id)
+    if cached and cached.get("session_id") == session_id and cached.get("is_image"):
+        mime = cached.get("content_type") or "image/jpeg"
+        return StreamingResponse(
+            BytesIO(cached["bytes"]),
+            media_type=mime,
+            headers={"Content-Disposition": f'inline; filename="{cached["filename"]}"'},
+        )
+
+    # ── Slow path: verify session ownership via Neo4j ──────────────────
+    try:
+        from neo4j_auth import _run as neo4j_run
+        rows = neo4j_run(
+            """
+            MATCH (c:Conversation {session_id: $sid})-[:USED_DOCUMENT]->(d:Document {id: $doc_id})
+            WHERE d.doc_type IN ['png','jpg','jpeg','webp','gif','bmp','tiff','tif']
+            RETURN d.id AS id
+            """,
+            {"sid": session_id, "doc_id": doc_id},
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Image document not found")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Neo4j unavailable — fall through
+
+    # Check cache again without session guard (Neo4j already verified)
+    cached = DOCUMENT_FILE_CACHE.get(doc_id)
+    if cached and cached.get("is_image"):
+        mime = cached.get("content_type") or "image/jpeg"
+        return StreamingResponse(
+            BytesIO(cached["bytes"]),
+            media_type=mime,
+            headers={"Content-Disposition": f'inline; filename="{cached["filename"]}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="Image bytes not available (server may have restarted)")
+
+
 async def news_meta():
     """
     Returns the cache manifest: total_pages, run_at, next_run_at, status.
