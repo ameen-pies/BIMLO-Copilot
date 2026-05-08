@@ -91,7 +91,7 @@ CURRENT QUERY: {query}
 
 TASK — output ONLY this JSON object, no preamble, no backticks:
 {{
-  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | converse_meta | translate_content | aggregate_stats>",
+  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | converse_meta | image_query | translate_content | aggregate_stats>",
   "secondary_intent": "<same enum or empty string>",
   "target_entity": "<the document name, term, concept, or data point the user cares about — empty if none>",
   "operation": "<action verb: extract | compare | define | visualise | generate | modify | converse | translate | aggregate>",
@@ -108,12 +108,22 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
 
 ROUTING RULES (apply these strictly when choosing suggested_route):
 - direct: casual/conversational, memory recall ("what did you just say"), self-referential ("what route did you use"), edits to last reply ("make it shorter", "rephrase that")
-- direct [converse_meta]: queries that ask about the AI's own awareness or perception of an uploaded file — NOT about its content.
-    Signals (any language): "do you see this", "can you read this", "did you get the file", "is the file there",
-    "do you have access", "هل ترى هذا", "tu vois ce fichier", "tu peux lire ça", "avez-vous reçu",
-    "peux-tu voir", "est-ce que tu as reçu", "vois-tu le document".
-    These are meta-questions about the AI's state — NEVER route them to rag.
+- direct [converse_meta]: queries asking about the AI's own FILE RECEIPT/ACCESS — "did you get the file?", "can you access it?", "is it there?".
+    NOT for asking about image content. NEVER route to rag.
+    Signals: "did you get the file", "is the file there", "do you have access", "can you read this" (meaning: did it arrive),
+    "tu as reçu", "avez-vous reçu", "هل وصلك", "هل لديك الملف".
     Set primary_intent="converse_meta", suggested_route="direct".
+- rag [image_query]: CRITICAL — when the session has uploaded image files AND the user asks about the VISUAL CONTENT of an image.
+    The system already ran a vision LLM on upload and stored the description in the vector store — RAG retrieves it.
+    Signals (any language): "what do you see", "what is in this image", "describe the image", "describe this",
+    "what does this show", "what is shown", "read the text in it", "what's in the picture", "analyse this image",
+    "look at this image", "what can you tell me about this", "tell me about this image",
+    "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة", "ماذا يوجد",
+    "que vois-tu", "qu'est-ce que tu vois", "décris cette image", "qu'est-ce qu'il y a dans cette image",
+    "explique cette image", "analyse cette image".
+    CRITICAL DISTINCTION: "what do you see in this image" = image_query → rag (about content).
+    "did you receive the image / can you access the file" = converse_meta → direct (about file receipt).
+    Set primary_intent="image_query", suggested_route="rag".
 - rag: ANY question about document content — a specific fact, a section, a value, a person, a location, a date, what something says, what something means in context of the document, how something works according to the document. This is the DEFAULT route for all document questions.
 - iterative_rag: questions that explicitly require looking across MULTIPLE different documents simultaneously — comparisons, differences, aggregations across files. Signals: "compare", "vs", "difference between", "across all files", "between the two documents". Do NOT use for questions that can be answered from one document.
 - transform: full document translation or complete rewrite/reformat (user wants the whole doc in another form)
@@ -131,7 +141,8 @@ DOC SCOPE RULES (for the "doc_scope" field):
 
 CRITICAL OVERRIDE RULES:
 1. Any query about what the AI just said/did → direct (is_followup=true, followup_type=modify or repeat)
-2. Any query asking IF the AI can see/read/access a file → direct with primary_intent=converse_meta. NEVER rag.
+2. "Did you get/can you access/is the file there" → direct with primary_intent=converse_meta. NEVER rag.
+   BUT: "What do you see in this image / describe the image / what is in the picture" → rag with primary_intent=image_query. NEVER direct.
 3. "translate" alone on a short phrase → transform; "translate [specific term]" with explanation → define
 4. When ambiguity_score > 0.6, set suggested_route to the safest option (rag for document queries, direct for conversation)
 5. Mixed-language queries are fine — detect the INTENT not the language
@@ -222,9 +233,14 @@ def classify_intent(
         if (session_has_docs
                 and result.suggested_route == "direct"
                 and result.ambiguity_score >= 0.2
-                and result.primary_intent != "converse_meta"):
+                and result.primary_intent not in ("converse_meta", "image_query")):
             result.suggested_route = "rag"
             result.reasoning += " [overridden direct→rag: session has docs and query is ambiguous]"
+
+        # image_query must always be rag — never direct
+        if result.primary_intent == "image_query" and result.suggested_route != "rag":
+            result.suggested_route = "rag"
+            result.reasoning += " [overridden to rag: image_query always routes to rag]"
 
         return result
 
@@ -328,14 +344,37 @@ def _heuristic_classify(
     """
     q = query.lower().strip()
 
-    # ── Meta-awareness: "do you see this file?", "can you read it?", etc. ──────
-    # These ask about the AI's perception — never route to rag regardless of docs.
+    # ── Image query: user asks about the visual content of an uploaded image ─────
+    # The system already described the image via vision LLM at upload time.
+    # Route to RAG so the description is retrieved and used to answer.
+    _image_content_signals = [
+        "what do you see", "what is in this image", "describe the image", "describe this image",
+        "what does this show", "what is shown", "what's in the picture", "what is in the picture",
+        "analyse this image", "analyze this image", "tell me about this image",
+        "what can you tell me about this", "look at this image", "read the text in",
+        "what do u see", "what do you see in this", "whats in this image",
+        "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة", "ماذا يوجد في",
+        "que vois-tu", "qu'est-ce que tu vois", "décris cette image",
+        "qu'est-ce qu'il y a dans", "explique cette image", "analyse cette image",
+    ]
+    # Also detect if session has image docs and query has general vision intent
+    _image_doc_in_session = any(
+        f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"))
+        for f in (uploaded_docs or [])
+    )
+    if any(s in q for s in _image_content_signals) or (
+        _image_doc_in_session and any(w in q for w in ["see", "show", "describe", "image", "picture", "photo", "screenshot", "صورة", "image", "photo"])
+    ):
+        return _make_heuristic(query, "rag", "image_query", "extract", "prose", 0.92,
+                               doc_scope=_doc_scope)
+
+    # ── Meta-awareness: "did you get the file?", "can you access it?" ───────────
+    # These ask ONLY about file receipt/access — NOT image content.
     _meta_signals = [
-        "do you see", "can you see", "can you read", "do you have access",
-        "did you get", "is the file there", "do you have the file",
-        "tu vois", "tu peux voir", "tu peux lire", "tu as reçu", "avez-vous reçu",
-        "peux-tu voir", "peux-tu lire", "est-ce que tu vois", "est-ce que tu as",
-        "هل ترى", "هل يمكنك رؤية", "هل تستطيع قراءة", "هل وصلك",
+        "did you get", "is the file there", "do you have the file", "do you have access",
+        "can you access", "did you receive", "is it uploaded", "did it upload",
+        "tu as reçu", "avez-vous reçu", "est-ce que tu as reçu", "tu l'as reçu",
+        "هل وصلك", "هل لديك الملف", "هل استلمت",
     ]
     if any(s in q for s in _meta_signals):
         return _make_heuristic(query, "direct", "converse_meta", "converse", "prose", 0.90,

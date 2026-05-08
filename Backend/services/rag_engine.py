@@ -1117,6 +1117,30 @@ Now generate for: "{q}" """
 
         print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
 
+        # ── Pre-router: image query guard ────────────────────────────────────
+        # If session has image documents and query is clearly about visual content,
+        # route straight to rag without spending tokens on the router LLM.
+        _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+        _session_has_images = any(
+            os.path.splitext(d.get("filename", ""))[1].lower() in _image_exts
+            for d in all_docs
+        )
+        _image_content_signals = [
+            "what do you see", "what do u see", "what is in this image", "whats in this image",
+            "describe the image", "describe this image", "what does this show",
+            "what is shown", "what's in the picture", "analyse this image", "analyze this image",
+            "tell me about this image", "look at this image", "read the text in",
+            "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة",
+            "que vois-tu", "qu'est-ce que tu vois", "décris cette image",
+        ]
+        if _session_has_images and (
+            any(s in _q for s in _image_content_signals) or
+            (any(w in _q for w in ["image", "picture", "photo", "screenshot", "صورة"]) and
+             any(w in _q for w in ["see", "show", "describe", "tell", "what", "analyse", "analyze", "explain"]))
+        ):
+            print("rag (image-query guard)")
+            return {**state, "route": "rag"}
+
         # ── Pre-router: code generation guard ────────────────────────────────
         # Catches "write/make/give me code/function/script/algorithm for X"
         # before any LLM call — these have zero ambiguity and were being
@@ -1456,7 +1480,11 @@ Reply with ONE word only — the route name."""
                 doc_status_note = (
                     "\n\nIMPORTANT: The user HAS already uploaded documents to this chat session. "
                     "If the action log shows a previous failed document search, that happened "
-                    "before the upload — documents ARE now available in this session."
+                    "before the upload — documents ARE now available in this session. "
+                    "If the user uploaded an IMAGE file: the system ran a vision LLM on it at upload time "
+                    "and stored a full visual description in the vector store. You can answer questions "
+                    "about what is in the image — you don't need to say you cannot see images. "
+                    "The vision description was already extracted and is searchable."
                 )
             else:
                 doc_status_note = (
