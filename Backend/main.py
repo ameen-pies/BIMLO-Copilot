@@ -1809,6 +1809,7 @@ async def get_image_document(
     raise HTTPException(status_code=404, detail="Image bytes not available (server may have restarted)")
 
 
+@app.get("/api/news/meta")
 async def news_meta():
     """
     Returns the cache manifest: total_pages, run_at, next_run_at, status.
@@ -1888,6 +1889,21 @@ async def news_refresh(background_tasks: BackgroundTasks):
         return {"status": "already_running"}
     background_tasks.add_task(run_news_pipeline, True)
     return {"status": "accepted", "message": "Force refresh triggered."}
+
+
+@app.get("/api/news/soft-refresh")
+async def news_soft_refresh():
+    """
+    Returns the current meta without triggering a new pipeline run.
+    Available to ALL users. Lets the client know fresh articles are in cache
+    so the frontend can reset and reload from page 0.
+    """
+    if not _news_pipeline_available:
+        raise HTTPException(503, "News pipeline not available.")
+    meta = get_meta()
+    if meta is None:
+        raise HTTPException(503, "No news cache available yet.")
+    return meta
 
 
 @app.get("/health")
@@ -2043,13 +2059,13 @@ async def startup_event():
             _scheduler.add_job(
                 run_news_pipeline,
                 trigger="interval",
-                days=int(_os.getenv("NEWS_CYCLE_DAYS", "4")),
-                id="news_pipeline_4day",
+                days=int(_os.getenv("NEWS_CYCLE_DAYS", "1")),
+                id="news_pipeline_daily",
                 replace_existing=True,
             )
             _scheduler.start()
 
-            cycle_days = int(_os.getenv("NEWS_CYCLE_DAYS", "4"))
+            cycle_days = int(_os.getenv("NEWS_CYCLE_DAYS", "1"))
             print(f"⏰ News scheduler: every {cycle_days} days (APScheduler)")
 
             # If no cache exists yet, trigger the first run immediately in background

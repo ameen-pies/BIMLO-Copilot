@@ -65,12 +65,19 @@ function getSize(index: number): CardSize {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function timeAgo(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m    = Math.floor(diff / 60000);
+  if (!iso) return "recently";
+  const ts = new Date(iso).getTime();
+  if (isNaN(ts)) return "recently";
+  const diff = Date.now() - ts;
+  if (diff < 0) return "just now";
+  const m = Math.floor(diff / 60000);
+  if (m < 1)  return "just now";
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  const d = Math.floor(h / 24);
+  if (d <= 7) return `${d}d ago`;
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 function normalize(item: any) {
@@ -80,7 +87,7 @@ function normalize(item: any) {
     imageUrl:    item.image_url    ?? item.imageUrl    ?? null,
     aiImpact:    item.ai_impact    ?? item.aiImpact    ?? "",
     sourceUrl:   item.source_url   ?? item.sourceUrl   ?? "#",
-    publishedAt: item.published_at ?? item.publishedAt ?? new Date().toISOString(),
+    publishedAt: item.published_at ?? item.publishedAt ?? "",
   };
 }
 
@@ -289,7 +296,10 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
   const meta  = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href  = item.articleUrl && item.articleUrl !== "#" ? item.articleUrl : item.sourceUrl;
   const [imgError, setImgError] = useState(false);
-  const hasImage    = item.imageUrl && !imgError;
+  // Clearbit logos should be displayed as a small centred badge, not a cover photo
+  const isClearbit  = !!(item.imageUrl && item.imageUrl.includes("logo.clearbit.com"));
+  const hasImage    = item.imageUrl && !imgError && !isClearbit;
+  const hasLogo     = item.imageUrl && !imgError && isClearbit;
   const hasAiImpact = !!item.aiImpact;
 
   // Collapse wide/featured spans when chat pushes grid to 3 cols to avoid overflow
@@ -349,19 +359,34 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", transition: "transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)", transformOrigin: "center center" }}
           />
         : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"], display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <img
-              src="/favicon.svg"
-              alt=""
-              style={{
-                width:  isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
-                height: isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
-                objectFit: "contain",
-                opacity: 0.18,
-                filter: "brightness(0) invert(1)",
-                userSelect: "none",
-                pointerEvents: "none",
-              }}
-            />
+            {hasLogo
+              ? <img
+                  src={item.imageUrl} alt=""
+                  onError={() => setImgError(true)}
+                  style={{
+                    width:  isFeatured ? 80 : isTall ? 64 : isWide ? 60 : 48,
+                    height: isFeatured ? 80 : isTall ? 64 : isWide ? 60 : 48,
+                    objectFit: "contain",
+                    opacity: 0.72,
+                    borderRadius: 12,
+                    filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.5))",
+                    userSelect: "none",
+                  }}
+                />
+              : <img
+                  src="/favicon.svg"
+                  alt=""
+                  style={{
+                    width:  isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
+                    height: isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
+                    objectFit: "contain",
+                    opacity: 0.18,
+                    filter: "brightness(0) invert(1)",
+                    userSelect: "none",
+                    pointerEvents: "none",
+                  }}
+                />
+            }
           </div>
       }
 
@@ -1344,7 +1369,19 @@ const NewsPage = () => {
     finally { setIsInitialLoading(false); }
   }, [fetchPage]);
 
+  // Soft refresh: resets the view and reloads from the already-built cache.
+  // Available to ALL users. Does NOT trigger a new pipeline run.
   const handleRefresh = useCallback(async () => {
+    if (isRefreshing || fetchingMore) return;
+    setIsRefreshing(true);
+    try {
+      await resetAndReload();
+    } catch (e) { console.error("Refresh error:", e); }
+    finally { setIsRefreshing(false); }
+  }, [isRefreshing, fetchingMore, resetAndReload]);
+
+  // Admin-only: trigger a full pipeline re-fetch of fresh news from the web
+  const handleAdminForceRefresh = useCallback(async () => {
     if (isRefreshing || fetchingMore) return;
     setIsRefreshing(true);
     try {
@@ -1356,7 +1393,7 @@ const NewsPage = () => {
           if (!data.running) { clearInterval(poll); setIsRefreshing(false); await resetAndReload(); }
         } catch (_) {}
       }, 5000);
-    } catch (e) { console.error("Refresh trigger error:", e); setIsRefreshing(false); }
+    } catch (e) { console.error("Force refresh trigger error:", e); setIsRefreshing(false); }
   }, [isRefreshing, fetchingMore, resetAndReload]);
 
   const filtered = filter === "All" ? allArticles : allArticles.filter(a => a.category === filter);
@@ -1378,7 +1415,7 @@ const NewsPage = () => {
     if (visibleCount < filtered.length) { setVisibleCount(c => c + PAGE_SIZE); return; }
     if (!hasMore) return;
     const nextPage = currentPage + 1;
-    if (nextPage >= totalPages) { setHasMore(false); return; }
+    if (totalPages > 0 && nextPage >= totalPages) { setHasMore(false); return; }
     loadMoreGuard.current = true; setFetchingMore(true);
     try { const ok = await fetchPage(nextPage); if (ok) setVisibleCount(c => c + PAGE_SIZE); }
     finally { setFetchingMore(false); loadMoreGuard.current = false; }
@@ -1536,9 +1573,14 @@ const NewsPage = () => {
             )}
           </button>
 
+          {/* Soft refresh — all users: reset view from cached data */}
+          <button onClick={handleRefresh} disabled={isRefreshing || fetchingMore} title="Reload articles from cache" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#33333388" : "#cccccc88"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: theme === "dark" ? "rgba(255,255,255,0.5)" : "rgba(0,0,0,0.5)", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
+            <RefreshCw size={15} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
+          </button>
+          {/* Force refresh — admin only: triggers full pipeline re-fetch */}
           {currentUser?.role === "admin" && (
-            <button onClick={handleRefresh} disabled={isRefreshing || fetchingMore} title="Refresh news (admin only)" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#7c3aed55" : "#7c3aed44"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: "#7c3aed", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
-              <RefreshCw size={16} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
+            <button onClick={handleAdminForceRefresh} disabled={isRefreshing || fetchingMore} title="Force pipeline refresh (admin)" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#7c3aed55" : "#7c3aed44"}`, cursor: isRefreshing || fetchingMore ? "not-allowed" : "pointer", transition: "all 0.15s", color: "#7c3aed", opacity: isRefreshing || fetchingMore ? 0.5 : 1 }}>
+              <RefreshCcw size={15} style={{ animation: isRefreshing ? "spin 0.8s linear infinite" : "none" }} />
             </button>
           )}
           <button onClick={toggleTheme} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, background: theme === "dark" ? "#1a1a1a" : "#e8e8e8", border: `1px solid ${theme === "dark" ? "#333" : "#ddd"}`, cursor: "pointer", transition: "all 0.15s", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)" }} title="Toggle theme">
@@ -1559,7 +1601,7 @@ const NewsPage = () => {
       {isRefreshing && (
         <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", fontSize: "0.68rem", fontWeight: 500, marginBottom: "0.6rem", color: theme === "dark" ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.38)" }}>
           <Loader2 size={11} style={{ animation: "spin 1s linear infinite", flexShrink: 0 }} />
-          Running Industry Analyst Agent… this takes a few minutes
+          Reloading articles…
         </div>
       )}
 

@@ -53,8 +53,8 @@ logger = logging.getLogger("news_pipeline")
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 CACHE_DIR     = os.getenv("NEWS_CACHE_DIR", os.path.join("data", "news_cache"))
-PAGE_SIZE     = int(os.getenv("NEWS_PAGE_SIZE",  "10"))
-CYCLE_DAYS    = int(os.getenv("NEWS_CYCLE_DAYS", "4"))
+PAGE_SIZE     = int(os.getenv("NEWS_PAGE_SIZE",  "20"))   # 20 per page → more articles per scroll
+CYCLE_DAYS    = int(os.getenv("NEWS_CYCLE_DAYS", "4"))    # run every 4 days — matches article expiry window
 MAX_SEEN_URLS = 2000   # prune seen_urls.json after this many entries
 
 _BUILD_DIR = CACHE_DIR + "_building"
@@ -107,7 +107,6 @@ def _news_llm(
     llm_client.py is never imported.
     """
     import httpx
-    import time
 
     if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
         raise RuntimeError(
@@ -123,60 +122,51 @@ def _news_llm(
     if system_prompt:
         payload["systemPrompt"] = system_prompt
 
-    last_error: str = ""
-    for attempt in range(3):
-        try:
-            resp = httpx.post(
-                f"{_CF_NEWS_URL}/",
-                headers={
-                    "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
-                    "Content-Type":  "application/json",
-                },
-                json=payload,
-                timeout=30.0,
-            )
-            resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{_CF_NEWS_URL}/",
+            headers={
+                "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+                "Content-Type":  "application/json",
+            },
+            json=payload,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
 
-            body = resp.json()
+        body = resp.json()
 
-            # CF Workers AI binding can return the text under several keys
-            # or even as a nested dict — walk all known paths.
+        # CF Workers AI binding can return the text under several keys
+        # or even as a nested dict — walk all known paths.
+        raw_response = (
+            body.get("response")
+            or body.get("result")
+            or body.get("text")
+            or body.get("content")
+            or body.get("message")
+            or ""
+        )
+        if isinstance(raw_response, dict):
             raw_response = (
-                body.get("response")
-                or body.get("result")
-                or body.get("text")
-                or body.get("content")
-                or body.get("message")
+                raw_response.get("response")
+                or raw_response.get("text")
+                or raw_response.get("content")
+                or raw_response.get("message")
                 or ""
             )
-            if isinstance(raw_response, dict):
-                raw_response = (
-                    raw_response.get("response")
-                    or raw_response.get("text")
-                    or raw_response.get("content")
-                    or raw_response.get("message")
-                    or ""
-                )
-            text = str(raw_response).strip()
-            if text:
-                return text
+        text = str(raw_response).strip()
+        if text:
+            return text
 
-            last_error = "News worker returned an empty response"
-            logger.warning(
-                f"  _news_llm: empty response on attempt {attempt + 1}/3 — "
-                f"full body keys: {list(body.keys())}"
-            )
-        except httpx.HTTPStatusError as e:
-            last_error = f"HTTP {e.response.status_code}: {e.response.text[:120]}"
-            logger.warning(f"  _news_llm: {last_error} (attempt {attempt + 1}/3)")
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"  _news_llm: {last_error} (attempt {attempt + 1}/3)")
-
-        if attempt < 2:
-            time.sleep(1.5 * (attempt + 1))   # 1.5s, then 3s back-off
-
-    raise RuntimeError(f"News worker failed after 3 attempts: {last_error}")
+        raise RuntimeError(
+            f"News worker returned an empty response — body keys: {list(body.keys())}"
+        )
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"HTTP {e.response.status_code}: {e.response.text[:120]}") from e
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
 
 
 def _news_llm_available() -> bool:
@@ -248,6 +238,15 @@ def _save_seen_set(seen: dict) -> None:
 
 MAX_ARTICLE_AGE_DAYS = int(os.getenv("NEWS_MAX_AGE_DAYS", "4"))   # 4 days default
 
+# ── NOTE on seen_urls / cross-run dedup ────────────────────────────────────────
+# Cross-run URL deduplication is intentionally disabled.
+# When the pipeline runs daily and articles expire after 4 days, keeping a
+# persistent seen_urls.json caused the dedup node to reject ALL articles on
+# subsequent runs (they were already seen from prior runs). The result was an
+# empty cache. Within-run dedup in _dedup_node is sufficient to prevent
+# duplicates from appearing in the same batch.
+# ──────────────────────────────────────────────────────────────────────────────
+
 
 def _age_filter_node(state: PipelineState) -> PipelineState:
     """
@@ -268,7 +267,7 @@ def _age_filter_node(state: PipelineState) -> PipelineState:
     for art in raw:
         pub = art.get("published_at", "")
         if not pub:
-            fresh.append(art)   # no date → keep (benefit of the doubt)
+            stale.append(art)   # no date → drop (can't verify recency)
             continue
         try:
             # Handle ISO strings with or without trailing 'Z' / timezone offset
@@ -280,7 +279,7 @@ def _age_filter_node(state: PipelineState) -> PipelineState:
             else:
                 stale.append(art)
         except (ValueError, AttributeError):
-            fresh.append(art)   # unparseable date → keep
+            stale.append(art)   # unparseable date → drop
 
     removed = len(stale)
     if removed:
@@ -292,12 +291,59 @@ def _age_filter_node(state: PipelineState) -> PipelineState:
     return {**state, "raw_articles": fresh}
 
 
+def _generate_llm_queries() -> list:
+    """
+    Ask the news LLM worker to generate fresh, timely search queries based on
+    today's date. Returns a list of query dicts or [] if worker unavailable.
+    These are mixed in with the static queries for maximum coverage.
+    """
+    if not _news_llm_available():
+        return []
+
+    from datetime import date
+    today = date.today().strftime("%B %d, %Y")
+
+    prompt = (
+        f"Today is {today}. Generate 12 highly specific Google News search queries "
+        "to find the most recent (last 4 days) industry news relevant to: "
+        "5G deployment, fiber broadband, telecom regulation, BIM/construction tech, "
+        "digital twins, and AI in infrastructure. "
+        "Vary the queries — mix company names, technology terms, regions, and policy angles. "
+        "Return ONLY a JSON array of objects like: "
+        '[{"query": "...", "category": "5G"}, ...] '
+        "Valid categories: 5G, Fiber, Regulation, Construction, BIM, Digital Twin, AI Construction, General. "
+        "No markdown, no preamble, just the JSON array."
+    )
+    try:
+        raw = _news_llm(prompt=prompt, max_tokens=600, temperature=0.7)
+        raw = re.sub(r"```json|```", "", raw).strip()
+        # Extract JSON array
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not m:
+            return []
+        queries = json.loads(m.group())
+        valid = [
+            q for q in queries
+            if isinstance(q, dict) and q.get("query") and q.get("category")
+        ]
+        logger.info(f"   LLM generated {len(valid)} dynamic queries")
+        return valid
+    except Exception as e:
+        logger.warning(f"   LLM query generation failed: {e}")
+        return []
+
+
 def _search_node(state: PipelineState) -> PipelineState:
-    """Fetch raw articles from ALL query buckets (PAGE_0 + all EXTENDED pages)."""
+    """Fetch raw articles from ALL query buckets + LLM-generated dynamic queries."""
     from news_agent import fetch_raw_articles, PAGE_0_QUERIES, EXTENDED_QUERY_PAGES
 
-    all_queries = PAGE_0_QUERIES + [q for page in EXTENDED_QUERY_PAGES for q in page]
-    logger.info(f"🔍 search_node: running {len(all_queries)} queries…")
+    static_queries = PAGE_0_QUERIES + [q for page in EXTENDED_QUERY_PAGES for q in page]
+
+    # Add LLM-generated queries for fresh, timely coverage
+    llm_queries = _generate_llm_queries()
+    all_queries = static_queries + llm_queries
+
+    logger.info(f"🔍 search_node: {len(static_queries)} static + {len(llm_queries)} LLM queries = {len(all_queries)} total")
 
     try:
         raw = fetch_raw_articles(all_queries)
@@ -413,118 +459,43 @@ def _filter_node(state: PipelineState) -> PipelineState:
     if kw_removed:
         logger.info(f"   filter_node: keyword pre-filter removed {kw_removed} articles")
 
-    # ── Layer 2: LLM batch moderation via news worker ──────────────────────────
-    if not _news_llm_available() or not pre_filtered:
-        logger.info(
-            f"   filter_node: news worker {'unavailable' if not _news_llm_available() else 'skip (empty)'}"
-            f" — keyword filter only, {len(pre_filtered)} articles kept"
-        )
-        return {**state, "enriched": pre_filtered}
-
-    BATCH    = 15
-    accepted = []
-
-    for batch_start in range(0, len(pre_filtered), BATCH):
-        batch = pre_filtered[batch_start: batch_start + BATCH]
-
-        lines = "\n".join(
-            f"{i+1}. [{a.get('category','')}] {a.get('title','')} | {a.get('source','')}"
-            for i, a in enumerate(batch)
-        )
-
-        prompt = (
-            "You are a strict content moderator for a professional telecom and construction industry news platform.\n"
-            "Review the articles below. For each, reply with only its number if it should be REJECTED.\n"
-            "Reject articles that are: NSFW/adult/sexual, gambling, celebrity gossip, "
-            "tabloid clickbait, crypto scams, political opinion pieces unrelated to telecom/construction, "
-            "or completely off-topic from: 5G, fiber, broadband, telecom regulation, construction, "
-            "BIM, digital twins, AI in construction/telecom.\n"
-            "If an article is borderline but industry-relevant, KEEP it.\n"
-            "Reply with ONLY a comma-separated list of rejected numbers, or 'none' if all are fine.\n\n"
-            f"Articles:\n{lines}"
-        )
-
-        try:
-            raw_resp = _news_llm(
-                prompt=prompt,
-                system_prompt="You are a content moderation assistant. Be strict but fair.",
-                max_tokens=100,
-                temperature=0.0,
-            )
-            raw_resp = raw_resp.strip().lower()
-
-            if raw_resp == "none" or not raw_resp:
-                rejected_indices: set = set()
-            else:
-                rejected_indices = set()
-                for part in re.split(r"[,\s]+", raw_resp):
-                    part = part.strip().rstrip(".")
-                    if part.isdigit():
-                        rejected_indices.add(int(part) - 1)   # convert to 0-based
-
-            kept    = [a for i, a in enumerate(batch) if i not in rejected_indices]
-            removed = len(batch) - len(kept)
-            if removed:
-                logger.info(
-                    f"   filter_node: news worker rejected {removed} articles "
-                    f"in batch starting at {batch_start}"
-                )
-            accepted.extend(kept)
-
-        except Exception as e:
-            logger.warning(f"   filter_node: news worker batch failed ({e}) — keeping batch as-is")
-            accepted.extend(batch)
-
-    total_removed = len(items) - len(accepted)
-    logger.info(f"   filter_node: {len(items)} → {len(accepted)} articles ({total_removed} total removed)")
-    return {**state, "enriched": accepted}
+    # ── Layer 2: LLM batch moderation removed ─────────────────────────────────
+    # Articles are already scored and rejected by the judge in _enrich_node
+    # (JUDGE_SCORE_THRESHOLD). Running a second LLM filter on top was culling
+    # too many borderline-but-valid industry articles. Keyword blocklist above
+    # is sufficient for hard content safety.
+    total_removed = len(items) - len(pre_filtered)
+    logger.info(f"   filter_node: {len(items)} → {len(pre_filtered)} articles ({total_removed} removed by keyword filter)")
+    return {**state, "enriched": pre_filtered}
 
 
 def _dedup_node(state: PipelineState) -> PipelineState:
     """
-    Three-layer dedup:
-      1. Within-run URL dedup (across all queries in this cycle)
-      2. Cross-run persistent dedup (seen_urls.json from previous cycles)
-      3. Title fingerprint dedup (catches rephrased headlines)
+    Within-run dedup only (URL + title fingerprint).
+    Cross-run persistent dedup via seen_urls.json is intentionally disabled:
+    when the pipeline runs daily and articles expire after 4 days, cross-run
+    dedup caused ALL articles to be rejected on subsequent runs (they were
+    already marked seen). Within-run dedup is sufficient.
     """
     items = state["enriched"]
     if not items:
         return {**state, "deduped": []}
 
-    seen         = _load_seen_set()
-    seen_url_set = set(seen["urls"])
-    seen_fp_set  = set(seen["fingerprints"])
-    if "timestamps" not in seen:
-        seen["timestamps"] = {}
-    now_iso = datetime.utcnow().isoformat()
-
-    deduped         = []
-    new_urls        = []
-    new_fps         = []
-    within_run_urls = set()   # handles same article from two different queries
+    seen_url_set = set()
+    seen_fp_set  = set()
+    deduped      = []
 
     for art in items:
         url = art.get("article_url", "")
         fp  = _fingerprint(art.get("title", ""))
-
-        if url in seen_url_set or fp in seen_fp_set or url in within_run_urls:
+        if url in seen_url_set or fp in seen_fp_set:
             continue
-
         deduped.append(art)
-        within_run_urls.add(url)
-        new_urls.append(url)
-        new_fps.append(fp)
-
-    seen["urls"]         += new_urls
-    seen["fingerprints"] += new_fps
-    for u in new_urls:
-        seen["timestamps"][u] = now_iso
-    for f in new_fps:
-        seen["timestamps"][f] = now_iso
-    _save_seen_set(seen)
+        seen_url_set.add(url)
+        seen_fp_set.add(fp)
 
     logger.info(
-        f"   dedup_node: {len(items)} → {len(deduped)} after dedup "
+        f"   dedup_node: {len(items)} → {len(deduped)} after within-run dedup "
         f"({len(items) - len(deduped)} removed)"
     )
     return {**state, "deduped": deduped}
@@ -609,7 +580,103 @@ def _persist_node(state: PipelineState) -> PipelineState:
     shutil.move(_BUILD_DIR, CACHE_DIR)
 
     logger.info(f"✅ persist_node: cache live — {len(pages)} pages, run_id={run_id}")
+
+    # ── Background image resolution pass ───────────────────────────────────────
+    # After the cache goes live, resolve missing thumbnails in the background
+    # so the pipeline isn't blocked. Articles with images already set are skipped.
+    threading.Thread(
+        target=_resolve_missing_images_bg,
+        args=(pages,),
+        daemon=True,
+        name="img-resolver",
+    ).start()
+
     return state
+
+
+# ── Background image resolution ────────────────────────────────────────────────
+
+def _patch_article_image_in_cache(article_id: str, image_url: str) -> None:
+    """
+    Patch a single article's image_url in-place inside the live cache pages.
+    Walks page_0.json … page_N.json and rewrites the file atomically when a
+    matching article id is found.
+    """
+    try:
+        meta = _read_json(os.path.join(CACHE_DIR, "meta.json"), None)
+        if not meta:
+            return
+        total_pages = meta.get("total_pages", 0)
+        for page_num in range(total_pages):
+            path = os.path.join(CACHE_DIR, f"page_{page_num}.json")
+            page_data = _read_json(path, None)
+            if not page_data:
+                continue
+            items = page_data.get("items", [])
+            changed = False
+            for item in items:
+                if item.get("id") == article_id and not item.get("image_url"):
+                    item["image_url"] = image_url
+                    changed = True
+                    break
+            if changed:
+                _write_atomic(path, page_data)
+                logger.debug(f"[img-resolver] patched image for {article_id}")
+                return
+    except Exception as e:
+        logger.debug(f"[img-resolver] patch failed for {article_id}: {e}")
+
+
+def _resolve_missing_images_bg(pages: list) -> None:
+    """
+    Background pass that resolves image_url for any article that came through
+    without one. Runs after persist_node so it never blocks the pipeline.
+
+    Uses news_agent._fetch_og_image and _decode_gnews_url — already imported
+    at the time this runs. Concurrency capped at 4 to stay polite.
+    """
+    try:
+        from news_agent import _fetch_og_image, _decode_gnews_url
+    except ImportError:
+        logger.warning("[img-resolver] news_agent not importable — skipping background pass")
+        return
+
+    # Flatten all pages into a single list of articles missing images
+    no_img = []
+    for page in pages:
+        for art in page:
+            if not art.get("image_url"):
+                no_img.append(art)
+
+    if not no_img:
+        logger.info("[img-resolver] all articles already have images — nothing to do")
+        return
+
+    logger.info(f"[img-resolver] resolving images for {len(no_img)} articles in background…")
+
+    def _resolve_one(art: dict):
+        url        = art.get("article_url", "")
+        source_url = art.get("source_url", "")
+        if not url:
+            return
+        real_url = _decode_gnews_url(url) if "news.google.com" in url else url
+        img = _fetch_og_image(real_url, source_domain=source_url, timeout=8)
+        if img:
+            art["image_url"] = img
+            _patch_article_image_in_cache(art["id"], img)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_resolve_one, art) for art in no_img]
+        resolved = 0
+        for f in as_completed(futures):
+            try:
+                f.result()
+                resolved += 1
+            except Exception as e:
+                logger.debug(f"[img-resolver] worker error: {e}")
+
+    patched = sum(1 for a in no_img if a.get("image_url"))
+    logger.info(f"[img-resolver] done — {patched}/{len(no_img)} images resolved in background")
 
 
 # ── LangGraph pipeline ─────────────────────────────────────────────────────────

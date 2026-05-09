@@ -122,8 +122,8 @@ EXTENDED_QUERY_PAGES = [
     ],
 ]
 
-MAX_RESULTS_PER_QUERY = 10   # was 5 — fetch more per query for greater variety
-CACHE_TTL_HOURS       = 4    # was 6 — expire sooner so refreshes feel fresh
+MAX_RESULTS_PER_QUERY = 15   # fetch more per query for greater variety
+CACHE_TTL_HOURS       = 4    # expire sooner so refreshes feel fresh
 JUDGE_SCORE_THRESHOLD = 0.28
 LLM_WORKERS           = 8   # concurrent judge+enrich calls
 
@@ -226,6 +226,37 @@ import urllib.parse
 
 _GNEWS_RSS_BASE = "https://news.google.com/rss/search"
 
+
+def _decode_gnews_url(gnews_url: str) -> str:
+    """
+    Decode a news.google.com/rss/articles/... redirect URL to the real
+    publisher article URL — WITHOUT making any HTTP request.
+
+    Google News encodes the destination URL as a base64url segment in the
+    path. We decode it and extract the UTF-8 URL that starts at byte 4
+    (after a 4-byte length/varint header). Falls back to the original URL
+    if decoding fails for any reason.
+    """
+    if "news.google.com" not in gnews_url:
+        return gnews_url
+    try:
+        import base64
+        m = re.search(r'/articles/([A-Za-z0-9_-]+)', gnews_url)
+        if not m:
+            return gnews_url
+        b64 = m.group(1)
+        # Pad to a multiple of 4 for standard base64 decoding
+        b64 += "=" * (-len(b64) % 4)
+        data = base64.urlsafe_b64decode(b64)
+        # Real URL is a null-terminated UTF-8 string starting at byte offset 4
+        url = data[4:].decode("utf-8", errors="ignore").split("\x00")[0].strip()
+        if url.startswith("http"):
+            logger.debug(f"Decoded GNews URL: {url[:80]}")
+            return url
+    except Exception as e:
+        logger.debug(f"GNews URL decode failed for {gnews_url[:60]}: {e}")
+    return gnews_url
+
 _CATEGORY_RSS: dict = {
     "5G": [
         "https://feeds.feedburner.com/TelecomRamblings",
@@ -280,31 +311,53 @@ def _extract_rss_image(entry) -> Optional[str]:
     image convention (tried in order of reliability):
       1. <media:content> / <media:thumbnail>  — most trade feeds
       2. <enclosure>                           — podcast-style but used by some news sites
-      3. og:image in the entry HTML summary   — Google News aggregator entries
+      3. <img> inside the HTML summary         — Google News lh3.googleusercontent.com thumbnails
+      4. <img> inside content blocks           — full-content RSS feeds
     Returns None if nothing is found.
     """
-    # 1. media:content / media:thumbnail (feedparser exposes as .media_content / .media_thumbnail)
+    def _ok(url: str) -> bool:
+        """Reject data URIs, empty strings, and sub-10px tracking pixels."""
+        if not url or url.startswith("data:"):
+            return False
+        # Block only confirmed tiny pixels (w=1 or h=1 style params)
+        if re.search(r'[?&][wh]=\d{1,2}\b', url):
+            return False
+        return True
+
+    # 1. media:content / media:thumbnail
     for attr in ("media_thumbnail", "media_content"):
         media = getattr(entry, attr, None) or entry.get(attr)
-        if media and isinstance(media, list) and media[0].get("url"):
-            return media[0]["url"]
+        if media and isinstance(media, list):
+            for m in media:
+                u = m.get("url", "")
+                if _ok(u):
+                    return u
 
-    # 2. <enclosure> tags (feedparser exposes as .enclosures)
+    # 2. <enclosure> image tags
     for enc in getattr(entry, "enclosures", []) or entry.get("enclosures", []):
-        if enc.get("type", "").startswith("image/") and enc.get("href"):
+        if enc.get("type", "").startswith("image/") and _ok(enc.get("href", "")):
             return enc["href"]
 
-    # 3. og:image embedded inside the HTML summary/content block
-    #    Google News wraps the thumbnail as <img src="..."> inside the <description>
-    for field in ("summary", ):
-        html = entry.get(field, "") or ""
-        if html:
-            m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            if m:
-                candidate = m.group(1)
-                # Skip tiny tracking pixels (< 10px usually have w= or h= params)
-                if not re.search(r'[?&][wh]=\d{1,2}\b', candidate):
-                    return candidate
+    # 3 & 4. <img> inside summary and content HTML blocks
+    #   Google News embeds lh3.googleusercontent.com/proxy/... thumbnails in the
+    #   description — these are real article thumbnails pre-cached by Google.
+    img_pat = re.compile(
+        r'<img[^>]+(?:src|data-src)[^>]*=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    )
+    html_fields: list[str] = []
+    if entry.get("summary"):
+        html_fields.append(entry.summary)
+    for c in (entry.get("content") or []):
+        v = c.get("value", "") if isinstance(c, dict) else ""
+        if v:
+            html_fields.append(v)
+
+    for html in html_fields:
+        for m in img_pat.finditer(html):
+            candidate = m.group(1).strip()
+            if _ok(candidate):
+                return candidate
 
     return None
 
@@ -314,69 +367,198 @@ _og_cache: dict = {}
 _og_cache_lock = threading.Lock()
 
 
-def _fetch_og_image(article_url: str, timeout: int = 6) -> Optional[str]:
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Cache-Control": "max-age=0",
+}
+
+
+def _fetch_og_image(article_url: str, source_domain: str = "", timeout: int = 6) -> Optional[str]:
     """
-    Fetch just the <head> of an article page and extract og:image.
-    Uses a streaming GET so we stop downloading as soon as </head> appears.
-    Results are cached in-process to avoid redundant requests on re-runs.
-    Returns None on any error or if no og:image is found.
+    Multi-strategy image extractor — tries several methods in order:
+      1. og:image meta tag  (both attribute orders)
+      2. twitter:image meta tag
+      3. itemprop="image" / link[rel=image_src]
+      4. First sizeable <img> in the article body (src / data-src / data-lazy-src)
+      5. Clearbit logo for the source domain — guaranteed fallback, never None
+         if a source_domain is provided.
+
+    Uses full browser headers (including Sec-Fetch-*) to pass bot-detection
+    on most news sites. Streams only up to 48 KB so we never download the page.
+    Results are cached in-process to avoid re-fetching the same URL.
     """
     if not article_url or article_url.startswith("#"):
-        return None
+        return _clearbit_logo(source_domain)
 
     with _og_cache_lock:
         if article_url in _og_cache:
-            return _og_cache[article_url]
+            cached = _og_cache[article_url]
+            return cached if cached else _clearbit_logo(source_domain)
 
+    def _is_plausible(url: str) -> bool:
+        if not url or url.startswith("data:"):
+            return False
+        low = url.lower()
+        skip = ("logo", "icon", "sprite", "avatar", "badge", "pixel",
+                "tracker", "beacon", "1x1", "spacer", "ad.", "doubleclick",
+                "googletagmanager", "analytics", "stat.", "counter.")
+        if any(p in low for p in skip):
+            return False
+        # Accept if it has an image extension or a CDN/media path
+        if re.search(r'\.(jpg|jpeg|png|webp|gif|avif)(\?|$|#)', low):
+            return True
+        if re.search(r'(images?|media|photos?|cdn|assets|thumbs?|thumb)[./]', low):
+            return True
+        # Google's lh3 proxy thumbnails — always legit
+        if "lh3.googleusercontent.com" in low:
+            return True
+        return False
+
+    result: Optional[str] = None
+
+    # ── Strategy 0: trafilatura (best success rate — handles encoding/redirects) ─
     try:
-        import requests
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (compatible; BimloBot/1.0; +https://bimlo.tech)"
-            ),
-            "Accept": "text/html",
-        }
-        # Stream response and stop as soon as we have the <head>
-        head_html = ""
-        with requests.get(article_url, headers=headers, timeout=timeout,
-                          stream=True, allow_redirects=True) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(chunk_size=4096, decode_unicode=True):
-                if isinstance(chunk, bytes):
-                    chunk = chunk.decode("utf-8", errors="ignore")
-                head_html += chunk
-                if "</head>" in head_html.lower() or len(head_html) > 32_000:
+        traf_result = _fetch_og_image_trafilatura(article_url)
+        if traf_result and _is_plausible(traf_result):
+            result = traf_result
+    except Exception as e:
+        logger.debug(f"trafilatura pass failed for {article_url[:60]}: {e}")
+
+    # ── Strategies 1-4: manual HTML streaming (fallback if trafilatura misses) ───
+    if not result:
+        try:
+            import requests
+
+            html = ""
+            with requests.get(
+                article_url,
+                headers=_BROWSER_HEADERS,
+                timeout=timeout,
+                stream=True,
+                allow_redirects=True,
+            ) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_content(chunk_size=16_384, decode_unicode=True):
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode("utf-8", errors="ignore")
+                    html += chunk
+                    if ("</head>" in html.lower() and len(html) > 4_000) or len(html) > 48_000:
+                        break
+
+            # Strategy 1 & 2: og:image / twitter:image (both attribute orderings)
+            meta_patterns = [
+                r'<meta[^>]+property=["\']og:image(?::url)?["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::url)?["\']',
+                r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']',
+            ]
+            for pat in meta_patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m and _is_plausible(m.group(1)):
+                    result = m.group(1).strip()
                     break
 
-        # og:image
-        m = re.search(
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            head_html, re.IGNORECASE
-        )
-        if not m:
-            # reversed attribute order
-            m = re.search(
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-                head_html, re.IGNORECASE
-            )
-        # twitter:image fallback
-        if not m:
-            m = re.search(
-                r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-                head_html, re.IGNORECASE
-            )
+            # Strategy 3: itemprop / link rel=image_src
+            if not result:
+                for pat in (
+                    r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)["\']',
+                    r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+                ):
+                    m = re.search(pat, html, re.IGNORECASE)
+                    if m and _is_plausible(m.group(1)):
+                        result = m.group(1).strip()
+                        break
 
-        result = m.group(1).strip() if m else None
+            # Strategy 4: first sizeable <img> inside the article body
+            if not result:
+                body_html = html
+                body_m = re.search(
+                    r'<(?:article|main|div[^>]+(?:class|id)=["\'][^"\']*(?:article|story|content|post|entry|body)[^"\']*["\'])[^>]*>(.*)',
+                    html, re.IGNORECASE | re.DOTALL,
+                )
+                if body_m:
+                    body_html = body_m.group(1)
 
-        with _og_cache_lock:
-            _og_cache[article_url] = result
-        return result
+                img_pat = re.compile(
+                    r'<img[^>]+(?:src|data-src|data-lazy-src|data-original)=["\']([^"\']+)["\']',
+                    re.IGNORECASE,
+                )
+                for img_m in img_pat.finditer(body_html):
+                    candidate = img_m.group(1).strip()
+                    if candidate.startswith("//"):
+                        candidate = "https:" + candidate
+                    elif candidate.startswith("/"):
+                        origin_m = re.match(r'(https?://[^/]+)', article_url)
+                        if origin_m:
+                            candidate = origin_m.group(1) + candidate
+                    if _is_plausible(candidate):
+                        result = candidate
+                        break
 
+        except Exception as e:
+            logger.debug(f"og:image fetch failed for {article_url[:60]}: {e}")
+
+    if result:
+        logger.debug(f"Image found for {article_url[:60]}: {result[:60]}")
+
+    with _og_cache_lock:
+        _og_cache[article_url] = result
+
+    # Strategy 5: Clearbit logo — guaranteed non-None fallback
+    return result if result else _clearbit_logo(source_domain)
+
+
+def _fetch_og_image_trafilatura(url: str) -> Optional[str]:
+    """
+    Use trafilatura (if installed) to extract og:image / twitter:image /
+    schema.org image from a real article URL. Much more robust than manual
+    regex — handles encoding, redirects, and common anti-bot patterns.
+    Returns None if trafilatura is not installed or extraction fails.
+    """
+    try:
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return None
+        meta = trafilatura.extract_metadata(downloaded)
+        if meta and getattr(meta, "image", None):
+            img = meta.image
+            if img and not img.startswith("data:"):
+                return img
+    except ImportError:
+        pass  # trafilatura not installed — fall through to regex method
     except Exception as e:
-        logger.debug(f"og:image fetch failed for {article_url}: {e}")
-        with _og_cache_lock:
-            _og_cache[article_url] = None
+        logger.debug(f"trafilatura extraction failed for {url[:60]}: {e}")
+    return None
+
+
+def _clearbit_logo(domain: str) -> Optional[str]:
+    """
+    Return a Clearbit logo URL for the given domain.
+    Free tier, no auth, reliably returns a clean branded image.
+    Returns None if no domain is supplied.
+    e.g. https://logo.clearbit.com/rcrwireless.com
+    """
+    if not domain:
         return None
+    # Strip protocol / path — keep only the bare hostname
+    host = re.sub(r'^https?://', '', domain).split("/")[0].strip()
+    if not host or "." not in host:
+        return None
+    return f"https://logo.clearbit.com/{host}"
 
 
 def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
@@ -386,7 +568,7 @@ def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
         return None
     seen_local.add(url)
 
-    published_at = datetime.utcnow().isoformat()
+    published_at = ""
     if entry.get("published_parsed"):
         try:
             import calendar
@@ -396,10 +578,20 @@ def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
         except Exception:
             pass
 
+    # For Google News RSS entries the article URL is a news.google.com redirect.
+    # feedparser exposes the real publisher domain via entry.source.href — use it
+    # for source_url so Clearbit logo lookups hit the right domain.
+    entry_source = entry.get("source") or {}
+    gnews_source_href = entry_source.get("href", "")  # e.g. "https://rcrwireless.com"
+
     parts = url.split("/")
-    source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
+    if gnews_source_href:
+        source_url = gnews_source_href.rstrip("/")
+    else:
+        source_url = "/".join(parts[:3]) if len(parts) >= 3 else url
+
     source = (
-        entry.get("source", {}).get("title")
+        entry_source.get("title")
         or (parts[2] if len(parts) >= 3 else "Unknown")
     )
     title = (entry.get("title") or "")[:200]
@@ -416,10 +608,17 @@ def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
     if not title:
         return None
 
-    # ── Image resolution: RSS media tags first, og:image fallback ─────────────
+    # ── Image resolution: RSS media tags → og:image fetch → Clearbit logo ──────
+    # Resolve Google News redirect URLs to real article URLs before fetching
+    # og:image — hitting news.google.com directly returns no usable meta tags.
+    real_url = _decode_gnews_url(url) if "news.google.com" in url else url
+
+    # Step 1: try RSS-embedded images first (fast, no HTTP request)
     image_url = _extract_rss_image(entry)
+    # Step 2: fetch og:image from the REAL article page (not the GNews redirect);
+    #         Clearbit logo is the final guaranteed fallback inside _fetch_og_image.
     if not image_url:
-        image_url = _fetch_og_image(url)
+        image_url = _fetch_og_image(real_url, source_domain=source_url)
 
     return {
         "title":        title,
@@ -434,9 +633,12 @@ def _entry_to_raw(entry, query_entry: dict, seen_local: set) -> Optional[dict]:
 
 
 def _search_gnews_rss(query_entry: dict, seen_local: set) -> List[RawArticle]:
-    """Query Google News RSS — never blocked from datacenter IPs."""
+    """Query Google News RSS with a 4-day recency filter — never blocked from datacenter IPs."""
+    # Append "when:4d" so Google News only returns articles from the last 4 days.
+    # This filters at the source and dramatically reduces stale-article noise.
+    q_with_recency = query_entry["query"] + " when:4d"
     params = urllib.parse.urlencode({
-        "q":    query_entry["query"],
+        "q":    q_with_recency,
         "hl":   "en-US",
         "gl":   "US",
         "ceid": "US:en",
@@ -541,30 +743,7 @@ def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
                     all_articles.append(art)
 
     logger.info(f"fetch_raw_articles: {len(all_articles)} total unique articles (RSS backend)")
-
-    # Drop articles older than 4 days (configurable via NEWS_MAX_AGE_DAYS env var)
-    import os as _os
-    max_age_days = int(_os.getenv("NEWS_MAX_AGE_DAYS", "4"))
-    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
-    fresh = []
-    for art in all_articles:
-        pub = art.get("published_at", "")
-        if not pub:
-            fresh.append(art)
-            continue
-        try:
-            pub_dt = datetime.fromisoformat(pub.rstrip("Z").split("+")[0])
-            if pub_dt >= cutoff:
-                fresh.append(art)
-        except (ValueError, AttributeError):
-            fresh.append(art)
-
-    if len(fresh) < len(all_articles):
-        logger.info(
-            f"fetch_raw_articles: age-filtered {len(all_articles) - len(fresh)} "
-            f"articles older than {max_age_days} days → {len(fresh)} remaining"
-        )
-    return fresh
+    return all_articles
 
 
 # ── Merged judge + enrich (one LLM call) ──────────────────────────────────────

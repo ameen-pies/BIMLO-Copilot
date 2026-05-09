@@ -212,13 +212,9 @@ def _call_news_worker(
 ) -> str:
     """
     POST a single LLM request to the dedicated Bimlo News CF Worker.
-    Retries up to 3 times on empty response (CF Workers AI occasionally returns
-    an empty body on the first attempt — a retry almost always succeeds).
     Never touches llm_client.py — completely isolated quota.
-    Raises on misconfiguration or all retries exhausted.
+    Raises on misconfiguration or worker error.
     """
-    import time
-
     if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
         raise RuntimeError(
             "CF_NEWS_URL or CF_NEWS_API_KEY is not set. "
@@ -233,61 +229,49 @@ def _call_news_worker(
     if system_prompt:
         payload["systemPrompt"] = system_prompt
 
-    last_error: str = ""
-    for attempt in range(3):
-        try:
-            resp = httpx.post(
-                f"{_CF_NEWS_URL}/",
-                headers={
-                    "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
-                    "Content-Type":  "application/json",
-                },
-                json=payload,
-                timeout=30.0,
-            )
-            resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{_CF_NEWS_URL}/",
+            headers={
+                "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+                "Content-Type":  "application/json",
+            },
+            json=payload,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
 
-            body = resp.json()
-            # CF Workers AI can nest the text under several keys
+        body = resp.json()
+        # CF Workers AI can nest the text under several keys
+        raw = (
+            body.get("response")
+            or body.get("result")
+            or body.get("text")
+            or body.get("content")
+            or body.get("message")
+            or ""
+        )
+        if isinstance(raw, dict):
             raw = (
-                body.get("response")
-                or body.get("result")
-                or body.get("text")
-                or body.get("content")
-                or body.get("message")
+                raw.get("response")
+                or raw.get("text")
+                or raw.get("content")
+                or raw.get("message")
                 or ""
             )
-            if isinstance(raw, dict):
-                raw = (
-                    raw.get("response")
-                    or raw.get("text")
-                    or raw.get("content")
-                    or raw.get("message")
-                    or ""
-                )
-            text = str(raw).strip()
-            if text:
-                return text
+        text = str(raw).strip()
+        if text:
+            return text
 
-            last_error = "News worker returned an empty response"
-            logger.warning(
-                f"[news_chat] empty response on attempt {attempt + 1}/3 "
-                f"— body keys: {list(body.keys())}"
-            )
-        except httpx.HTTPStatusError as e:
-            last_error = f"HTTP {e.response.status_code}"
-            logger.warning(f"[news_chat] {last_error} on attempt {attempt + 1}/3")
-        except httpx.TimeoutException:
-            last_error = "timeout"
-            logger.warning(f"[news_chat] timeout on attempt {attempt + 1}/3")
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f"[news_chat] error on attempt {attempt + 1}/3: {e}")
-
-        if attempt < 2:
-            time.sleep(1.5 * (attempt + 1))
-
-    raise RuntimeError(f"News worker failed after 3 attempts: {last_error}")
+        raise RuntimeError(
+            f"News worker returned an empty response — body keys: {list(body.keys())}"
+        )
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"HTTP {e.response.status_code}: {e.response.text[:120]}") from e
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
 
 
 def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str:
@@ -312,13 +296,28 @@ def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str
             temperature=0.4,
         )
     except httpx.HTTPStatusError as e:
-        logger.error(f"[news_chat] worker HTTP {e.response.status_code}: {e.response.text[:200]}")
-        return f"⚠️ News worker error ({e.response.status_code}). Please try again."
+        status = e.response.status_code
+        body   = e.response.text.lower()
+        logger.error(f"[news_chat] worker HTTP {status}: {e.response.text[:200]}")
+        # Quota / neuron exhaustion — CF Workers AI returns 500 with "neurons" in the body
+        if status in (429, 500) and ("neuron" in body or "quota" in body or "allocation" in body or "daily" in body or "limit" in body):
+            return (
+                "The news AI is taking a breather for today 😴 — "
+                "it's hit its daily limit. Check back tomorrow and it'll be ready to go! 🙂"
+            )
+        return f"⚠️ News worker error ({status}). Please try again."
     except httpx.TimeoutException:
         logger.error("[news_chat] worker timed out after 30s")
         return "⚠️ News worker timed out. Please try again."
     except RuntimeError as e:
+        err_str = str(e).lower()
         logger.error(f"[news_chat] config error: {e}")
+        # Also catch quota errors surfaced as RuntimeError (e.g. from _call_news_worker parsing)
+        if "neuron" in err_str or "quota" in err_str or "allocation" in err_str or "daily" in err_str:
+            return (
+                "The news AI is taking a breather for today 😴 — "
+                "it's hit its daily limit. Check back tomorrow and it'll be ready to go! 🙂"
+            )
         return f"⚠️ {e}"
     except Exception as e:
         logger.error(f"[news_chat] unexpected error: {e}")

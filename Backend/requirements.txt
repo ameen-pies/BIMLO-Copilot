@@ -46,6 +46,7 @@ httpx==0.26.0
 # News / web search
 feedparser>=6.0.11
 beautifulsoup4==4.12.3
+trafilatura>=1.12.0
 
 # Wikipedia enrichment
 wikipedia-api==0.6.0
