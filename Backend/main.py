@@ -360,20 +360,30 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
 
         print(f"⏳ Committing pending doc '{_cached['filename']}' ({_pending_id})…")
         try:
-            import tempfile as _tmpmod
             _ext = _cached.get('doc_type', '.txt')
-            with _tmpmod.NamedTemporaryFile(suffix=_ext, delete=False) as _tmp:
-                _tmp.write(_cached['bytes'])
-                _tmp_path = _tmp.name
-            try:
-                _chunks = doc_processor.process_document(_tmp_path)
-                for _idx, _chunk in enumerate(_chunks):
-                    if "metadata" not in _chunk:
-                        _chunk["metadata"] = {}
-                    _chunk["metadata"]["chunk_index"] = _idx
-                    _chunk["metadata"]["document_id"] = _pending_id
-            finally:
-                os.unlink(_tmp_path)
+            _is_image = _cached.get('is_image', False)
+
+            if _is_image:
+                # Images are processed via process_image_bytes (vision LLM) — no temp file needed
+                _chunks = doc_processor.process_image_bytes(_cached['bytes'], _cached['filename'])
+            else:
+                import tempfile as _tmpmod
+                with _tmpmod.NamedTemporaryFile(suffix=_ext, delete=False) as _tmp:
+                    _tmp.write(_cached['bytes'])
+                    _tmp_path = _tmp.name
+                try:
+                    _chunks = doc_processor.process_document(_tmp_path)
+                finally:
+                    os.unlink(_tmp_path)
+
+            for _idx, _chunk in enumerate(_chunks):
+                if "metadata" not in _chunk:
+                    _chunk["metadata"] = {}
+                _chunk["metadata"]["chunk_index"] = _idx
+                _chunk["metadata"]["document_id"] = _pending_id
+                if _is_image:
+                    _chunk["metadata"]["doc_type"]   = "image"
+                    _chunk["metadata"]["has_images"] = True
 
             vector_store.add_document(
                 _cached['filename'],
@@ -905,7 +915,13 @@ async def query_stream(
             }
             q.put({"type": "result", "session_id": session_id, **safe_result})
         except Exception as e:
-            q.put({"type": "error", "message": str(e)})
+            import traceback as _tb
+            _tb.print_exc()
+            # CRITICAL: always push an error event so the frontend reader gets
+            # a proper signal instead of the stream just closing silently.
+            # A silently-closing stream causes the bouncing dots to disappear
+            # with no error message shown to the user.
+            q.put({"type": "error", "message": f"Server error: {e}"})
         finally:
             q.put(DONE_SENTINEL)
 
@@ -916,11 +932,18 @@ async def query_stream(
     async def event_generator():
         loop = asyncio.get_event_loop()
         while True:
-            # Poll queue without blocking the event loop
+            # Poll queue without blocking the event loop.
+            # Use a short timeout (5s) so we can emit SSE keepalive comments
+            # that prevent Docker/nginx from closing idle connections.
             try:
-                item = await loop.run_in_executor(None, lambda: q.get(timeout=300))
+                item = await loop.run_in_executor(None, lambda: q.get(timeout=5))
             except Exception:
-                break
+                # Queue.get timed out — emit a keepalive SSE comment and loop.
+                # SSE comments (lines starting with ":") are ignored by the
+                # browser EventSource but keep the TCP connection alive through
+                # nginx/Docker proxies that have a 30-60s idle timeout.
+                yield ": keepalive\n\n"
+                continue
             if item is DONE_SENTINEL:
                 break
             yield f"data: {json.dumps(item)}\n\n"

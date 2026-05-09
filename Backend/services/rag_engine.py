@@ -124,7 +124,7 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -149,9 +149,9 @@ class AgentState(TypedDict):
     user_id: Optional[str]       # passed in from main.py — scopes vector search to per-user collection
 
     # routing context from previous turn
-    _prev_route: str
+    prev_route: str
     # full log of {route, query} for this session
-    _route_log: List[Dict]
+    route_log: List[Dict]
 
     # error
     error: Optional[str]
@@ -167,11 +167,11 @@ class AgentState(TypedDict):
     preferred_provider: Optional[str]
 
     # internal: stores chunks from prior iterative_rag iterations for merge in rerank_merge
-    _prev_retrieved_chunks: List[Dict]
+    prev_retrieved_chunks: List[Dict]
 
     # doc scope from intent classifier — resolved filename, positional hint, or ""
     # "" means search all docs; non-empty restricts retrieval to a specific doc
-    _doc_scope: str
+    doc_scope_hint: str
 
 
 MAX_ITER = 3
@@ -752,11 +752,11 @@ class RAGEngine:
             "query": user_query,
             "top_k": top_k,
             "conversation_history": conversation_history or [],
-            "_prev_route": prev_route,
-            "_route_log": route_log or [],
+            "prev_route": prev_route,
+            "route_log": route_log or [],
             "route": initial_route,
             "retrieved_chunks": [],
-            "_prev_retrieved_chunks": [],
+            "prev_retrieved_chunks": [],
             "retrieval_iterations": 0,
             "sub_queries": [],
             "response_plan": None,
@@ -776,7 +776,7 @@ class RAGEngine:
             "voice_mode": voice_mode,
             "voice_transcribed": voice_transcribed,
             "preferred_provider": preferred_provider,
-            "_doc_scope": "",
+            "doc_scope_hint": "",
         }
         
         print(f"\n{'='*80}")
@@ -861,6 +861,7 @@ class RAGEngine:
         "define_node":     ("📖", "Looking up definition…"),
         "graph_node":      ("📈", "Building chart from documents…"),
         "report_node":     ("📄", "Writing your report…"),
+        "image_node":      ("🖼️", "Reading image description…"),
     }
 
     def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
@@ -985,6 +986,7 @@ Now generate for: "{q}" """
         workflow.add_node("define_node",     _wrap("define_node",     self.define_node))
         workflow.add_node("graph_node",      _wrap("graph_node",      self.graph_node))
         workflow.add_node("report_node",     _wrap("report_node",     self.report_node))
+        workflow.add_node("image_node",      _wrap("image_node",      self.image_node))
 
         # Entry point
         workflow.set_entry_point("router")
@@ -1002,6 +1004,7 @@ Now generate for: "{q}" """
                 "define":        "define_node",    # Wikipedia — no doc retrieval
                 "graph":         "retrieve_vector",
                 "report":        "retrieve_vector",
+                "image":         "image_node",     # dedicated image description route
             }
         )
         # Three-stage retrieval pipeline edges
@@ -1011,6 +1014,9 @@ Now generate for: "{q}" """
 
         # Direct answer ends
         workflow.add_edge("direct_answer", END)
+
+        # image_node ends directly — no retrieval or judge loop needed
+        workflow.add_edge("image_node", END)
 
         # Retrieval flow
         def _check_retrieval_route(s):
@@ -1097,7 +1103,7 @@ Now generate for: "{q}" """
 
         query = state["query"]
         history = state.get("conversation_history", [])
-        route_log = state.get("_route_log", [])
+        route_log = state.get("route_log", [])
 
         # Check whether this session has documents — lets us bias ambiguous short
         # messages (e.g. "its uploaded", "summarize it") toward rag when docs exist.
@@ -1116,6 +1122,9 @@ Now generate for: "{q}" """
             all_docs = []
 
         print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
+
+        # Normalised query — used by both the image guard and code-gen guard below.
+        _q = query.lower().strip()
 
         # ── Pre-router: image query guard ────────────────────────────────────
         # If session has image documents and query is clearly about visual content,
@@ -1138,14 +1147,33 @@ Now generate for: "{q}" """
             (any(w in _q for w in ["image", "picture", "photo", "screenshot", "صورة"]) and
              any(w in _q for w in ["see", "show", "describe", "tell", "what", "analyse", "analyze", "explain"]))
         ):
-            print("rag (image-query guard)")
-            return {**state, "route": "rag"}
+            print("image (image-query guard)")
+            # ── Resolve doc_scope for image queries ───────────────────────────
+            # 1. Explicit filename mention in query
+            # 2. "this image" with multiple docs → most recently uploaded (recency wins)
+            # 3. Only one image in session → unambiguous
+            _image_docs = [
+                d for d in all_docs
+                if os.path.splitext(d.get("filename", ""))[1].lower() in _image_exts
+            ]
+            _img_scope = ""
+            for _d in _image_docs:
+                _fn = _d.get("filename", "")
+                if _fn and _fn.lower() in _q:
+                    _img_scope = _fn
+                    break
+            if not _img_scope and len(_image_docs) == 1:
+                _img_scope = _image_docs[0].get("filename", "")
+            if not _img_scope and any(p in _q for p in ["this image", "this one", "this photo", "this picture", "this screenshot", "هذه الصورة", "cette image"]):
+                _img_scope = _image_docs[-1].get("filename", "") if _image_docs else ""
+            if _img_scope:
+                print(f"  [image scope → {_img_scope}]")
+            return {**state, "route": "image", "doc_scope_hint": _img_scope}
 
         # ── Pre-router: code generation guard ────────────────────────────────
         # Catches "write/make/give me code/function/script/algorithm for X"
         # before any LLM call — these have zero ambiguity and were being
         # misrouted to `report` because the router had no code concept.
-        _q = query.lower().strip()
         _CODE_VERBS   = ["write", "make", "give me", "create", "generate", "build",
                          "code", "implement", "show me", "do", "écris", "fais", "crée"]
         _CODE_NOUNS   = ["code", "function", "script", "algorithm", "algo", "program",
@@ -1193,6 +1221,9 @@ Now generate for: "{q}" """
             # override to "rag" — UNLESS it's a meta-awareness query (converse_meta).
             if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
                 _r = intent.suggested_route
+                # image_query intent always uses the dedicated image route
+                if _r == "rag" and intent.primary_intent == "image_query":
+                    _r = "image"
                 if (_r == "direct"
                         and intent.primary_intent != "converse_meta"
                         and _session_has_docs
@@ -1210,7 +1241,7 @@ Now generate for: "{q}" """
                         confidence=getattr(intent, "confidence", 0.8),
                         forced=False,
                     )
-                return {**state, "route": _r, "_intent": intent.to_dict(), "_doc_scope": intent.doc_scope}
+                return {**state, "route": _r, "_intent": intent.to_dict(), "doc_scope_hint": intent.doc_scope}
         except Exception as e:
             print(f"[intent_classifier error: {e}] ", end="")
             intent_hint = ""
@@ -1284,7 +1315,7 @@ Reply with ONE word only — the route name."""
                 max_tokens=10,
             ).strip().lower()
 
-            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph", "report"]
+            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph", "report", "image"]
             if route not in valid_routes:
                 for valid in valid_routes:
                     if valid in route:
@@ -1310,13 +1341,13 @@ Reply with ONE word only — the route name."""
 
             print(route)
             try:
-                _doc_scope = getattr(intent, "doc_scope", "")  # type: ignore[name-defined]
+                doc_scope_hint = getattr(intent, "doc_scope", "")  # type: ignore[name-defined]
             except Exception:
-                _doc_scope = ""
+                doc_scope_hint = ""
             try:
-                return {**state, "route": route, "_intent": intent.to_dict(), "_doc_scope": _doc_scope}  # type: ignore[name-defined]
+                return {**state, "route": route, "_intent": intent.to_dict(), "doc_scope_hint": doc_scope_hint}  # type: ignore[name-defined]
             except Exception:
-                return {**state, "route": route, "_doc_scope": _doc_scope}
+                return {**state, "route": route, "doc_scope_hint": doc_scope_hint}
 
         except Exception as e:
             print(f"routing_error, using fallback → ", end="")
@@ -1412,7 +1443,7 @@ Reply with ONE word only — the route name."""
         """Handle direct questions without retrieval. Uses fallback plan — no LLM judge call needed."""
         query    = state["query"]
         history  = state.get("conversation_history", [])
-        route_log = state.get("_route_log", [])
+        route_log = state.get("route_log", [])
         session_id = state.get("session_id", "")
 
         # Detect no-docs redirect from check_retrieval
@@ -1564,12 +1595,12 @@ Reply with ONE word only — the route name."""
         # Priority: 1) intent classifier doc_scope  2) exact filename in query text
         # doc_scope may be an exact filename or a positional hint like "first"/"second".
         filter_dict = None
-        _doc_scope = state.get("_doc_scope", "")
+        doc_scope_hint = state.get("doc_scope_hint", "")
 
-        if _doc_scope:
+        if doc_scope_hint:
             # Try to match doc_scope against the actual doc list
             resolved = _resolve_doc_scope(
-                scope_hint=_doc_scope,
+                scope_hint=doc_scope_hint,
                 all_docs=all_docs,
                 query=query,
             )
@@ -1691,7 +1722,7 @@ Reply with ONE word only — the route name."""
             unique = unique[:top_k]
 
         # ── Merge with prior iteration chunks (iterative_rag loop) ───────────
-        existing = [c for c in state.get("_prev_retrieved_chunks", [])]
+        existing = [c for c in state.get("prev_retrieved_chunks", [])]
         if existing:
             all_chunks = existing + unique
             seen2: set = set()
@@ -1725,7 +1756,7 @@ Reply with ONE word only — the route name."""
         return {
             **state,
             "retrieved_chunks":       unique,
-            "_prev_retrieved_chunks": unique,  # stored for next iteration if iterative_rag
+            "prev_retrieved_chunks": unique,  # stored for next iteration if iterative_rag
         }
 
     # ── Legacy retrieve() — kept for backwards compat; delegates to the three nodes ──
@@ -2516,6 +2547,206 @@ Explain in {plan.target_language}:"""
             "raw_answer": answer,
             "sources":    sources,
             "confidence": 1.0 if (wiki_ctx and wiki_ctx.found) else 0.5,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  IMAGE NODE — dedicated route for image content queries            #
+    # ------------------------------------------------------------------ #
+
+    def image_node(self, state: AgentState) -> AgentState:
+        """
+        Handle queries about uploaded images.
+
+        Strategy:
+          1. Fetch image chunks from the vector store (doc_type=image).
+          2. If chunks contain a real vision description, synthesise the answer.
+          3. If chunks only have a placeholder description (vision failed at ingestion),
+             OR if no chunks are found yet (ingestion still in flight), attempt a LIVE
+             vision call using the raw image bytes from DOCUMENT_FILE_CACHE, update the
+             stored chunk text in-place, and then synthesise from the fresh description.
+        """
+        query      = state["query"]
+        session_id = state.get("session_id", "")
+        user_id    = state.get("user_id")
+        history    = state.get("conversation_history", [])
+
+        self._emit("image_node", "🖼️", "Reading image description…")
+        print(f"🖼️  image_node → query={query[:80]!r}")
+
+        # ── Fetch image chunks from the user/session's collection ─────────
+        # Respect doc_scope_hint — if a specific image was targeted, filter to it only.
+        _scope = state.get("doc_scope_hint", "")
+        _img_filter: dict = {"doc_type": "image"}
+        if _scope:
+            _img_filter = {"filename": _scope}
+            print(f"   [image_node: scoped to '{_scope}']")
+
+        try:
+            all_chunks = self.vs.search(
+                query,
+                top_k=10,
+                user_id=user_id,
+                session_id=session_id,
+                filter_dict=_img_filter,
+            )
+        except Exception as _e:
+            print(f"⚠️  image_node: vector search failed: {_e}")
+            all_chunks = []
+
+        # Also try an unfiltered search in case metadata wasn't tagged correctly
+        if not all_chunks:
+            try:
+                unfiltered = self.vs.search(query, top_k=10, user_id=user_id, session_id=session_id)
+                # If scoped, filter to that filename; otherwise filter by doc_type
+                if _scope:
+                    all_chunks = [c for c in unfiltered if
+                                  c.get("metadata", {}).get("filename") == _scope]
+                else:
+                    all_chunks = [c for c in unfiltered if
+                                  c.get("metadata", {}).get("doc_type") == "image" or
+                                  c.get("metadata", {}).get("has_images")]
+            except Exception:
+                pass
+
+        # ── Placeholder / missing description detection ───────────────────
+        # These strings are what document_processor writes when vision fails.
+        _PLACEHOLDER_SIGNALS = (
+            "vision description unavailable",
+            "could not be read",
+            "ask the user to describe",
+        )
+
+        def _is_placeholder(chunk: dict) -> bool:
+            txt = chunk.get("text", "").lower()
+            return any(s in txt for s in _PLACEHOLDER_SIGNALS)
+
+        # Try a live vision call if: no chunks at all, OR all chunks are placeholders
+        needs_live_vision = (not all_chunks) or all(_is_placeholder(c) for c in all_chunks)
+
+        if needs_live_vision:
+            self._emit("image_node", "🖼️", "Describing image with vision AI…")
+            print("🔍 image_node: attempting live vision call (placeholder or missing chunks)")
+
+            # Pull raw bytes from DOCUMENT_FILE_CACHE (imported lazily to avoid circular import)
+            fresh_description = ""
+            live_filename = ""
+            try:
+                # Import the cache from main module — it lives in the process globals
+                import sys as _sys
+                _main = _sys.modules.get("main") or _sys.modules.get("__main__")
+                _cache = getattr(_main, "DOCUMENT_FILE_CACHE", {})
+
+                # Find image entries scoped to this session
+                image_entries = [
+                    (doc_id, entry)
+                    for doc_id, entry in _cache.items()
+                    if entry.get("is_image") and entry.get("session_id") == session_id
+                ]
+
+                if image_entries:
+                    # If a specific image was targeted, prefer it; otherwise use most recent
+                    _target = state.get("doc_scope_hint", "")
+                    if _target:
+                        _matched = [(did, e) for did, e in image_entries if e.get("filename") == _target]
+                        if _matched:
+                            image_entries = _matched
+                    doc_id, entry = image_entries[-1]
+                    live_filename = entry["filename"]
+                    raw_bytes     = entry["bytes"]
+
+                    # Use DocumentProcessor to describe (handles resize + primary→backup fallback)
+                    try:
+                        from document_processor import DocumentProcessor as _DP
+                        _dp = _DP()
+                        fresh_description = _dp.describe_image_bytes(raw_bytes, live_filename)
+                        if fresh_description:
+                            print(f"   ✅ Live vision description for '{live_filename}': {len(fresh_description)} chars")
+                    except Exception as _ve:
+                        print(f"   ⚠️  Live vision call failed: {_ve}")
+                else:
+                    print("   ⚠️  image_node: no image entries in DOCUMENT_FILE_CACHE for this session")
+
+            except Exception as _ce:
+                print(f"   ⚠️  image_node: could not access DOCUMENT_FILE_CACHE: {_ce}")
+
+            if fresh_description:
+                # Inject the live description as a synthetic chunk so synthesis works normally
+                all_chunks = [{
+                    "text": (
+                        f"[UPLOADED IMAGE: {live_filename}]\n"
+                        f"Visual description:\n{fresh_description}"
+                    ),
+                    "metadata": {
+                        "filename":  live_filename,
+                        "doc_type":  "image",
+                        "has_images": True,
+                        "source":    "live_vision",
+                    },
+                    "distance": 0.05,
+                }]
+            elif not all_chunks:
+                # Both ingestion and live vision failed — tell the user clearly
+                answer = (
+                    "I received your image but was unable to generate a visual description. "
+                    "This can happen when the vision AI service is temporarily unavailable. "
+                    "Please try again in a moment, or describe what you see in the image and I'll help from there."
+                )
+                print("⚠️  image_node: live vision failed and no chunks — returning helpful error")
+                return {**state, "answer": answer, "raw_answer": answer, "sources": [], "confidence": 0.0}
+            # else: fall through with the placeholder chunks — synthesis will still run
+            # and the LLM prompt below will handle it gracefully
+
+        # ── Build context from image description chunks ───────────────────
+        context_parts = []
+        for i, chunk in enumerate(all_chunks, 1):
+            meta = chunk.get("metadata", {})
+            fname = meta.get("filename", "image")
+            context_parts.append(f"[Image {i}: {fname}]\n{chunk['text']}")
+        context = "\n\n".join(context_parts)
+
+        # ── Ask the judge for language/tone ───────────────────────────────
+        history_texts = [f"{m['role'].upper()}: {m['content'][:200]}" for m in history[-6:]]
+        plan = self.judge.plan_response(query, retrieved_docs=all_chunks, conversation_history=history_texts)
+
+        # ── Synthesise answer from the stored visual description ──────────
+        prompt = f"""You are analysing images based on their stored visual descriptions.
+
+Language: {plan.target_language} | Tone: {plan.target_tone}
+
+The following are AI-generated descriptions of one or more uploaded images:
+
+{context}
+
+User question: {query}
+
+Answer the user's question based ONLY on the image descriptions above.
+Be specific and reference what is visible in the image.
+If multiple images are present, address each one as relevant.
+Do NOT say you cannot see images — you have the visual descriptions.
+Answer in {plan.target_language}:"""
+
+        history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
+
+        if self.llm.enabled:
+            answer = self.llm.chat(
+                history_msgs + [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1000,
+            )
+        else:
+            answer = context  # fallback: return raw description
+
+        answer = _clean_answer(answer)
+        print(f"   ✅ image_node: answered from {len(all_chunks)} chunk(s) ({len(answer)} chars)")
+
+        return {
+            **state,
+            "response_plan":  plan,
+            "answer":         answer,
+            "raw_answer":     answer,
+            "retrieved_chunks": all_chunks,
+            "sources":        [],
+            "confidence":     0.9,
         }
 
     # ------------------------------------------------------------------ #

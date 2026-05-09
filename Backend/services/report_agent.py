@@ -525,14 +525,23 @@ def _generate_pdf_reportlab(title: str, content: str, source_docs: List[str] = N
 
     # ── Logo (bigger: 4 cm × 4 cm) ───────────────────────────────────────────
     _LOGO_SIZE = 4.0 * cm   # was 2.2 cm
-    _SERVICES_DIR    = os.path.dirname(os.path.abspath(__file__))
-    _BACKEND_DIR     = os.path.dirname(_SERVICES_DIR)
-    _BIMLO_DIR       = os.path.dirname(_BACKEND_DIR)
-    _FRONTEND_PUBLIC = os.path.join(_BIMLO_DIR, "Frontend", "public")
-    _LOGO_SVG        = os.path.join(_FRONTEND_PUBLIC, "favicon.svg")
-    _LOGO_PNG        = os.path.join(_FRONTEND_PUBLIC, "favicon.png")
-    _LOGO_PNG_CACHE  = os.path.join(tempfile.gettempdir(), "bimlo_logo_cover.png")
-    _logo_rendered   = False
+    _LOGO_PNG_CACHE = os.path.join(tempfile.gettempdir(), "bimlo_logo_cover.png")
+    _logo_rendered  = False
+
+    # Docker: LOGO_PATH env var points to the mounted favicon.png.
+    # Dev:    fall back to the old relative-path traversal.
+    _env_logo = os.environ.get("LOGO_PATH", "")
+    if _env_logo and os.path.exists(_env_logo):
+        _LOGO_PNG = _env_logo
+        _LOGO_SVG = ""
+        print(f"   ✅ Logo: using LOGO_PATH env var → {_LOGO_PNG}")
+    else:
+        _SERVICES_DIR    = os.path.dirname(os.path.abspath(__file__))
+        _BACKEND_DIR     = os.path.dirname(_SERVICES_DIR)
+        _BIMLO_DIR       = os.path.dirname(_BACKEND_DIR)
+        _FRONTEND_PUBLIC = os.path.join(_BIMLO_DIR, "Frontend", "public")
+        _LOGO_SVG        = os.path.join(_FRONTEND_PUBLIC, "favicon.svg")
+        _LOGO_PNG        = os.path.join(_FRONTEND_PUBLIC, "favicon.png")
 
     def _try_render_logo(source_path: str) -> bool:
         """Convert source_path → safe RGBA PNG cache, then add to story. Returns True on success."""

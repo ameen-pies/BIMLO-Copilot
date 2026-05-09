@@ -5800,6 +5800,12 @@ const Chat = () => {
       // Persist steps onto the message so they render after generation
       if (resultMsg) {
         resultMsg = { ...resultMsg, thinkingSteps: accumulatedSteps };
+      } else {
+        // Stream ended without a result event — the backend threw an unhandled
+        // exception AFTER sending 200 headers (common in Docker when a LangGraph
+        // node crashes mid-flight). Surface a real error so the UI doesn't just
+        // silently remove the bouncing dots.
+        throw new Error("The server stopped responding before sending a result. Please try again.");
       }
       setThinkingSteps([]);
       return resultMsg;
@@ -6652,7 +6658,7 @@ const Chat = () => {
       onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; if (dragCounterRef.current === 1) setIsDragOver(true); }}
       onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current <= 0) { dragCounterRef.current = 0; setIsDragOver(false); } }}
       onDragOver={e => e.preventDefault()}
-      onDrop={e => { e.preventDefault(); dragCounterRef.current = 0; setIsDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
+      onDrop={e => { e.preventDefault(); dragCounterRef.current = 0; setIsDragOver(false); }}
     >
 
       {/* ── Drag-and-drop overlay (page-level) ── */}

@@ -27,7 +27,7 @@ class DocumentProcessor:
       CF_API_KEY   — Cloudflare Workers AI bearer token
       CF_API_URL   — CF Worker base URL
       VISION_MODEL — model ID to use for image description inside the CF Worker
-                     (default: "@cf/llava-hf/llava-1.5-7b-hf")
+                     (default: "@cf/meta/llama-3.2-11b-vision-instruct")
                      Set this to whatever vision model your worker exposes.
       VISION_MAX_DIM — max image dimension before downscaling (default 1024)
                        Lower = faster + cheaper, higher = more detail.
@@ -35,7 +35,9 @@ class DocumentProcessor:
     """
 
     # ── tuneable defaults ─────────────────────────────────────────────────
-    _DEFAULT_VISION_MODEL = "@cf/llava-hf/llava-1.5-7b-hf"
+    # FIX: switched from deprecated @cf/llava-hf/llava-1.5-7b-hf (returned empty /
+    # metadata-only responses) to the actively supported Llama-3.2-11b-Vision model.
+    _DEFAULT_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
     _VISION_PROMPT = (
         "You are analysing a page image or embedded figure from a technical document. "
         "Describe what you see in plain English: components, labels, connections, values, "
@@ -45,13 +47,15 @@ class DocumentProcessor:
     )
 
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
-        self.chunk_size    = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self._api_key      = os.getenv("CF_API_KEY", "")
-        self._api_url      = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-        self._vision_model = os.getenv("VISION_MODEL", self._DEFAULT_VISION_MODEL)
+        self.chunk_size      = chunk_size
+        self.chunk_overlap   = chunk_overlap
+        self._api_key        = os.getenv("CF_API_KEY", "")
+        self._api_url        = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+        self._backup_api_key = os.getenv("CF_BACKUP_API_KEY", self._api_key)
+        self._backup_api_url = os.getenv("CF_BACKUP_URL", "https://bimlo.amepies3.workers.dev/")
+        self._vision_model   = os.getenv("VISION_MODEL", self._DEFAULT_VISION_MODEL)
         self._vision_max_dim = int(os.getenv("VISION_MAX_DIM", "1024"))
-        self._skip_vision  = os.getenv("SKIP_VISION", "0").strip() == "1"
+        self._skip_vision    = os.getenv("SKIP_VISION", "0").strip() == "1"
 
     # Supported standalone image extensions
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
@@ -114,6 +118,30 @@ class DocumentProcessor:
             except Exception:
                 pass
 
+    def describe_image_bytes(self, image_bytes: bytes, filename: str) -> str:
+        """
+        Describe raw image bytes via the vision LLM (primary → backup fallback).
+        Used by image_node for live re-describe when stored description is stale/placeholder.
+        Returns the description string, or "" on failure.
+        """
+        from PIL import Image
+        ext = os.path.splitext(filename)[1].lower()
+        try:
+            img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        except Exception as e:
+            print(f"⚠️  describe_image_bytes: could not open image '{filename}': {e}")
+            return ""
+        # Downscale same as ingestion
+        orig_w, orig_h = img.size
+        max_d = self._vision_max_dim
+        if max(orig_w, orig_h) > max_d:
+            scale = max_d / max(orig_w, orig_h)
+            img = img.resize((int(orig_w * scale), int(orig_h * scale)))
+        b64 = self._pil_to_b64(img)
+        if not b64:
+            return ""
+        return self._call_vision_llm(b64, prompt=self._IMAGE_UPLOAD_PROMPT, max_tokens=600)
+
     # ── Standalone image processing ───────────────────────────────────────
 
     def _process_standalone_image(self, file_path: str, override_filename: str = None) -> List[Dict]:
@@ -167,30 +195,11 @@ class DocumentProcessor:
         # ── Vision description ────────────────────────────────────────────
         description = ""
         if b64 and not self._skip_vision and self._api_key:
-            try:
-                payload = {
-                    "prompt": self._IMAGE_UPLOAD_PROMPT,
-                    "image":  b64,
-                    "model":  self._vision_model,
-                    "max_tokens": 600,       # richer description for standalone images
-                    "temperature": 0.1,
-                    "task": "vision",
-                }
-                headers = {
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type":  "application/json",
-                }
-                import requests as _req
-                resp = _req.post(self._api_url, headers=headers, json=payload, timeout=45)
-                if resp.status_code == 200:
-                    raw = (resp.json().get("response") or "").strip()
-                    import re
-                    description = re.sub(r"\s+", " ", raw).strip().strip('"').strip("'")
-                    print(f"   🖼️  Vision description for '{filename}': {len(description)} chars")
-                else:
-                    print(f"   ⚠️  Vision LLM returned {resp.status_code} for '{filename}'")
-            except Exception as e:
-                print(f"   ⚠️  Vision call failed for '{filename}': {e}")
+            description = self._call_vision_llm(
+                b64,
+                prompt=self._IMAGE_UPLOAD_PROMPT,
+                max_tokens=600,
+            )
 
         if not description:
             description = (
@@ -471,47 +480,57 @@ class DocumentProcessor:
             print(f"   ⚠️  PIL→base64 failed: {e}")
             return None
 
-    def _call_vision_llm(self, image_b64: str) -> str:
+    def _call_vision_llm(self, image_b64: str, prompt: str = None, max_tokens: int = 200) -> str:
         """
-        Send a base64 image to the CF Worker and get a plain-text description.
-
-        The worker payload uses the "vision" task so the worker can route to
-        a vision-capable model (e.g. LLaVA, Llama-3.2-Vision).
-
-        The image is sent as a data URI in the prompt so the worker doesn't
-        need a separate image upload endpoint — it just passes it straight to
-        the vision model as a multimodal message.
-
-        Returns empty string on any failure so callers degrade gracefully.
+        Send a base64 JPEG image to the CF Worker and get a plain-text description.
+        Tries the primary worker first, then falls back to the backup worker.
+        Returns empty string on total failure so callers degrade gracefully.
         """
         if not self._api_key:
             return ""
 
-        try:
-            payload = {
-                "prompt": self._VISION_PROMPT,
-                "image":  image_b64,          # CF Worker reads this and builds the vision message
-                "model":  self._vision_model,
-                "max_tokens": 200,
-                "temperature": 0.1,
-                "task": "vision",             # tells the worker to use a vision model
-            }
-            headers = {
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(self._api_url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 200:
-                raw = (resp.json().get("response") or "").strip()
-                # Sanitise — collapse whitespace, strip surrounding quotes
-                raw = re.sub(r"\s+", " ", raw).strip().strip('"').strip("'")
-                return raw[:500]  # cap description length
-            else:
-                print(f"   ⚠️  Vision LLM returned {resp.status_code}: {resp.text[:100]}")
-                return ""
-        except Exception as e:
-            print(f"   ⚠️  Vision LLM call failed: {e}")
-            return ""
+        vision_prompt = prompt or self._VISION_PROMPT
+        payload = {
+            "prompt":      vision_prompt,
+            "image":       image_b64,
+            "model":       self._vision_model,
+            "max_tokens":  max_tokens,
+            "temperature": 0.1,
+            "task":        "vision",
+        }
+
+        workers = [
+            (self._api_url,        self._api_key,        "primary"),
+            (self._backup_api_url, self._backup_api_key, "backup"),
+        ]
+        # Deduplicate if both URLs happen to be the same
+        if self._api_url == self._backup_api_url:
+            workers = workers[:1]
+
+        for url, key, label in workers:
+            if not key:
+                continue
+            try:
+                headers = {
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type":  "application/json",
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=45)
+                if resp.status_code == 200:
+                    raw = (resp.json().get("response") or "").strip()
+                    raw = re.sub(r"\s+", " ", raw).strip().strip('"').strip("'")
+                    if raw:
+                        print(f"   ✅ Vision LLM ({label}) → {len(raw)} chars")
+                        return raw[:1000]
+                    print(f"   ⚠️  Vision LLM ({label}) returned empty response — trying next")
+                else:
+                    err_body = resp.text[:120]
+                    print(f"   ⚠️  Vision LLM ({label}) returned HTTP {resp.status_code}: {err_body} — trying next")
+            except Exception as e:
+                print(f"   ⚠️  Vision LLM ({label}) call failed: {e} — trying next")
+
+        print("   ❌ Vision LLM: all workers failed — description unavailable")
+        return ""
 
     # ── Metadata extraction ───────────────────────────────────────────────
 

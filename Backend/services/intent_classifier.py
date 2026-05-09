@@ -135,9 +135,11 @@ ROUTING RULES (apply these strictly when choosing suggested_route):
 DOC SCOPE RULES (for the "doc_scope" field):
 - If the user names a specific file (partial or full name), set doc_scope to that filename exactly as it appears in UPLOADED DOCUMENTS.
 - If the user uses a positional reference ("the first one", "the first file", "le premier", "الأول"), set doc_scope to "first", "second", etc.
-- If the user uses a pronoun ("it", "this one", "that file") AND there is only one uploaded document, set doc_scope to that document's filename.
-- If there are multiple documents and the pronoun is ambiguous, set doc_scope to "" (search all).
-- If the user says "both", "all", "all of them", or implies cross-document scope, set doc_scope to "".
+- If the user uses a pronoun ("it", "this one", "that file", "this image", "this document") AND there is only one uploaded document, set doc_scope to that document's filename.
+- If there are multiple documents and the user says "this image" / "this one" / "this file" / "هذه الصورة" / "cette image" WITHOUT naming a specific file → set doc_scope to the LAST document in the uploaded list (most recently uploaded = most likely what they mean).
+- If the conversation history shows the user was just discussing a specific document, and the new query uses a pronoun or vague reference, set doc_scope to that same document (follow the conversation thread).
+- If the user says "both", "all", "all of them", "the other one", or implies cross-document scope, set doc_scope to "".
+- NEVER leave doc_scope empty when a single document is clearly implied by context, recency, or pronoun — an empty doc_scope causes ALL documents to be searched, which is wrong when the user clearly means one.
 
 CRITICAL OVERRIDE RULES:
 1. Any query about what the AI just said/did → direct (is_followup=true, followup_type=modify or repeat)
@@ -491,9 +493,11 @@ def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
     if not uploaded_docs:
         return ""
 
+    q_lower = q.lower()
+
     # Exact / partial filename match (case-insensitive)
     for fname in uploaded_docs:
-        if fname.lower() in q:
+        if fname.lower() in q_lower:
             return fname
 
     # Positional ordinals — map word → 0-based index
@@ -505,14 +509,25 @@ def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
         "1st": 0, "2nd": 1, "3rd": 2, "4th": 3,
     }
     for word, idx in ordinals.items():
-        if word in q and idx < len(uploaded_docs):
+        if word in q_lower and idx < len(uploaded_docs):
             return uploaded_docs[idx]
 
-    # Single-doc session + pronoun → unambiguously the only doc
+    # Single-doc session + any pronoun → unambiguously the only doc
+    pronouns = ["it", "this", "that", "the file", "the document", "the image",
+                "له", "هذا", "هذه", "ce fichier", "ce document", "cette image"]
     if len(uploaded_docs) == 1:
-        pronouns = ["it", "this", "that", "the file", "the document", "له", "هذا", "هذه", "ce fichier", "ce document"]
-        if any(p in q for p in pronouns):
+        if any(p in q_lower for p in pronouns):
             return uploaded_docs[0]
+
+    # Multi-doc session: "this image/file/one/document" → most recently uploaded
+    # (last in list = most recently ingested = almost certainly what the user means)
+    _recency_signals = [
+        "this image", "this photo", "this picture", "this screenshot",
+        "this file", "this document", "this one", "that image", "that file",
+        "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
+    ]
+    if any(s in q_lower for s in _recency_signals):
+        return uploaded_docs[-1]
 
     return ""
 

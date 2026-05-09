@@ -35,9 +35,12 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface/sentence_transformers
       - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+      - VISION_MODEL=@cf/meta/llama-3.2-11b-vision-instruct
       - HF_HUB_DISABLE_PROGRESS_BARS=1
+      - LOGO_PATH=/app/assets/favicon.png
     volumes:
       - hf_cache:/root/.cache/huggingface
+      - ../Frontend/public/favicon.png:/app/assets/favicon.png:ro
     depends_on:
       neo4j:
         condition: service_healthy
