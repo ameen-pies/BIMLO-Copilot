@@ -1453,9 +1453,7 @@ const NewsPage = () => {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "0.8rem" }}>
-          {/* Category filter — CardNav, wrapped so the variable active-label
-              width doesn't cause the rest of the toolbar to shift */}
-          <div style={{ width: 210, flexShrink: 0 }}>
+          {/* Category filter — CardNav */}
           <CardNav
             filterMode
             filterLabel={filter === "All" ? "All Categories" : filter}
@@ -1501,7 +1499,6 @@ const NewsPage = () => {
               },
             ]}
           />
-          </div>
 
           {/* article count */}
           {!isInitialLoading && allArticles.length > 0 && (

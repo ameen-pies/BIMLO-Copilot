@@ -71,36 +71,9 @@ const CardNav = ({
     return w;
   };
 
-  // Measure expanded width by temporarily letting nav shrink-wrap
-  const getExpandedWidth = () => {
-    const navEl = navRef.current;
-    if (!navEl) return 400;
-    const contentEl = navEl.querySelector('.card-nav-content') as HTMLElement | null;
-    if (!contentEl) return getCollapsedWidth() + 200;
-
-    const savedNavW   = navEl.style.width;
-    const savedNavOvf = navEl.style.overflow;
-    const savedVis    = contentEl.style.visibility;
-    const savedPe     = contentEl.style.pointerEvents;
-    const savedW      = contentEl.style.width;
-
-    navEl.style.width             = 'max-content';
-    navEl.style.overflow          = 'visible';
-    contentEl.style.visibility    = 'visible';
-    contentEl.style.pointerEvents = 'auto';
-    contentEl.style.width         = 'auto';
-    navEl.offsetWidth; // force reflow
-
-    const measured = Math.ceil(navEl.getBoundingClientRect().width);
-
-    navEl.style.width             = savedNavW;
-    navEl.style.overflow          = savedNavOvf;
-    contentEl.style.visibility    = savedVis;
-    contentEl.style.pointerEvents = savedPe;
-    contentEl.style.width         = savedW;
-
-    return measured;
-  };
+  // Fixed expanded width — constant so no label change can affect it
+  const EXPANDED_WIDTH = 610;
+  const getExpandedWidth = () => EXPANDED_WIDTH;
 
   const buildTimeline = (resetPositions = true) => {
     const navEl = navRef.current;
@@ -200,6 +173,10 @@ const CardNav = ({
             <span style={{
               fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.04em',
               color: resolvedMenuColor, whiteSpace: 'nowrap', pointerEvents: 'none',
+              opacity: isExpanded ? 0 : 1,
+              width: isExpanded ? 0 : undefined,
+              overflow: 'hidden',
+              transition: 'opacity 0.15s ease, width 0.15s ease',
             }}>
               {filterLabel}
             </span>
