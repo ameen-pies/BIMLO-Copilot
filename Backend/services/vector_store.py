@@ -129,6 +129,12 @@ class VectorStoreManager:
         """
         doc_id = doc_id or str(uuid.uuid4())
         collection = self._get_collection(user_id, session_id)
+
+        if doc_id:
+            existing = collection.get(where={"document_id": doc_id})
+            if existing and existing.get("ids"):
+                print(f"⚠️  add_document skipped: document {doc_id} already exists in collection {self._get_collection_name(user_id, session_id)}")
+                return doc_id
         
         texts, embeddings, metadatas, ids = [], [], [], []
 

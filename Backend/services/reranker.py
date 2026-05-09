@@ -66,10 +66,17 @@ def _load_model() -> None:
             print(f"⏳ reranker: loading {_RERANKER_MODEL}"
                   f"{' (cached at ' + cache_dir + ')' if cache_dir else ' (first run downloads ~560 MB)'}…")
             t0 = time.time()
+
+            # CrossEncoder does NOT accept cache_folder — set HF_HOME env var instead,
+            # which HuggingFace hub respects natively. Passing cache_folder here raises
+            # TypeError on newer sentence-transformers versions, leaving _cross_encoder=None.
+            if cache_dir:
+                os.environ.setdefault("HF_HOME", cache_dir)
+                os.environ.setdefault("TRANSFORMERS_CACHE", cache_dir)
+
             _cross_encoder = CrossEncoder(
                 _RERANKER_MODEL,
                 max_length=512,
-                cache_folder=cache_dir,   # uses HF_HOME volume — no re-download on restart
             )
             print(f"✅ reranker: {_RERANKER_MODEL} ready ({time.time() - t0:.1f}s)")
         except ImportError:
@@ -79,8 +86,11 @@ def _load_model() -> None:
 
 
 def _get_cross_encoder():
-    """Return the loaded model, triggering a synchronous load if not ready yet."""
-    if not _load_attempted:
+    """Return the loaded model, triggering a synchronous load if not ready yet.
+    Reads _load_attempted under the lock to avoid racing the prewarm thread."""
+    with _load_lock:
+        already = _load_attempted
+    if not already:
         _load_model()
     return _cross_encoder
 

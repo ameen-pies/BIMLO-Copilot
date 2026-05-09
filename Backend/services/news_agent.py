@@ -122,8 +122,8 @@ EXTENDED_QUERY_PAGES = [
     ],
 ]
 
-MAX_RESULTS_PER_QUERY = 5
-CACHE_TTL_HOURS       = 6
+MAX_RESULTS_PER_QUERY = 10   # was 5 — fetch more per query for greater variety
+CACHE_TTL_HOURS       = 4    # was 6 — expire sooner so refreshes feel fresh
 JUDGE_SCORE_THRESHOLD = 0.28
 LLM_WORKERS           = 8   # concurrent judge+enrich calls
 
@@ -482,11 +482,45 @@ def _search_one_query(query_entry: dict, seen_local: set) -> List[RawArticle]:
     return articles
 
 
+def _get_dynamic_queries(base_queries: List[dict]) -> List[dict]:
+    """
+    Append a rotating date suffix to each query so Google News RSS returns
+    a different result set on every fetch cycle rather than the same cached page.
+    Cycles through: today, yesterday, and 'this week' each time it's called.
+    """
+    from datetime import date
+    today     = date.today()
+    yesterday = today - timedelta(days=1)
+
+    # Pick a date-tag that rotates by hour so successive refreshes differ
+    hour_slot = datetime.utcnow().hour % 3
+    if hour_slot == 0:
+        date_tag = today.strftime("%B %d")         # e.g. "May 09"
+    elif hour_slot == 1:
+        date_tag = yesterday.strftime("%B %d")     # e.g. "May 08"
+    else:
+        date_tag = today.strftime("%Y")            # e.g. "2025"
+
+    dynamic = []
+    for q in base_queries:
+        # Only append date tag to queries that don't already end with a year
+        query = q["query"]
+        if not re.search(r'\b20\d\d\b', query):
+            query = f"{query} {date_tag}"
+        dynamic.append({**q, "query": query})
+    return dynamic
+
+
 def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
     """
     Run all queries concurrently via RSS and return de-duped raw articles.
+    Applies date-rotation to queries to avoid identical cached results.
     Drop-in replacement for the old SearXNG / DDG version — no sidecar needed.
     """
+    # Apply dynamic date-rotation so each refresh hits a slightly different
+    # Google News cache bucket and surfaces genuinely fresh articles.
+    queries = _get_dynamic_queries(queries)
+
     all_articles: List[RawArticle] = []
     global_seen: set = set()
 
@@ -508,9 +542,9 @@ def fetch_raw_articles(queries: List[dict]) -> List[RawArticle]:
 
     logger.info(f"fetch_raw_articles: {len(all_articles)} total unique articles (RSS backend)")
 
-    # Drop articles older than 90 days (configurable via NEWS_MAX_AGE_DAYS env var)
+    # Drop articles older than 4 days (configurable via NEWS_MAX_AGE_DAYS env var)
     import os as _os
-    max_age_days = int(_os.getenv("NEWS_MAX_AGE_DAYS", "90"))
+    max_age_days = int(_os.getenv("NEWS_MAX_AGE_DAYS", "4"))
     cutoff = datetime.utcnow() - timedelta(days=max_age_days)
     fresh = []
     for art in all_articles:

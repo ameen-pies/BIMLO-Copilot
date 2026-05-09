@@ -836,11 +836,29 @@ function parseSegments(raw: string, fallbackSource: number): { text: string; sou
 
   // Strip leading orphan punctuation left by citation splitting.
   // e.g. ".\n- next bullet" → "- next bullet"
-  // This happens because "[N]." splits into segment="." + segment="next text"
-  return segments.map(seg => ({
+  const cleaned = segments.map(seg => ({
     ...seg,
     text: seg.text.replace(/^[\s.,;:!?]+/, ''),
   })).filter(seg => seg.text.trim().length > 0);
+
+  return mergeAdjacentSameSourceSegments(cleaned);
+}
+
+function mergeAdjacentSameSourceSegments(segments: { text: string; source: number }[]) {
+  if (segments.length <= 1) return segments;
+  const merged: { text: string; source: number }[] = [segments[0]];
+
+  for (let i = 1; i < segments.length; i += 1) {
+    const current = segments[i];
+    const previous = merged[merged.length - 1];
+    if (current.source === previous.source) {
+      previous.text += current.text;
+    } else {
+      merged.push(current);
+    }
+  }
+
+  return merged;
 }
 
 /**
@@ -1445,6 +1463,7 @@ const ZoomableImage: React.FC<ZoomableImageProps> = ({ src, alt, compact = false
   // ── Wheel zoom ─────────────────────────────────────────────────────────
   const onWheel = React.useCallback((e: React.WheelEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setScale(s => {
       const next = Math.min(8, Math.max(1, s - e.deltaY * 0.002));
       if (next === 1) setOffset({ x: 0, y: 0 });
@@ -3876,11 +3895,15 @@ const Chat = () => {
       try {
         const res = await api.uploadDocument(file, sid);
         const returnedSid = res.session_id ?? sid;
-        if (returnedSid !== sid) {
+        const sessionChanged = returnedSid !== sid;
+        if (sessionChanged) {
           sid = returnedSid;
           setSessionId(returnedSid);
           sessionIdRef.current = returnedSid;
-          loadDocuments(returnedSid);
+          // loadDocuments replaces the full list from the server — which already
+          // includes the newly uploaded doc — so we must NOT also manually concat
+          // below, or the doc appears twice in the panel.
+          await loadDocuments(returnedSid);
         }
         const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
         const preview = createPreviewUrlForFile(file);
@@ -3905,10 +3928,22 @@ const Chat = () => {
           blobUrlMapRef.current.set(res.document_id, { url: objectUrl, type: 'image' });
         }
         setPendingDocIds(prev => [...prev, res.document_id]);
-        setDocuments(prev => prev
-          .filter(d => d.document_id !== placeholderId)
-          .concat([{ document_id: res.document_id, filename: res.filename, doc_type: file.name.split(".").pop() ?? "doc", timestamp: new Date().toISOString() }])
-        );
+        // Only manually update the doc list when the session did NOT change.
+        // If it changed, loadDocuments() above already refreshed the full list from
+        // the server (which includes this doc), so adding it again would duplicate it.
+        if (!sessionChanged) {
+          setDocuments(prev => {
+            const withoutPlaceholder = prev.filter(d => d.document_id !== placeholderId);
+            const newDoc = {
+              document_id: res.document_id,
+              filename: res.filename,
+              doc_type: file.name.split(".").pop() ?? "doc",
+              timestamp: new Date().toISOString(),
+            } as any;
+            const merged = [...withoutPlaceholder.filter(d => d.document_id !== res.document_id), newDoc];
+            return merged;
+          });
+        }
         // File uploaded successfully, no toast needed
         // toast({ title: "File uploaded", description: `${res.filename} ready` });
       } catch (err) {
@@ -4888,7 +4923,10 @@ const Chat = () => {
       }
       // Pass session_id so the backend returns only this session's documents.
       const response = await api.listDocuments(effectiveSid);
-      setDocuments(response.documents);
+      const uniqueDocs = response.documents.filter((doc, index, arr) =>
+        arr.findIndex(d => d.document_id === doc.document_id) === index
+      );
+      setDocuments(uniqueDocs);
     } catch (error) {
       console.error("Failed to load documents:", error);
       toast({
@@ -5708,6 +5746,12 @@ const Chat = () => {
       const streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (rawToken) streamHeaders["Authorization"] = `Bearer ${rawToken}`;
 
+      // Resolve the filenames of docs attached to THIS message so the backend
+      // can use them as the highest-priority scope signal (no guessing needed).
+      const attachedDocFilenames = pendingDocIdsToCommit
+        .map(id => documents.find(d => d.document_id === id)?.filename)
+        .filter((f): f is string => Boolean(f));
+
       const res = await fetch(`${base}/query-stream`, {
         method: "POST",
         headers: streamHeaders,
@@ -5722,6 +5766,9 @@ const Chat = () => {
           // Commit any files uploaded before this message so the backend indexes them
           // into the user/session collection before running the vector search.
           pending_doc_ids: pendingDocIdsToCommit,
+          // Pass resolved filenames so the backend knows EXACTLY which docs are attached
+          // to THIS message — used as the highest-priority scope signal in the router.
+          attached_doc_filenames: attachedDocFilenames,
           preferred_provider: selectedModelRef.current,
         }),
         signal: abortControllerRef.current.signal,

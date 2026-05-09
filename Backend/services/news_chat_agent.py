@@ -212,9 +212,13 @@ def _call_news_worker(
 ) -> str:
     """
     POST a single LLM request to the dedicated Bimlo News CF Worker.
+    Retries up to 3 times on empty response (CF Workers AI occasionally returns
+    an empty body on the first attempt — a retry almost always succeeds).
     Never touches llm_client.py — completely isolated quota.
-    Raises on misconfiguration or HTTP errors.
+    Raises on misconfiguration or all retries exhausted.
     """
+    import time
+
     if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
         raise RuntimeError(
             "CF_NEWS_URL or CF_NEWS_API_KEY is not set. "
@@ -229,21 +233,61 @@ def _call_news_worker(
     if system_prompt:
         payload["systemPrompt"] = system_prompt
 
-    resp = httpx.post(
-        f"{_CF_NEWS_URL}/",
-        headers={
-            "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
-            "Content-Type":  "application/json",
-        },
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
+    last_error: str = ""
+    for attempt in range(3):
+        try:
+            resp = httpx.post(
+                f"{_CF_NEWS_URL}/",
+                headers={
+                    "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+                timeout=30.0,
+            )
+            resp.raise_for_status()
 
-    text = resp.json().get("response", "").strip()
-    if not text:
-        raise RuntimeError("News worker returned an empty response")
-    return text
+            body = resp.json()
+            # CF Workers AI can nest the text under several keys
+            raw = (
+                body.get("response")
+                or body.get("result")
+                or body.get("text")
+                or body.get("content")
+                or body.get("message")
+                or ""
+            )
+            if isinstance(raw, dict):
+                raw = (
+                    raw.get("response")
+                    or raw.get("text")
+                    or raw.get("content")
+                    or raw.get("message")
+                    or ""
+                )
+            text = str(raw).strip()
+            if text:
+                return text
+
+            last_error = "News worker returned an empty response"
+            logger.warning(
+                f"[news_chat] empty response on attempt {attempt + 1}/3 "
+                f"— body keys: {list(body.keys())}"
+            )
+        except httpx.HTTPStatusError as e:
+            last_error = f"HTTP {e.response.status_code}"
+            logger.warning(f"[news_chat] {last_error} on attempt {attempt + 1}/3")
+        except httpx.TimeoutException:
+            last_error = "timeout"
+            logger.warning(f"[news_chat] timeout on attempt {attempt + 1}/3")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[news_chat] error on attempt {attempt + 1}/3: {e}")
+
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError(f"News worker failed after 3 attempts: {last_error}")
 
 
 def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str:

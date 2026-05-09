@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 
@@ -162,20 +163,25 @@ def classify_intent(
     preferred_provider: Optional[str] = None,
     session_has_docs: bool = False,
     uploaded_docs: Optional[List[str]] = None,
+    attached_doc_filenames: Optional[List[str]] = None,
 ) -> IntentAnalysis:
     """
     Classify the intent of a query using the LLM.
     Falls back to heuristic classification if the LLM is unavailable.
 
     Args:
-        query:              The current user message.
-        history:            Conversation history [{role, content}, ...].
-        route_log:          Per-session route log from AgentState._route_log.
-        preferred_provider: Optional provider hint to honor user-selected model.
-        session_has_docs:   True if the session has documents in the vector store.
-                            When True, ambiguous/short messages default to rag.
-        uploaded_docs:      List of filenames currently uploaded in the session.
-                            Used for doc_scope resolution (which doc is being targeted).
+        query:                  The current user message.
+        history:                Conversation history [{role, content}, ...].
+        route_log:              Per-session route log from AgentState._route_log.
+        preferred_provider:     Optional provider hint to honor user-selected model.
+        session_has_docs:       True if the session has documents in the vector store.
+                                When True, ambiguous/short messages default to rag.
+        uploaded_docs:          List of filenames currently uploaded in the session.
+                                Used for doc_scope resolution (which doc is being targeted).
+        attached_doc_filenames: Filenames of docs physically attached to THIS message.
+                                Highest-priority scope signal — if set, any pronoun or
+                                vague reference ("this one", "it", "what about this") refers
+                                to the attached doc, not any older session document.
 
     Returns:
         IntentAnalysis with suggested_route, doc_scope, and rich metadata.
@@ -184,7 +190,7 @@ def classify_intent(
         from llm_client import call_llm, check_llm_available
         available, _ = check_llm_available()
         if not available:
-            return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs)
+            return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs, attached_doc_filenames)
 
         history_block = _format_history(history or [])
         route_history = _format_route_log(route_log or [])
@@ -211,12 +217,34 @@ def classify_intent(
             "pipeline will handle the empty state gracefully."
         )
 
+        # Highest-priority context: docs attached to THIS specific message
+        _attached = attached_doc_filenames or []
+        if _attached:
+            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+            _attached_names = ", ".join(_attached)
+            _attached_are_images = all(
+                os.path.splitext(f)[1].lower() in _image_exts for f in _attached
+            )
+            attached_hint = (
+                f"\n\nATTACHED TO THIS MESSAGE: {_attached_names}\n"
+                "CRITICAL: The user physically attached the above file(s) to this exact message. "
+                "Any vague reference ('this one', 'it', 'this', 'what about this', 'this file', "
+                "'this image', 'this photo', 'this document', 'هذا', 'هذه', 'cette image') "
+                "UNAMBIGUOUSLY refers to the attached file — NOT any older session document. "
+                f"Set doc_scope to '{_attached[-1]}' (the attached file). "
+                + ("Set primary_intent='image_query' and suggested_route='rag'."
+                   if _attached_are_images else
+                   "Set suggested_route='rag'.")
+            )
+        else:
+            attached_hint = ""
+
         prompt = _CLASSIFIER_PROMPT_TEMPLATE.format(
             history_block=history_block,
             route_history=route_history,
             uploaded_docs_block=uploaded_docs_block,
             query=query,
-        ) + docs_hint
+        ) + docs_hint + attached_hint
 
         raw = call_llm(
             prompt=prompt,
@@ -228,6 +256,53 @@ def classify_intent(
         )
 
         result = _parse_result(raw)
+
+        # Hard override: when docs were attached to THIS message, use the LLM's
+        # classification as the base but correct only when clearly wrong.
+        # We do NOT blindly force image_query for every query with an attachment —
+        # a query like "what is ORENDA junior entreprise" is independent even if
+        # an image was attached.  Only override when the LLM missed the image intent.
+        if _attached:
+            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+            _all_imgs = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached)
+
+            # Build a multi-file scope (pipe-separated) so the router can retrieve all
+            _scope = "|".join(_attached) if len(_attached) > 1 else _attached[-1]
+            result.doc_scope = _scope
+
+            # Only force image_query if the LLM already picked it, or if the query
+            # is vague/short and all attachments are images (clear visual intent).
+            _q_lower = query.lower().strip()
+            _is_short_vague = len(_q_lower.split()) <= 6 and not any(
+                _q_lower.startswith(opener) for opener in [
+                    "what is ", "who is ", "where is ", "when is ", "how is ",
+                    "define ", "explain what", "tell me what",
+                    "qu'est-ce que", "ما هو", "ما هي",
+                ]
+            )
+            _query_references_image = (
+                result.primary_intent == "image_query"
+                or _is_short_vague
+                or any(sig in _q_lower for sig in [
+                    "this image", "this photo", "this picture", "this screenshot",
+                    "this file", "this document", "this one",
+                    "describe", "what do you see", "what is in", "look at",
+                    "analyse", "analyze", "tell me about this",
+                    "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
+                ])
+            )
+
+            if _query_references_image and _all_imgs:
+                result.primary_intent = "image_query"
+                result.suggested_route = "rag"
+                result.reasoning += f" [hard-override: image attachment + visual query → scope='{_scope}']"
+            elif result.suggested_route not in ("rag", "iterative_rag", "analytics",
+                                                "transform", "graph", "report"):
+                # Non-image query but files attached — still ensure rag for doc content
+                result.suggested_route = "rag"
+                result.reasoning += f" [hard-override: doc attached to message → scope='{_scope}']"
+            else:
+                result.reasoning += f" [attachment noted, query is independent → scope='{_scope}']"
 
         # Post-parse safety net: if session has docs and classifier said "direct"
         # but ambiguity is non-trivial, override to rag — UNLESS it's a meta-awareness
@@ -248,7 +323,7 @@ def classify_intent(
 
     except Exception as e:
         logger.warning(f"intent_classifier LLM call failed: {e}")
-        return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs)
+        return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs, attached_doc_filenames)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -338,6 +413,7 @@ def _heuristic_classify(
     route_log: Optional[List[Dict]],
     session_has_docs: bool = False,
     uploaded_docs: Optional[List[str]] = None,
+    attached_doc_filenames: Optional[List[str]] = None,
 ) -> IntentAnalysis:
     """
     Fast heuristic fallback — no LLM required.
@@ -345,6 +421,43 @@ def _heuristic_classify(
     When session_has_docs=True, short/ambiguous messages default to rag.
     """
     q = query.lower().strip()
+
+    # ── Highest-priority: doc attached to THIS message ────────────────────────
+    # Apply smart intent detection — don't blindly override for independent queries.
+    _attached = attached_doc_filenames or []
+    if _attached:
+        _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+        _all_imgs = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached)
+        _scope = "|".join(_attached) if len(_attached) > 1 else _attached[-1]
+
+        # Check if query is about the attachment or is independent
+        _is_short_vague = len(q.split()) <= 6 and not any(
+            q.startswith(opener) for opener in [
+                "what is ", "who is ", "where is ", "when is ", "how is ",
+                "define ", "explain what", "tell me what",
+                "qu'est-ce que", "ما هو", "ما هي",
+            ]
+        )
+        _attachment_signals = [
+            "this image", "this photo", "this picture", "this screenshot",
+            "this file", "this document", "this one",
+            "describe", "what do you see", "what is in", "look at",
+            "analyse", "analyze", "tell me about this",
+            "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
+        ]
+        _references_attachment = _is_short_vague or any(s in q for s in _attachment_signals)
+
+        if _references_attachment:
+            return _make_heuristic(
+                query,
+                "rag",
+                "image_query" if _all_imgs else "extract_info",
+                "extract",
+                "prose",
+                0.97,
+                doc_scope=_scope,
+            )
+        # else: independent query — fall through to normal heuristic routing
 
     # ── Image query: user asks about the visual content of an uploaded image ─────
     # The system already described the image via vision LLM at upload time.

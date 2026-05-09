@@ -101,11 +101,13 @@ def _news_llm(
 ) -> str:
     """
     Send a single LLM request to the dedicated Bimlo News CF Worker.
-    Raises RuntimeError if the worker is misconfigured or returns an error.
-    This is the ONLY function that makes LLM calls in the news pipeline.
+    Retries up to 3 times on empty response (CF Workers AI occasionally returns
+    an empty string on first try — a retry almost always succeeds).
+    Raises RuntimeError if the worker is misconfigured or all retries fail.
     llm_client.py is never imported.
     """
     import httpx
+    import time
 
     if not _CF_NEWS_URL or not _CF_NEWS_API_KEY:
         raise RuntimeError(
@@ -121,32 +123,60 @@ def _news_llm(
     if system_prompt:
         payload["systemPrompt"] = system_prompt
 
-    resp = httpx.post(
-        f"{_CF_NEWS_URL}/",
-        headers={
-            "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
-            "Content-Type":  "application/json",
-        },
-        json=payload,
-        timeout=30.0,
-    )
-    resp.raise_for_status()
+    last_error: str = ""
+    for attempt in range(3):
+        try:
+            resp = httpx.post(
+                f"{_CF_NEWS_URL}/",
+                headers={
+                    "Authorization": f"Bearer {_CF_NEWS_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+                timeout=30.0,
+            )
+            resp.raise_for_status()
 
-    raw_response = resp.json().get("response", "")
-    # CF Workers AI binding sometimes returns a nested dict (e.g. {"text": "..."})
-    # instead of a plain string — normalise it defensively.
-    if isinstance(raw_response, dict):
-        raw_response = (
-            raw_response.get("response")
-            or raw_response.get("text")
-            or raw_response.get("content")
-            or raw_response.get("message")
-            or ""
-        )
-    text = str(raw_response).strip()
-    if not text:
-        raise RuntimeError("News worker returned an empty response")
-    return text
+            body = resp.json()
+
+            # CF Workers AI binding can return the text under several keys
+            # or even as a nested dict — walk all known paths.
+            raw_response = (
+                body.get("response")
+                or body.get("result")
+                or body.get("text")
+                or body.get("content")
+                or body.get("message")
+                or ""
+            )
+            if isinstance(raw_response, dict):
+                raw_response = (
+                    raw_response.get("response")
+                    or raw_response.get("text")
+                    or raw_response.get("content")
+                    or raw_response.get("message")
+                    or ""
+                )
+            text = str(raw_response).strip()
+            if text:
+                return text
+
+            last_error = "News worker returned an empty response"
+            logger.warning(
+                f"  _news_llm: empty response on attempt {attempt + 1}/3 — "
+                f"full body keys: {list(body.keys())}"
+            )
+        except httpx.HTTPStatusError as e:
+            last_error = f"HTTP {e.response.status_code}: {e.response.text[:120]}"
+            logger.warning(f"  _news_llm: {last_error} (attempt {attempt + 1}/3)")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"  _news_llm: {last_error} (attempt {attempt + 1}/3)")
+
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))   # 1.5s, then 3s back-off
+
+    raise RuntimeError(f"News worker failed after 3 attempts: {last_error}")
 
 
 def _news_llm_available() -> bool:
@@ -216,7 +246,7 @@ def _save_seen_set(seen: dict) -> None:
 
 # ── LangGraph nodes ────────────────────────────────────────────────────────────
 
-MAX_ARTICLE_AGE_DAYS = int(os.getenv("NEWS_MAX_AGE_DAYS", "90"))   # 3 months default
+MAX_ARTICLE_AGE_DAYS = int(os.getenv("NEWS_MAX_AGE_DAYS", "4"))   # 4 days default
 
 
 def _age_filter_node(state: PipelineState) -> PipelineState:
@@ -672,8 +702,14 @@ def _execute(force: bool = False) -> None:
             if os.path.exists(sp):
                 os.remove(sp)
                 logger.info("   Force refresh: seen_urls.json cleared")
-        except Exception:
-            pass
+            # Also nuke the prev cache so dedup can't load stale fingerprints from there
+            if os.path.exists(_PREV_DIR):
+                prev_seen = os.path.join(_PREV_DIR, "seen_urls.json")
+                if os.path.exists(prev_seen):
+                    os.remove(prev_seen)
+                    logger.info("   Force refresh: _prev/seen_urls.json cleared")
+        except Exception as e:
+            logger.warning(f"   Force refresh cleanup error: {e}")
 
     initial_state: PipelineState = {
         "run_id":       run_id,

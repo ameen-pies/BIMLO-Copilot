@@ -173,6 +173,11 @@ class AgentState(TypedDict):
     # "" means search all docs; non-empty restricts retrieval to a specific doc
     doc_scope_hint: str
 
+    # filenames of documents explicitly attached to THIS message by the user
+    # (populated from pending_doc_ids resolved to filenames by main.py).
+    # This is the highest-priority scope signal — overrides the intent classifier.
+    attached_doc_filenames: List[str]
+
 
 MAX_ITER = 3
 MAX_RETRIES = 1  # Max retries for quality issues (was 2 — caused up to 7 LLM calls per query)
@@ -716,8 +721,13 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None) -> Dict[str, Any]:
-        """Main entry point. conversation_history, prev_route, route_log all managed by main.py."""
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None, attached_doc_filenames: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Main entry point. conversation_history, prev_route, route_log all managed by main.py.
+
+        attached_doc_filenames: filenames of documents explicitly attached to THIS message
+            by the user (resolved from pending_doc_ids by main.py before calling here).
+            This is the highest-priority scope signal and bypasses the intent classifier.
+        """
 
         # Strip the [voice_input=true] sentinel the frontend appends after transcription.
         # We detect it BEFORE storing anything so the clean query flows everywhere.
@@ -777,6 +787,7 @@ class RAGEngine:
             "voice_transcribed": voice_transcribed,
             "preferred_provider": preferred_provider,
             "doc_scope_hint": "",
+            "attached_doc_filenames": attached_doc_filenames or [],
         }
         
         print(f"\n{'='*80}")
@@ -1123,52 +1134,70 @@ Now generate for: "{q}" """
 
         print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
 
-        # Normalised query — used by both the image guard and code-gen guard below.
-        _q = query.lower().strip()
+        # ── Highest-priority scope override: docs attached to THIS message ────
+        # When the user physically attaches file(s) to a message, the intent
+        # classifier is given that context and can reason about it.  However,
+        # we only apply a hard bypass of the classifier when the query is
+        # genuinely about the attached file's content — not for independent
+        # questions that happen to co-occur with an upload.
+        #
+        # Detection: the query references the attachment (pronouns, "this image",
+        # "describe", "what is in", etc.) OR is very short/vague (≤ 6 words
+        # with no independent factual intent).  Independent factual questions
+        # like "what is ORENDA junior entreprise" are classified normally even
+        # if a file was uploaded in the same session turn.
+        _attached_filenames = state.get("attached_doc_filenames", [])
+        if _attached_filenames:
+            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+            _all_images = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached_filenames)
 
-        # ── Pre-router: image query guard ────────────────────────────────────
-        # If session has image documents and query is clearly about visual content,
-        # route straight to rag without spending tokens on the router LLM.
-        _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
-        _session_has_images = any(
-            os.path.splitext(d.get("filename", ""))[1].lower() in _image_exts
-            for d in all_docs
-        )
-        _image_content_signals = [
-            "what do you see", "what do u see", "what is in this image", "whats in this image",
-            "describe the image", "describe this image", "what does this show",
-            "what is shown", "what's in the picture", "analyse this image", "analyze this image",
-            "tell me about this image", "look at this image", "read the text in",
-            "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة",
-            "que vois-tu", "qu'est-ce que tu vois", "décris cette image",
-        ]
-        if _session_has_images and (
-            any(s in _q for s in _image_content_signals) or
-            (any(w in _q for w in ["image", "picture", "photo", "screenshot", "صورة"]) and
-             any(w in _q for w in ["see", "show", "describe", "tell", "what", "analyse", "analyze", "explain"]))
-        ):
-            print("image (image-query guard)")
-            # ── Resolve doc_scope for image queries ───────────────────────────
-            # 1. Explicit filename mention in query
-            # 2. "this image" with multiple docs → most recently uploaded (recency wins)
-            # 3. Only one image in session → unambiguous
-            _image_docs = [
-                d for d in all_docs
-                if os.path.splitext(d.get("filename", ""))[1].lower() in _image_exts
+            # Signals that the query is ABOUT the attached file(s)
+            _q_lower = query.lower().strip()
+            _attachment_ref_signals = [
+                # pronouns / direct references
+                "this image", "this photo", "this picture", "this screenshot",
+                "this file", "this document", "this one", "that image",
+                "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
+                # vision / describe intent
+                "what do you see", "what is in", "what's in", "describe",
+                "tell me about", "look at", "analyse", "analyze", "explain this",
+                "read this", "what does this show", "what does it show",
+                # very short vague references (≤ 6 words, no independent noun/verb)
             ]
-            _img_scope = ""
-            for _d in _image_docs:
-                _fn = _d.get("filename", "")
-                if _fn and _fn.lower() in _q:
-                    _img_scope = _fn
-                    break
-            if not _img_scope and len(_image_docs) == 1:
-                _img_scope = _image_docs[0].get("filename", "")
-            if not _img_scope and any(p in _q for p in ["this image", "this one", "this photo", "this picture", "this screenshot", "هذه الصورة", "cette image"]):
-                _img_scope = _image_docs[-1].get("filename", "") if _image_docs else ""
-            if _img_scope:
-                print(f"  [image scope → {_img_scope}]")
-            return {**state, "route": "image", "doc_scope_hint": _img_scope}
+            _query_words = _q_lower.split()
+            _is_short_vague = len(_query_words) <= 6 and not any(
+                # independent factual openers that signal the query stands alone
+                _q_lower.startswith(opener) for opener in [
+                    "what is ", "who is ", "where is ", "when is ", "how is ",
+                    "define ", "explain what", "tell me what",
+                    "qu'est-ce que", "ما هو", "ما هي",
+                ]
+            )
+            _references_attachment = (
+                any(sig in _q_lower for sig in _attachment_ref_signals)
+                or _is_short_vague
+            )
+
+            if _references_attachment:
+                # Hard bypass: query is unambiguously about the attached file(s).
+                # Build a multi-file scope so image_node can retrieve ALL attached images.
+                if len(_attached_filenames) > 1:
+                    # Encode as pipe-separated list so image_node knows to fetch all
+                    _scope_str = "|".join(_attached_filenames)
+                else:
+                    _scope_str = _attached_filenames[-1]
+
+                _route = "image" if _all_images else "rag"
+                print(f"{_route} (attached-doc override → {_attached_filenames})")
+                return {**state, "route": _route, "doc_scope_hint": _scope_str,
+                        "attached_doc_filenames": _attached_filenames}
+            else:
+                # Query stands on its own — let the classifier handle it normally.
+                # Still make attached filenames available for context, but don't bypass.
+                print(f"(attached files present but query is independent — classifying normally) → ", end="")
+
+        # Normalised query — used by the code-gen guard below.
+        _q = query.lower().strip()
 
         # ── Pre-router: code generation guard ────────────────────────────────
         # Catches "write/make/give me code/function/script/algorithm for X"
@@ -1202,6 +1231,7 @@ Now generate for: "{q}" """
                 preferred_provider=state.get("preferred_provider"),
                 session_has_docs=_session_has_docs,
                 uploaded_docs=_uploaded_filenames,
+                attached_doc_filenames=_attached_filenames,
             )
             intent_hint = (
                 f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
@@ -2315,6 +2345,7 @@ Answer in {plan.target_language}:"""
         plan = state.get("response_plan")
         if plan and evaluation.how_to_fix:
             updates = {}
+            fix = evaluation.how_to_fix
             if not evaluation.tone_correct:
                 if any(w in fix for w in ("formal", "professional")):
                     updates["target_tone"] = "professional"
@@ -2482,10 +2513,16 @@ Language: {plan.target_language}. Tone: {plan.target_tone}.
 
 TASK: {query}
 
-OUTPUT FORMAT — follow this structure exactly:
-1. **Opening paragraph** (2-3 sentences): A clear, direct definition. What is this concept? [1]
-2. **How it works** (1 paragraph OR 3-5 bullet points if there are distinct steps/components): Explain the mechanism, key properties, or main aspects. Use bullets when listing 3+ distinct items.
-3. **Why it matters** (1-2 sentences): Brief note on real-world significance or practical use.
+OUTPUT FORMAT — write three sections separated by blank lines, in this exact order:
+
+SECTION A — Definition (2-3 sentences): A clear, direct definition of the concept. [1]
+
+SECTION B — How it works: Explain the mechanism, key properties, or main aspects. Write as a prose paragraph OR as bullet points (- item) when listing 3+ distinct items. Do NOT number items.
+
+SECTION C — Why it matters (1-2 sentences): Brief note on real-world significance or practical use.
+
+Do NOT label the sections with "SECTION A", "SECTION B", etc. — just write the content directly.
+Do NOT use any numbered lists (1. 2. 3.) anywhere in your response.
 
 CITATION RULES:
 - After every sentence drawn from Source 1 (Wikipedia), add [1].
@@ -2574,39 +2611,98 @@ Explain in {plan.target_language}:"""
         print(f"🖼️  image_node → query={query[:80]!r}")
 
         # ── Fetch image chunks from the user/session's collection ─────────
-        # Respect doc_scope_hint — if a specific image was targeted, filter to it only.
-        _scope = state.get("doc_scope_hint", "")
-        _img_filter: dict = {"doc_type": "image"}
-        if _scope:
-            _img_filter = {"filename": _scope}
-            print(f"   [image_node: scoped to '{_scope}']")
+        # Respect doc_scope_hint — supports:
+        #   ""               → all images in session (doc_type=image filter)
+        #   "file.png"       → single scoped image
+        #   "a.png|b.png"    → multiple images (pipe-separated, e.g. when user
+        #                       asks about both attached images at once)
+        _scope_raw = state.get("doc_scope_hint", "")
+        _scoped_files = [s.strip() for s in _scope_raw.split("|") if s.strip()] if _scope_raw else []
 
-        try:
-            all_chunks = self.vs.search(
-                query,
-                top_k=10,
-                user_id=user_id,
-                session_id=session_id,
-                filter_dict=_img_filter,
-            )
-        except Exception as _e:
-            print(f"⚠️  image_node: vector search failed: {_e}")
-            all_chunks = []
+        all_chunks: list = []
 
-        # Also try an unfiltered search in case metadata wasn't tagged correctly
-        if not all_chunks:
-            try:
-                unfiltered = self.vs.search(query, top_k=10, user_id=user_id, session_id=session_id)
-                # If scoped, filter to that filename; otherwise filter by doc_type
-                if _scope:
+        if _scoped_files:
+            # Retrieve chunks for every scoped filename and merge
+            print(f"   [image_node: scoped to {_scoped_files}]")
+            for _fname in _scoped_files:
+                try:
+                    _chunks = self.vs.search(
+                        query,
+                        top_k=10,
+                        user_id=user_id,
+                        session_id=session_id,
+                        filter_dict={"filename": _fname},
+                    )
+                    all_chunks.extend(_chunks)
+                except Exception as _e:
+                    print(f"⚠️  image_node: vector search failed for '{_fname}': {_e}")
+
+            # Fallback: unfiltered search, then filter by filename set
+            if not all_chunks:
+                try:
+                    unfiltered = self.vs.search(query, top_k=20, user_id=user_id, session_id=session_id)
                     all_chunks = [c for c in unfiltered if
-                                  c.get("metadata", {}).get("filename") == _scope]
-                else:
+                                  c.get("metadata", {}).get("filename") in _scoped_files]
+                except Exception:
+                    pass
+        else:
+            # No scope — retrieve all image chunks in this session
+            try:
+                all_chunks = self.vs.search(
+                    query,
+                    top_k=10,
+                    user_id=user_id,
+                    session_id=session_id,
+                    filter_dict={"doc_type": "image"},
+                )
+            except Exception as _e:
+                print(f"⚠️  image_node: vector search failed: {_e}")
+                all_chunks = []
+
+            # Fallback: unfiltered search filtered by doc_type / has_images
+            if not all_chunks:
+                try:
+                    unfiltered = self.vs.search(query, top_k=10, user_id=user_id, session_id=session_id)
                     all_chunks = [c for c in unfiltered if
                                   c.get("metadata", {}).get("doc_type") == "image" or
                                   c.get("metadata", {}).get("has_images")]
-            except Exception:
-                pass
+                except Exception:
+                    pass
+
+        # Deduplicate by chunk id / text hash so merging doesn't double-count
+        _seen_texts: set = set()
+        _deduped: list = []
+        for _c in all_chunks:
+            _key = _c.get("id") or _c.get("text", "")[:120]
+            if _key not in _seen_texts:
+                _seen_texts.add(_key)
+                _deduped.append(_c)
+        all_chunks = _deduped
+
+        # Group image chunks by filename so a single uploaded image is not
+        # treated as multiple images when its description was split into chunks.
+        _grouped: dict = {}
+        for _c in all_chunks:
+            _fname = _c.get("metadata", {}).get("filename", "image")
+            _grouped.setdefault(_fname, []).append(_c)
+
+        grouped_chunks: list = []
+        for _fname, _items in _grouped.items():
+            if len(_items) == 1:
+                grouped_chunks.append(_items[0])
+                continue
+
+            _items.sort(key=lambda c: c.get("metadata", {}).get("chunk_index", c.get("chunk_id", 0)))
+            grouped_text = "\n\n".join(c["text"] for c in _items if c.get("text"))
+            merged_meta = _items[0].get("metadata", {}).copy()
+            merged_meta["chunk_count"] = len(_items)
+            grouped_chunks.append({
+                "text": grouped_text,
+                "metadata": merged_meta,
+                "id": _items[0].get("id"),
+                "distance": min((c.get("distance", 1.0) for c in _items), default=1.0),
+            })
+        all_chunks = grouped_chunks
 
         # ── Placeholder / missing description detection ───────────────────
         # These strings are what document_processor writes when vision fails.
@@ -2628,8 +2724,8 @@ Explain in {plan.target_language}:"""
             print("🔍 image_node: attempting live vision call (placeholder or missing chunks)")
 
             # Pull raw bytes from DOCUMENT_FILE_CACHE (imported lazily to avoid circular import)
-            fresh_description = ""
-            live_filename = ""
+            # When multiple images are scoped, attempt a live call for each one.
+            _live_chunks: list = []
             try:
                 # Import the cache from main module — it lives in the process globals
                 import sys as _sys
@@ -2637,53 +2733,67 @@ Explain in {plan.target_language}:"""
                 _cache = getattr(_main, "DOCUMENT_FILE_CACHE", {})
 
                 # Find image entries scoped to this session
-                image_entries = [
+                all_image_entries = [
                     (doc_id, entry)
                     for doc_id, entry in _cache.items()
                     if entry.get("is_image") and entry.get("session_id") == session_id
                 ]
 
-                if image_entries:
-                    # If a specific image was targeted, prefer it; otherwise use most recent
-                    _target = state.get("doc_scope_hint", "")
-                    if _target:
-                        _matched = [(did, e) for did, e in image_entries if e.get("filename") == _target]
-                        if _matched:
-                            image_entries = _matched
-                    doc_id, entry = image_entries[-1]
-                    live_filename = entry["filename"]
-                    raw_bytes     = entry["bytes"]
+                if all_image_entries:
+                    # Filter to scoped filenames when scope is set
+                    if _scoped_files:
+                        targeted_entries = [
+                            (did, e) for did, e in all_image_entries
+                            if e.get("filename") in _scoped_files
+                        ]
+                        # Preserve order of _scoped_files
+                        _fname_to_entry = {e.get("filename"): (did, e) for did, e in targeted_entries}
+                        targeted_entries = [
+                            _fname_to_entry[fn]
+                            for fn in _scoped_files
+                            if fn in _fname_to_entry
+                        ]
+                        if not targeted_entries:
+                            targeted_entries = all_image_entries  # fallback: all
+                    else:
+                        targeted_entries = all_image_entries  # no scope → try all
 
-                    # Use DocumentProcessor to describe (handles resize + primary→backup fallback)
-                    try:
-                        from document_processor import DocumentProcessor as _DP
-                        _dp = _DP()
-                        fresh_description = _dp.describe_image_bytes(raw_bytes, live_filename)
-                        if fresh_description:
-                            print(f"   ✅ Live vision description for '{live_filename}': {len(fresh_description)} chars")
-                    except Exception as _ve:
-                        print(f"   ⚠️  Live vision call failed: {_ve}")
+                    from document_processor import DocumentProcessor as _DP
+                    _dp = _DP()
+
+                    for _doc_id, _entry in targeted_entries:
+                        _live_fname = _entry["filename"]
+                        _raw_bytes  = _entry["bytes"]
+                        try:
+                            _fresh_desc = _dp.describe_image_bytes(_raw_bytes, _live_fname)
+                            if _fresh_desc:
+                                print(f"   ✅ Live vision description for '{_live_fname}': {len(_fresh_desc)} chars")
+                                _live_chunks.append({
+                                    "text": (
+                                        f"[UPLOADED IMAGE: {_live_fname}]\n"
+                                        f"Visual description:\n{_fresh_desc}"
+                                    ),
+                                    "metadata": {
+                                        "filename":  _live_fname,
+                                        "doc_type":  "image",
+                                        "has_images": True,
+                                        "source":    "live_vision",
+                                    },
+                                    "distance": 0.05,
+                                })
+                        except Exception as _ve:
+                            print(f"   ⚠️  Live vision call failed for '{_live_fname}': {_ve}")
                 else:
                     print("   ⚠️  image_node: no image entries in DOCUMENT_FILE_CACHE for this session")
 
             except Exception as _ce:
                 print(f"   ⚠️  image_node: could not access DOCUMENT_FILE_CACHE: {_ce}")
 
-            if fresh_description:
-                # Inject the live description as a synthetic chunk so synthesis works normally
-                all_chunks = [{
-                    "text": (
-                        f"[UPLOADED IMAGE: {live_filename}]\n"
-                        f"Visual description:\n{fresh_description}"
-                    ),
-                    "metadata": {
-                        "filename":  live_filename,
-                        "doc_type":  "image",
-                        "has_images": True,
-                        "source":    "live_vision",
-                    },
-                    "distance": 0.05,
-                }]
+            if _live_chunks:
+                # Use live descriptions; merge with any non-placeholder ingested chunks
+                _ingested_ok = [c for c in all_chunks if not _is_placeholder(c)]
+                all_chunks = _live_chunks + _ingested_ok
+                print(f"   🖼️  image_node: {len(_live_chunks)} live description(s) + {len(_ingested_ok)} indexed chunk(s)")
             elif not all_chunks:
                 # Both ingestion and live vision failed — tell the user clearly
                 answer = (

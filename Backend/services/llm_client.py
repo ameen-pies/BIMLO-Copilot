@@ -45,6 +45,58 @@ _NVIDIA_API_URL      = "https://integrate.api.nvidia.com/v1/chat/completions"
 _NVIDIA_MODEL        = "minimaxai/minimax-m2.7"
 
 # ---------------------------------------------------------------------------
+# Circuit breaker — per-provider trip state
+# ---------------------------------------------------------------------------
+# When a provider returns a fatal quota/auth error (not a transient 5xx),
+# we trip its breaker so every subsequent call skips it immediately without
+# a network round-trip.  Resets automatically after RESET_AFTER_SECONDS so
+# the process heals itself if the quota refills (e.g. midnight UTC for CF).
+
+import threading as _threading
+import time as _time
+
+_FATAL_CF_CODES = {
+    "4006",  # daily quota exhausted
+    "4007",  # model not available
+    "4012",  # subscription limit
+}
+_CIRCUIT_RESET_AFTER = 3600  # 1 hour — CF daily quotas refill at midnight UTC
+
+class _CircuitBreaker:
+    def __init__(self, name: str):
+        self.name       = name
+        self._tripped   = False
+        self._tripped_at: float = 0.0
+        self._lock      = _threading.Lock()
+
+    def trip(self, reason: str) -> None:
+        with self._lock:
+            if not self._tripped:
+                self._tripped    = True
+                self._tripped_at = _time.time()
+                print(f"🔴 llm_client: circuit breaker OPEN for '{self.name}' — {reason} "
+                      f"(will retry after {_CIRCUIT_RESET_AFTER // 60}min)")
+
+    def is_open(self) -> bool:
+        with self._lock:
+            if not self._tripped:
+                return False
+            if _time.time() - self._tripped_at > _CIRCUIT_RESET_AFTER:
+                self._tripped = False
+                print(f"🟢 llm_client: circuit breaker RESET for '{self.name}' — retrying")
+                return False
+            return True
+
+_cb_primary = _CircuitBreaker("cf_primary")
+_cb_backup  = _CircuitBreaker("cf_backup")
+
+
+def _is_fatal_cf_error(response_text: str) -> bool:
+    """Return True if the CF error body contains a known fatal (non-transient) code."""
+    return any(code in response_text for code in _FATAL_CF_CODES)
+
+
+# ---------------------------------------------------------------------------
 # Internal: single CF worker call
 # ---------------------------------------------------------------------------
 
@@ -53,6 +105,7 @@ def _call_cf_worker(
     api_key: str,
     payload: dict,
     label: str,
+    breaker: "_CircuitBreaker | None" = None,
 ) -> tuple[str | None, str | None]:
     """
     Attempt one CF worker and return the response text on success.
@@ -60,7 +113,15 @@ def _call_cf_worker(
     Returns:
         (text, None)       on success
         (None, reason)     on failure — caller moves to next provider
+
+    If `breaker` is provided and the response contains a fatal quota/auth error
+    code, the breaker is tripped so future calls skip this provider immediately.
     """
+    # Fast-path: skip the network call entirely if the breaker is open
+    if breaker and breaker.is_open():
+        reason = f"CF {label} circuit breaker open — skipping"
+        return None, reason
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type":  "application/json",
@@ -84,6 +145,9 @@ def _call_cf_worker(
             else:
                 reason = f"CF {label} returned {resp.status_code}: {resp.text[:80]}"
                 print(f"⚠️  llm_client: {reason}")
+                # Trip the breaker for fatal quota/auth errors — no point retrying
+                if breaker and _is_fatal_cf_error(resp.text):
+                    breaker.trip(reason)
                 return None, reason
 
         except Exception as e:
@@ -296,7 +360,7 @@ def call_llm(
     # ── User-preferred provider (tried first) ─────────────────────────────────
     if preferred_provider == "cf_primary":
         if cf_primary_key:
-            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary")
+            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary", _cb_primary)
             if text is not None:
                 return text
             last_reason = reason or "cf_primary failed"
@@ -307,7 +371,7 @@ def call_llm(
 
     elif preferred_provider == "cf_backup":
         if cf_backup_key:
-            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup")
+            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup", _cb_backup)
             if text is not None:
                 return text
             last_reason = reason or "cf_backup failed"
@@ -350,7 +414,7 @@ def call_llm(
     # CF Primary
     if preferred_provider != "cf_primary":
         if cf_primary_key:
-            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary")
+            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary", _cb_primary)
             if text is not None:
                 return text
             last_reason = reason or "cf_primary failed"
@@ -361,7 +425,7 @@ def call_llm(
     # CF Backup
     if preferred_provider != "cf_backup":
         if cf_backup_key:
-            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup")
+            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup", _cb_backup)
             if text is not None:
                 print("✅ llm_client: CF backup worker answered")
                 return text

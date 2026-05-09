@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from io import BytesIO
-import os, mimetypes, uuid, json, asyncio, threading, queue
+import os, mimetypes, uuid, json, asyncio, threading, queue, hashlib
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import deque
@@ -165,6 +165,9 @@ _session_routes: Dict[str, str] = {}
 _session_route_log: Dict[str, list] = {}
 # session_id -> user_id (for linking auto-created conversations to user accounts)
 _session_user_context: Dict[str, str] = {}
+# session_id -> ordered list of filenames uploaded/referenced in this session (most recent last).
+# Used so follow-up questions without an explicit attachment can inherit the last active file.
+_session_file_stack: Dict[str, List[str]] = {}
 
 def get_history(session_id: str) -> List[dict]:
     # Hot path: already in memory
@@ -328,6 +331,7 @@ def clear_history(session_id: str):
     _sessions.pop(session_id, None)
     _session_routes.pop(session_id, None)
     _session_route_log.pop(session_id, None)
+    _session_file_stack.pop(session_id, None)
 
 
 def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Optional[str]):
@@ -338,6 +342,11 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
     The upload endpoint submits docs to the background ingestion pipeline,
     so by the time the user sends their first message the doc may or may not
     be in ChromaDB yet.  This function guarantees it is.
+
+    If the ingestion pipeline was already submitted for a doc (pipeline_submitted=True
+    in DOCUMENT_FILE_CACHE), we do NOT re-process or re-add it — that would cause
+    duplicate chunks (the JPG duplication bug).  Instead we wait briefly for the
+    pipeline to finish, then move on regardless.
     """
     if not pending_doc_ids:
         return
@@ -352,12 +361,37 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
         except Exception:
             pass
 
-        # Not indexed yet — pull from in-memory file cache and index synchronously
         _cached = DOCUMENT_FILE_CACHE.get(_pending_id)
         if not _cached:
             print(f"⚠️  Doc {_pending_id} not in file cache — ingestion pipeline may still be running")
             continue
 
+        # ── Duplicate-indexing guard ───────────────────────────────────────
+        # If the ingestion pipeline owns this doc, don't re-process it here.
+        # The pipeline runs asynchronously; poll briefly for it to finish.
+        if _cached.get("pipeline_submitted"):
+            import time as _time
+            _waited = 0
+            _poll_interval = 0.25   # seconds
+            _max_wait      = 8.0    # seconds — generous for vision LLM calls
+            while _waited < _max_wait:
+                try:
+                    _check = vector_store.list_documents(user_id=user_id, session_id=session_id)
+                    if any(d["document_id"] == _pending_id for d in _check):
+                        print(f"✅ Doc {_pending_id} indexed by pipeline after {_waited:.1f}s wait")
+                        break
+                except Exception:
+                    pass
+                _time.sleep(_poll_interval)
+                _waited += _poll_interval
+            else:
+                print(
+                    f"⚠️  Doc {_pending_id} ('{_cached['filename']}') still not in Chroma after "
+                    f"{_max_wait}s — pipeline may have failed; skipping to avoid duplicate indexing."
+                )
+            continue  # Either indexed by pipeline, or timed out — either way, don't double-add
+
+        # Not pipeline-submitted — fall through to synchronous indexing (legacy / fallback path)
         print(f"⏳ Committing pending doc '{_cached['filename']}' ({_pending_id})…")
         try:
             _ext = _cached.get('doc_type', '.txt')
@@ -402,14 +436,17 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
 # ============================================================================
 
 class QueryRequest(BaseModel):
-    query:              str
-    top_k:              Optional[int]  = 5
-    session_id:         Optional[str]  = None
-    force_route:        Optional[str]  = None
-    voice_mode:         Optional[bool] = False
-    conversation_id:    Optional[str]  = None
-    pending_doc_ids:    Optional[List[str]] = []
-    preferred_provider: Optional[str]  = None  # "cf_primary" | "cf_backup" | "groq" | "nvidia"
+    query:                  str
+    top_k:                  Optional[int]  = 5
+    session_id:             Optional[str]  = None
+    force_route:            Optional[str]  = None
+    voice_mode:             Optional[bool] = False
+    conversation_id:        Optional[str]  = None
+    pending_doc_ids:        Optional[List[str]] = []
+    preferred_provider:     Optional[str]  = None  # "cf_primary" | "cf_backup" | "groq" | "nvidia"
+    # Filenames of files explicitly attached to THIS message (resolved by frontend from pending_doc_ids).
+    # Highest-priority scope signal — bypasses intent classifier guessing.
+    attached_doc_filenames: Optional[List[str]] = []
 
 
 class QueryResponse(BaseModel):
@@ -468,8 +505,47 @@ async def upload_document(
         print(f"📄 Received: {file.filename} ({len(content)} bytes)")
 
         import uuid as _uuid_mod
-        doc_id = str(_uuid_mod.uuid4())
         session_id = session_id or str(_uuid_mod.uuid4())
+        content_hash = hashlib.sha256(content).hexdigest()
+
+        # If this exact file was already uploaded to this session, reuse the
+        # existing document and avoid duplicate indexing.
+        if session_id:
+            try:
+                from neo4j_auth import _run as neo4j_run
+                rows = neo4j_run(
+                    """
+                    MATCH (c:Conversation {session_id: $session_id})-[:USED_DOCUMENT]->(d:Document)
+                    WHERE d.content_hash = $content_hash
+                    RETURN d.id AS document_id,
+                           d.filename AS filename,
+                           d.doc_type AS doc_type,
+                           d.chunk_count AS chunk_count
+                    LIMIT 1
+                    """,
+                    {"session_id": session_id, "content_hash": content_hash},
+                )
+                if rows:
+                    existing = rows[0]
+                    print(f"⚠️  Duplicate upload detected for session {session_id}: returning existing document {existing['document_id']}")
+                    _stack = _session_file_stack.setdefault(session_id, [])
+                    if existing['filename'] in _stack:
+                        _stack.remove(existing['filename'])
+                    _stack.append(existing['filename'])
+                    return {
+                        "status": "success",
+                        "filename": existing['filename'],
+                        "document_id": existing['document_id'],
+                        "session_id": session_id,
+                        "chunks_processed": existing['chunk_count'] or 0,
+                        "cad_summary": None,
+                        "is_image": ext in image_allowed,
+                        "message": f"Duplicate file upload skipped; returning existing document '{existing['filename']}'.",
+                    }
+            except Exception as _dup_err:
+                print(f"⚠️  Duplicate file lookup failed: {_dup_err}")
+
+        doc_id = str(_uuid_mod.uuid4())
         DOCUMENT_FILE_CACHE[doc_id] = {
             'filename': file.filename,
             'bytes': content,
@@ -477,6 +553,7 @@ async def upload_document(
             'session_id': session_id,
             'doc_type': ext,
             'is_image': is_image,
+            'content_hash': content_hash,
         }
         chunks = []
         cad_summary = None
@@ -538,6 +615,8 @@ async def upload_document(
 
         if _ingestion_graph_available:
             run_ingestion_pipeline(vector_store, doc_id, file.filename, chunks, session_id=session_id, user_id=user_id)
+            # Mark so commit_pending_docs knows the pipeline owns this doc and won't double-index it
+            DOCUMENT_FILE_CACHE[doc_id]["pipeline_submitted"] = True
             print(f"📬 Ingestion pipeline submitted for '{file.filename}' (doc_id={doc_id}, user={user_id or 'anonymous'}, session={session_id})")
         else:
             # Fallback: direct synchronous indexing when ingestion_graph not available
@@ -562,11 +641,12 @@ async def upload_document(
             neo4j_run(
                 """
                 MERGE (d:Document {id: $doc_id})
-                SET d.filename    = $filename,
-                    d.doc_type    = $doc_type,
-                    d.chunk_count = $chunk_count,
-                    d.uploaded_at = $now,
-                    d.session_id  = $session_id
+                SET d.filename      = $filename,
+                    d.doc_type      = $doc_type,
+                    d.chunk_count   = $chunk_count,
+                    d.uploaded_at   = $now,
+                    d.session_id    = $session_id,
+                    d.content_hash  = $content_hash
                 """,
                 {
                     "doc_id":      doc_id,
@@ -575,6 +655,7 @@ async def upload_document(
                     "chunk_count": len(chunks),
                     "now":         _now,
                     "session_id":  session_id or "",
+                    "content_hash": DOCUMENT_FILE_CACHE[doc_id].get('content_hash'),
                 },
             )
             # 2. Link doc → conversation session (so /documents?session_id= filters work)
@@ -602,6 +683,15 @@ async def upload_document(
                 print(f"☁️  Neo4j: '{file.filename}' → anonymous session {session_id}")
         except Exception as neo_err:
             print(f"⚠️  Neo4j doc save failed (non-fatal): {neo_err}")
+
+        # ── Track file in session file stack (powers follow-up scope resolution) ──
+        _stack = _session_file_stack.setdefault(session_id, [])
+        if file.filename not in _stack:
+            _stack.append(file.filename)
+        else:
+            # Move to end so it's always the "most recent" for this session
+            _stack.remove(file.filename)
+            _stack.append(file.filename)
 
         return {
             "status":           "success",
@@ -657,6 +747,13 @@ async def query_documents(
             print(f"📎 /query: {len(pending_doc_ids)} pending doc(s) — ensuring indexed before search")
             commit_pending_docs(pending_doc_ids, session_id, user_id)
 
+        # ── Update session file stack with any explicitly attached files ───────
+        for _fname in (request.attached_doc_filenames or []):
+            _stack = _session_file_stack.setdefault(session_id, [])
+            if _fname in _stack:
+                _stack.remove(_fname)
+            _stack.append(_fname)
+
         print(f"\n🔍 Query: {request.query} [session={session_id}, history={len(history)} turns, preferred_provider={request.preferred_provider!r}]")
 
         # In voice_mode, prepend a strong system instruction so the RAG engine
@@ -680,6 +777,15 @@ async def query_documents(
         # Run the RAG engine with server-side history
         prev_route = _session_routes.get(session_id, "")
         route_log  = get_route_log(session_id)
+
+        # Build attached_doc_filenames: explicit attachments first, then fall back
+        # to the session's most-recently-uploaded file for follow-up questions.
+        _attached = list(request.attached_doc_filenames or [])
+        if not _attached:
+            _stack = _session_file_stack.get(session_id, [])
+            if _stack:
+                _attached = [_stack[-1]]  # inherit last active file
+
         result = rag_engine.query(
             request.query,
             top_k=request.top_k,
@@ -691,6 +797,7 @@ async def query_documents(
             user_id=user_id,
             voice_mode=request.voice_mode,
             preferred_provider=request.preferred_provider,
+            attached_doc_filenames=_attached,
         )
 
         # Store this turn in server-side history (clean, no [N] citation markers)
@@ -807,6 +914,20 @@ async def query_stream(
                 print(f"📎 /query-stream: {len(_pending)} pending doc(s) — ensuring indexed")
                 commit_pending_docs(_pending, session_id, user_id)
 
+            # Build attached_doc_filenames: explicit attachments first, then fall back
+            # to the session's most-recently-uploaded file for follow-up questions.
+            _attached = list(request.attached_doc_filenames or [])
+            # Push explicit attachments to the session stack so future follow-ups inherit them
+            for _fname in _attached:
+                _stack_s = _session_file_stack.setdefault(session_id, [])
+                if _fname in _stack_s:
+                    _stack_s.remove(_fname)
+                _stack_s.append(_fname)
+            if not _attached:
+                _stack = _session_file_stack.get(session_id, [])
+                if _stack:
+                    _attached = [_stack[-1]]  # inherit last active file
+
             result = rag_engine.query(
                 request.query,
                 top_k=request.top_k,
@@ -819,6 +940,7 @@ async def query_stream(
                 user_id=user_id,
                 voice_mode=request.voice_mode,
                 preferred_provider=request.preferred_provider,
+                attached_doc_filenames=_attached,
             )
             print(f"✅ /query-stream done route={result.get('route')!r} preferred_provider={request.preferred_provider!r}")
             # Persist session
@@ -1394,16 +1516,19 @@ async def list_documents(
                 """,
                 {"sid": session_id},
             )
-            docs = [
-                {
+            seen = set()
+            docs = []
+            for r in rows:
+                if r["document_id"] in seen:
+                    continue
+                seen.add(r["document_id"])
+                docs.append({
                     "document_id": r["document_id"],
                     "filename":    r["filename"] or "unknown",
                     "doc_type":    r["doc_type"] or "unknown",
                     "chunk_count": r["chunk_count"] or 0,
                     "timestamp":   r["timestamp"] or "",
-                }
-                for r in rows
-            ]
+                })
             return {"status": "success", "documents": docs, "total": len(docs), "scoped": True}
         except Exception as neo_err:
             print(f"⚠️  Neo4j session-doc lookup failed: {neo_err}")
