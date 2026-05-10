@@ -781,13 +781,12 @@ async def query_documents(
         prev_route = _session_routes.get(session_id, "")
         route_log  = get_route_log(session_id)
 
-        # Build attached_doc_filenames: explicit attachments first, then fall back
-        # to the session's most-recently-uploaded file for follow-up questions.
+        # Build attached_doc_filenames: only pass files the user EXPLICITLY attached
+        # to this message. Do NOT inherit the last uploaded file automatically —
+        # that was causing every follow-up to be scoped to the wrong file when the
+        # session had multiple docs (e.g. PDF + IFC). The intent classifier and
+        # retrieve_vector's filename-in-query fallback handle scope for follow-ups.
         _attached = list(request.attached_doc_filenames or [])
-        if not _attached:
-            _stack = _session_file_stack.get(session_id, [])
-            if _stack:
-                _attached = [_stack[-1]]  # inherit last active file
 
         result = rag_engine.query(
             request.query,
@@ -917,19 +916,20 @@ async def query_stream(
                 print(f"📎 /query-stream: {len(_pending)} pending doc(s) — ensuring indexed")
                 commit_pending_docs(_pending, session_id, user_id)
 
-            # Build attached_doc_filenames: explicit attachments first, then fall back
-            # to the session's most-recently-uploaded file for follow-up questions.
+            # Build attached_doc_filenames: only pass files the user EXPLICITLY attached
+            # to this message. Do NOT inherit the last uploaded file automatically —
+            # that was causing every follow-up to be scoped to the wrong file when the
+            # session had multiple docs (e.g. PDF + IFC). The intent classifier and
+            # retrieve_vector's filename-in-query fallback handle scope for follow-ups.
             _attached = list(request.attached_doc_filenames or [])
-            # Push explicit attachments to the session stack so future follow-ups inherit them
+            # Push explicit attachments to the session stack so future follow-ups
+            # can still be resolved by the intent classifier when the user uses
+            # pronouns like "it" or "this file".
             for _fname in _attached:
                 _stack_s = _session_file_stack.setdefault(session_id, [])
                 if _fname in _stack_s:
                     _stack_s.remove(_fname)
                 _stack_s.append(_fname)
-            if not _attached:
-                _stack = _session_file_stack.get(session_id, [])
-                if _stack:
-                    _attached = [_stack[-1]]  # inherit last active file
 
             result = rag_engine.query(
                 request.query,

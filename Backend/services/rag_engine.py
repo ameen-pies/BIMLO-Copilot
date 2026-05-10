@@ -958,129 +958,166 @@ Now generate for: "{q}" """
     #  GRAPH CONSTRUCTION                                                 #
     # ------------------------------------------------------------------ #
 
+    def _wrap(self, name: str, fn):
+        """Status-aware node wrapper. Fires the status callback before running fn."""
+        default_icon, default_msg = self._DEFAULT_STATUS_MSGS.get(name, ("⚙️", f"{name}…"))
+        def _wrapped(state):
+            cb = getattr(self, "_status_callback", None)
+            if callable(cb):
+                msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
+                icon, msg = msgs.get(name, (default_icon, default_msg))
+                cb(name, icon, msg)
+            return fn(state)
+        _wrapped.__name__ = name
+        return _wrapped
+
     def _build_graph(self) -> StateGraph:
+        """
+        Build the LangGraph routing pipeline.
+
+        Topology (no if/else blocks — every route is a node):
+
+          classify_intent
+              ├─ direct      → direct_answer                        → END
+              ├─ define      → define_node                          → END
+              ├─ image       → image_node                           → END
+              └─ *retrieval* → retrieve_vector → retrieve_graph → rerank_merge
+                                  ├─ no_docs    → direct_answer     → END
+                                  ├─ transform  → transform_node    → END
+                                  ├─ graph      → graph_node        → END
+                                  ├─ report     → report_node       → END
+                                  ├─ analytics  → analytics_node    → END
+                                  ├─ rewrite    → rewrite_query ──┐
+                                  │                               └→ retrieve_vector (loop)
+                                  └─ synthesise → judge_plan → synthesise → judge_evaluate
+                                                                  ├─ retry          → synthesise
+                                                                  ├─ reroute_direct → direct_answer
+                                                                  ├─ analytics      → analytics_node
+                                                                  └─ done           → END
+        """
         workflow = StateGraph(AgentState)
 
-        # ── Status-aware node wrapper ─────────────────────────────────────
-        # Per-query contextual messages are stored in self._status_msgs (set in query())
-        # Fallback to self._DEFAULT_STATUS_MSGS if not set.
+        # ── Nodes ────────────────────────────────────────────────────────────
+        workflow.add_node("classify_intent",  self._wrap("classify_intent",  self._classify_intent_node))
+        workflow.add_node("direct_answer",    self._wrap("direct_answer",    self.direct_answer))
+        workflow.add_node("retrieve_vector",  self._wrap("retrieve_vector",  self.retrieve_vector))
+        workflow.add_node("retrieve_graph",   self._wrap("retrieve_graph",   self.retrieve_graph))
+        workflow.add_node("rerank_merge",     self._wrap("rerank_merge",     self.rerank_merge))
+        workflow.add_node("rewrite_query",    self._wrap("rewrite_query",    self.rewrite_query))
+        workflow.add_node("judge_plan",       self._wrap("judge_plan",       self.judge_plan))
+        workflow.add_node("synthesise",       self._wrap("synthesise",       self.synthesise))
+        workflow.add_node("judge_evaluate",   self._wrap("judge_evaluate",   self.judge_evaluate))
+        workflow.add_node("analytics_node",   self._wrap("analytics_node",   self.analytics_node))
+        workflow.add_node("transform_node",   self._wrap("transform_node",   self.transform_node))
+        workflow.add_node("define_node",      self._wrap("define_node",      self.define_node))
+        workflow.add_node("graph_node",       self._wrap("graph_node",       self.graph_node))
+        workflow.add_node("report_node",      self._wrap("report_node",      self.report_node))
+        workflow.add_node("image_node",       self._wrap("image_node",       self.image_node))
+        workflow.add_node("cad_node",         self._wrap("cad_node",         self.cad_node))
 
-        def _wrap(name, fn):
-            default_icon, default_msg = self._DEFAULT_STATUS_MSGS.get(name, ("⚙️", f"{name}…"))
-            def _wrapped(state):
-                cb = getattr(self, "_status_callback", None)
-                if callable(cb):
-                    # Use per-query generated messages if available, else defaults
-                    msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
-                    icon, msg = msgs.get(name, (default_icon, default_msg))
-                    cb(name, icon, msg)
-                return fn(state)
-            _wrapped.__name__ = name
-            return _wrapped
+        # no-docs variant — same direct_answer node, flag injected via query prefix
+        def _direct_no_docs(state):
+            return self.direct_answer({**state, "query": f"__NO_DOCS__:{state['query']}"})
+        workflow.add_node("direct_answer_no_docs", _direct_no_docs)
 
-        # Add nodes
-        workflow.add_node("router",           _wrap("router",           self.router))
-        workflow.add_node("direct_answer",    _wrap("direct_answer",    self.direct_answer))
-        # Three-stage retrieval pipeline — each gets its own node for traceability
-        workflow.add_node("retrieve_vector",  _wrap("retrieve_vector",  self.retrieve_vector))
-        workflow.add_node("retrieve_graph",   _wrap("retrieve_graph",   self.retrieve_graph))
-        workflow.add_node("rerank_merge",     _wrap("rerank_merge",     self.rerank_merge))
-        # Legacy single retrieve node (used by rewrite_query loop only)
-        workflow.add_node("retrieve",         _wrap("retrieve",         self.retrieve))
-        workflow.add_node("check_retrieval",  _wrap("check_retrieval",  self.check_retrieval))
-        workflow.add_node("rewrite_query",    _wrap("rewrite_query",    self.rewrite_query))
-        workflow.add_node("judge_plan",      _wrap("judge_plan",      self.judge_plan))
-        workflow.add_node("synthesise",      _wrap("synthesise",      self.synthesise))
-        workflow.add_node("judge_evaluate",  _wrap("judge_evaluate",  self.judge_evaluate))
-        workflow.add_node("analytics_node",  _wrap("analytics_node",  self.analytics_node))
-        workflow.add_node("transform_node",  _wrap("transform_node",  self.transform_node))
-        workflow.add_node("define_node",     _wrap("define_node",     self.define_node))
-        workflow.add_node("graph_node",      _wrap("graph_node",      self.graph_node))
-        workflow.add_node("report_node",     _wrap("report_node",     self.report_node))
-        workflow.add_node("image_node",      _wrap("image_node",      self.image_node))
+        # ── Entry ─────────────────────────────────────────────────────────────
+        workflow.set_entry_point("classify_intent")
 
-        # Entry point
-        workflow.set_entry_point("router")
+        # ── classify_intent → first node (pure dispatch, zero logic) ─────────
+        _RETRIEVAL_ROUTES = {"rag", "iterative_rag", "analytics", "transform", "graph", "report"}
 
-        # Router edges — doc retrieval routes now enter the 3-stage pipeline
+        def _router_dispatch(s):
+            route = s.get("route", "rag")
+            if route == "direct":   return "direct_answer"
+            if route == "define":   return "define_node"
+            if route == "image":    return "image_node"
+            if route == "cad":      return "cad_node"
+            if route in _RETRIEVAL_ROUTES: return "retrieve_vector"
+            print(f"⚠️  unknown route '{route}' → retrieve_vector")
+            return "retrieve_vector"
+
         workflow.add_conditional_edges(
-            "router",
-            lambda s: s["route"],
+            "classify_intent",
+            _router_dispatch,
             {
-                "direct":        "direct_answer",
-                "rag":           "retrieve_vector",
-                "iterative_rag": "retrieve_vector",
-                "analytics":     "retrieve_vector",
-                "transform":     "retrieve_vector",
-                "define":        "define_node",    # Wikipedia — no doc retrieval
-                "graph":         "retrieve_vector",
-                "report":        "retrieve_vector",
-                "image":         "image_node",     # dedicated image description route
-            }
+                "direct_answer":   "direct_answer",
+                "define_node":     "define_node",
+                "image_node":      "image_node",
+                "cad_node":        "cad_node",
+                "retrieve_vector": "retrieve_vector",
+            },
         )
-        # Three-stage retrieval pipeline edges
+
+        # ── Three-stage retrieval pipeline ────────────────────────────────────
         workflow.add_edge("retrieve_vector", "retrieve_graph")
         workflow.add_edge("retrieve_graph",  "rerank_merge")
-        workflow.add_edge("rerank_merge",    "check_retrieval")
 
-        # Direct answer ends
-        workflow.add_edge("direct_answer", END)
-
-        # image_node ends directly — no retrieval or judge loop needed
-        workflow.add_edge("image_node", END)
-
-        # Retrieval flow
-        def _check_retrieval_route(s):
-            if not s["retrieved_chunks"]:
-                return "no_docs"   # nothing in the store → direct answer explains this
-            if s["route"] == "transform":
-                return "transform"
-            if s["route"] == "define":
-                return "define"
-            if s["route"] == "graph":
-                return "graph"
-            if s["route"] == "report":
-                return "report"
-            # voice_mode: always single-pass — skip iterative retrieval loop
-            if (not s.get("voice_mode", False)
-                    and s["route"] == "iterative_rag"
-                    and s["retrieval_iterations"] < MAX_ITER
-                    and not _is_good_retrieval(s["retrieved_chunks"])):
-                return "rewrite"
-            return "done"
+        def _post_retrieve_dispatch(s):
+            chunks = s.get("retrieved_chunks", [])
+            route  = s.get("route", "rag")
+            if not chunks:
+                # Nothing retrieved — check whether session is empty or query just missed
+                session_id = s.get("session_id", "")
+                user_id    = s.get("user_id")
+                try:
+                    has_docs = self.vs.has_documents(user_id=user_id, session_id=session_id)
+                except Exception:
+                    has_docs = True
+                if not has_docs:
+                    return "direct_answer_no_docs"
+                # Query missed but docs exist — fall through to synthesis with no context
+            _ROUTE_NODE = {
+                "transform": "transform_node",
+                "graph":     "graph_node",
+                "report":    "report_node",
+                "analytics": "analytics_node",
+            }
+            if route in _ROUTE_NODE:
+                return _ROUTE_NODE[route]
+            # iterative_rag: keep refining until quality is good or max iterations reached
+            if (route == "iterative_rag"
+                    and not s.get("voice_mode", False)
+                    and s.get("retrieval_iterations", 0) < MAX_ITER
+                    and not _is_good_retrieval(chunks)):
+                return "rewrite_query"
+            return "judge_plan"
 
         workflow.add_conditional_edges(
-            "check_retrieval",
-            _check_retrieval_route,
-            {"rewrite": "rewrite_query", "done": "judge_plan",
-             "transform": "transform_node", "define": "define_node",
-             "graph": "graph_node",
-             "report": "report_node",
-             "no_docs": "direct_answer"},
+            "rerank_merge",
+            _post_retrieve_dispatch,
+            {
+                "direct_answer_no_docs": "direct_answer_no_docs",
+                "transform_node":        "transform_node",
+                "graph_node":            "graph_node",
+                "report_node":           "report_node",
+                "analytics_node":        "analytics_node",
+                "rewrite_query":         "rewrite_query",
+                "judge_plan":            "judge_plan",
+            },
         )
 
-        workflow.add_edge("retrieve", "check_retrieval")
-        workflow.add_edge("rewrite_query", "retrieve")
+        # iterative_rag rewrite loop
+        workflow.add_edge("rewrite_query", "retrieve_vector")
 
-        # Transform, define, and graph end directly — no judge eval loop
-        workflow.add_edge("transform_node", END)
-        workflow.add_edge("define_node", END)
-        workflow.add_edge("graph_node", END)
-        workflow.add_edge("report_node", END)
+        # ── Terminal nodes ────────────────────────────────────────────────────
+        for _terminal in ("direct_answer", "direct_answer_no_docs",
+                          "transform_node", "define_node",
+                          "graph_node", "report_node", "image_node", "cad_node"):
+            workflow.add_edge(_terminal, END)
 
-        # Judge-driven synthesis flow
-        workflow.add_edge("judge_plan", "synthesise")
-        workflow.add_edge("synthesise", "judge_evaluate")
-        
+        # ── Judge-driven synthesis loop ───────────────────────────────────────
+        workflow.add_edge("judge_plan",  "synthesise")
+        workflow.add_edge("synthesise",  "judge_evaluate")
+
         workflow.add_conditional_edges(
             "judge_evaluate",
             lambda s: self._should_retry(s),
             {
-                "retry":           "synthesise",
-                "reroute_direct":  "direct_answer",
-                "analytics":       "analytics_node",
-                "done":            END
-            }
+                "retry":          "synthesise",
+                "reroute_direct": "direct_answer",
+                "analytics":      "analytics_node",
+                "done":           END,
+            },
         )
 
         workflow.add_edge("analytics_node", END)
@@ -1088,20 +1125,23 @@ Now generate for: "{q}" """
         return workflow.compile()
 
     # ------------------------------------------------------------------ #
-    #  ROUTER NODE                                                        #
+    #  CLASSIFY INTENT NODE                                               #
     # ------------------------------------------------------------------ #
 
-    def router(self, state: AgentState) -> AgentState:
+    def _classify_intent_node(self, state: AgentState) -> AgentState:
         """
-        Two-stage LLM router:
-          Stage 1 — intent_classifier: deep intent analysis with chain-of-thought.
-          Stage 2 — router LLM: final decision, informed by the classifier's hint.
+        Single-stage intent classifier node — the ONLY node that writes state["route"].
 
-        NO hardcoded keywords in either stage — both use the LLM.
+        Calls intent_classifier.classify_intent() which internally runs:
+          • An LLM call with chain-of-thought reasoning
+          • Falls back to _heuristic_classify() if the LLM is unavailable
+
+        All keyword-matching, bypass logic, and route safety-guards live inside
+        intent_classifier.py.  Nothing is duplicated here.
         """
-        # Skip classification when force_route was set by the caller
+        # Skip when force_route was set by the caller (e.g. test harness)
         if state.get("route"):
-            print(f"⚡ router: force_route={state['route']} — skipping classification")
+            print(f"⚡ classify_intent: force_route={state['route']} — skipping")
             if _OBS_AVAILABLE:
                 _obs.log_routing(
                     session_id=state.get("session_id", ""),
@@ -1112,362 +1152,77 @@ Now generate for: "{q}" """
                 )
             return state
 
-        query = state["query"]
-        history = state.get("conversation_history", [])
-        route_log = state.get("route_log", [])
+        query      = state["query"]
+        history    = state.get("conversation_history", [])
+        route_log  = state.get("route_log", [])
+        session_id = state.get("session_id", "")
+        user_id    = state.get("user_id")
+        attached   = state.get("attached_doc_filenames", [])
 
-        # Check whether this session has documents — lets us bias ambiguous short
-        # messages (e.g. "its uploaded", "summarize it") toward rag when docs exist.
-        _session_id = state.get("session_id", "")
-        _user_id    = state.get("user_id")
         try:
-            _session_has_docs = self.vs.has_documents(user_id=_user_id, session_id=_session_id)
+            session_has_docs = self.vs.has_documents(user_id=user_id, session_id=session_id)
         except Exception:
-            _session_has_docs = False
+            session_has_docs = False
 
-        # Fetch the doc list once — used by both the intent classifier (for doc_scope)
-        # and (if needed) fallback logic below.
         try:
-            all_docs = self.vs.list_documents(user_id=_user_id, session_id=_session_id)
+            all_docs = self.vs.list_documents(user_id=user_id, session_id=session_id)
         except Exception:
             all_docs = []
 
-        print(f"📍 Route (has_docs={_session_has_docs}) → ", end="")
+        uploaded_filenames = [d.get("filename", "") for d in all_docs if d.get("filename")]
 
-        # ── Highest-priority scope override: docs attached to THIS message ────
-        # When the user physically attaches file(s) to a message, the intent
-        # classifier is given that context and can reason about it.  However,
-        # we only apply a hard bypass of the classifier when the query is
-        # genuinely about the attached file's content — not for independent
-        # questions that happen to co-occur with an upload.
-        #
-        # Detection: the query references the attachment (pronouns, "this image",
-        # "describe", "what is in", etc.) OR is very short/vague (≤ 6 words
-        # with no independent factual intent).  Independent factual questions
-        # like "what is ORENDA junior entreprise" are classified normally even
-        # if a file was uploaded in the same session turn.
-        _attached_filenames = state.get("attached_doc_filenames", [])
-        if _attached_filenames:
-            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
-            _all_images = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached_filenames)
+        print(f"📍 classify_intent (has_docs={session_has_docs}) → ", end="")
 
-            # Signals that the query is ABOUT the attached file(s)
-            _q_lower = query.lower().strip()
-            _attachment_ref_signals = [
-                # pronouns / direct references
-                "this image", "this photo", "this picture", "this screenshot",
-                "this file", "this document", "this one", "that image",
-                "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
-                # vision / describe intent
-                "what do you see", "what is in", "what's in", "describe",
-                "tell me about", "look at", "analyse", "analyze", "explain this",
-                "read this", "what does this show", "what does it show",
-                # very short vague references (≤ 6 words, no independent noun/verb)
-            ]
-            _query_words = _q_lower.split()
-            _is_short_vague = len(_query_words) <= 6 and not any(
-                # independent factual openers that signal the query stands alone
-                _q_lower.startswith(opener) for opener in [
-                    "what is ", "who is ", "where is ", "when is ", "how is ",
-                    "define ", "explain what", "tell me what",
-                    "qu'est-ce que", "ما هو", "ما هي",
-                ]
-            )
-            _references_attachment = (
-                any(sig in _q_lower for sig in _attachment_ref_signals)
-                or _is_short_vague
-            )
-
-            if _references_attachment:
-                # Hard bypass: query is unambiguously about the attached file(s).
-                # Build a multi-file scope so image_node can retrieve ALL attached images.
-                if len(_attached_filenames) > 1:
-                    # Encode as pipe-separated list so image_node knows to fetch all
-                    _scope_str = "|".join(_attached_filenames)
-                else:
-                    _scope_str = _attached_filenames[-1]
-
-                _route = "image" if _all_images else "rag"
-                print(f"{_route} (attached-doc override → {_attached_filenames})")
-                return {**state, "route": _route, "doc_scope_hint": _scope_str,
-                        "attached_doc_filenames": _attached_filenames}
-            else:
-                # Query stands on its own — let the classifier handle it normally.
-                # Still make attached filenames available for context, but don't bypass.
-                print(f"(attached files present but query is independent — classifying normally) → ", end="")
-
-        # Normalised query — used by the code-gen guard below.
-        _q = query.lower().strip()
-
-        # ── Pre-router: code generation guard ────────────────────────────────
-        # Catches "write/make/give me code/function/script/algorithm for X"
-        # before any LLM call — these have zero ambiguity and were being
-        # misrouted to `report` because the router had no code concept.
-        _CODE_VERBS   = ["write", "make", "give me", "create", "generate", "build",
-                         "code", "implement", "show me", "do", "écris", "fais", "crée"]
-        _CODE_NOUNS   = ["code", "function", "script", "algorithm", "algo", "program",
-                         "snippet", "class", "method", "implementation", "solution",
-                         "fonction", "algorithme", "programme", "classe", "méthode",
-                         "كود", "دالة", "خوارزمية", "برنامج"]
-        _has_verb = any(_q.startswith(v) or f" {v} " in _q for v in _CODE_VERBS)
-        _has_noun = any(n in _q for n in _CODE_NOUNS)
-        if _has_verb and _has_noun:
-            print("direct (code-gen guard)")
-            return {**state, "route": "direct"}
-
-        if not self.llm.enabled:
-            return self._fallback_router(state)
-
-        # ── Stage 1: Intent classifier (separate LLM call, chain-of-thought) ──
         try:
             from intent_classifier import classify_intent
-            # Pass the actual list of uploaded filenames so the classifier can
-            # resolve doc_scope ("the first one", "report.pdf", "it") accurately.
-            _uploaded_filenames = [d.get("filename", "") for d in all_docs if d.get("filename")]
             intent = classify_intent(
                 query,
                 history,
                 route_log,
                 preferred_provider=state.get("preferred_provider"),
-                session_has_docs=_session_has_docs,
-                uploaded_docs=_uploaded_filenames,
-                attached_doc_filenames=_attached_filenames,
+                session_has_docs=session_has_docs,
+                uploaded_docs=uploaded_filenames,
+                attached_doc_filenames=attached,
             )
-            intent_hint = (
-                f"\n\nINTENT PRE-ANALYSIS (from deep classifier, confidence={intent.confidence:.2f}):\n"
-                f"  primary_intent: {intent.primary_intent}\n"
-                f"  operation: {intent.operation}\n"
-                f"  output_format: {intent.output_format}\n"
-                f"  is_followup: {intent.is_followup} ({intent.followup_type})\n"
-                f"  language_intent: '{intent.language_intent}'\n"
-                f"  ambiguity_score: {intent.ambiguity_score:.2f}\n"
-                f"  suggested_route: {intent.suggested_route}\n"
-                f"  doc_scope: '{intent.doc_scope}'\n"
-                f"  session_has_docs: {_session_has_docs}\n"
-                f"  reasoning: {intent.reasoning}"
-            )
-            # If classifier is very confident, trust it directly and skip the second LLM call
-            # Exception: if it chose "direct" but session has docs and query is short/ambiguous,
-            # override to "rag" — UNLESS it's a meta-awareness query (converse_meta).
-            if intent.confidence >= 0.88 and intent.ambiguity_score <= 0.25:
-                _r = intent.suggested_route
-                # image_query intent always uses the dedicated image route
-                if _r == "rag" and intent.primary_intent == "image_query":
-                    _r = "image"
-                if (_r == "direct"
-                        and intent.primary_intent != "converse_meta"
-                        and _session_has_docs
-                        and intent.ambiguity_score >= 0.15):
-                    # Short or ambiguous message with docs present — use rag, not direct
-                    _r = "rag"
-                    print(f"rag (doc-bias override from direct, has_docs=True)")
-                else:
-                    print(f"{_r} (intent classifier, conf={intent.confidence:.2f}, doc_scope={intent.doc_scope!r})")
-                if _OBS_AVAILABLE:
-                    _obs.log_routing(
-                        session_id=state.get("session_id", ""),
-                        query=state["query"],
-                        route=_r,
-                        confidence=getattr(intent, "confidence", 0.8),
-                        forced=False,
-                    )
-                return {**state, "route": _r, "_intent": intent.to_dict(), "doc_scope_hint": intent.doc_scope}
         except Exception as e:
-            print(f"[intent_classifier error: {e}] ", end="")
-            intent_hint = ""
-
-        # ── Stage 2: Router LLM (final arbiter, informed by classifier hint) ──
-        last_assistant = next(
-            (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
-        )
-        last_user_before = ""
-        for i in range(len(history) - 1, -1, -1):
-            if history[i]["role"] == "assistant":
-                for j in range(i - 1, -1, -1):
-                    if history[j]["role"] == "user":
-                        last_user_before = history[j]["content"]
-                        break
-                break
-
-        prior_context = ""
-        if last_assistant or route_log:
-            route_history = ""
-            if route_log:
-                route_history = "\nSESSION ROUTE HISTORY (oldest → newest): " + " → ".join(
-                    f"[{e['route']}]" for e in route_log[-6:]
-                )
-            prior_context = (
-                f"\n\nCONVERSATION CONTEXT:{route_history}"
-                f"\nLAST USER MESSAGE: {last_user_before[:300]}"
-                f"\nLAST ASSISTANT REPLY: {last_assistant[:300]}"
+            print(f"[intent_classifier error: {e}] → heuristic fallback → ", end="")
+            from intent_classifier import _heuristic_classify
+            intent = _heuristic_classify(
+                query, history, route_log,
+                session_has_docs=session_has_docs,
+                uploaded_docs=uploaded_filenames,
+                attached_doc_filenames=attached,
             )
 
-        _docs_context_line = (
-            "SESSION CONTEXT: The user HAS uploaded documents to this session. "
-            "Ambiguous or short messages that could be about the documents MUST default to rag, not direct. "
-            "Examples that must route to rag when docs exist: 'its uploaded', 'summarize it', "
-            "'what do you think', 'go ahead', 'yes', 'analyze it', 'what does it say', 'check the file'."
-            if _session_has_docs else
-            "SESSION CONTEXT: No documents have been uploaded yet. If the query seems document-related, route to rag anyway (retrieval will handle the empty state gracefully)."
-        )
+        route = intent.suggested_route
 
-        routing_prompt = f"""You are a query router for Bimlo Copilot. Pick exactly ONE route for the CURRENT QUERY.
+        # image_query always uses the image node regardless of suggested_route
+        if intent.primary_intent == "image_query" and route == "rag":
+            route = "image"
 
-ROUTES:
-- direct: purely conversational — greetings, small talk, memory recall ("what did you just do", "can you repeat"), edits/modifications to a previous answer ("make it shorter", "translate that", "change the tone"). No document lookup needed.
-- rag: the user wants to read, understand, or extract content from documents — summaries, explanations, specific facts, questions answered from docs.
-- iterative_rag: like rag, but comparing/contrasting across multiple different documents. Signals: "compare", "vs", "difference between", "across documents".
-- transform: the user wants document content in a completely different form — full translation of an entire document, total rewrite/reformat. The ENTIRE document is the output.
-- analytics: numerical aggregations across ALL documents — counts, totals, averages, statistics.
-- graph: the user wants a chart, graph, or visual plot of data extracted from the documents. Detect this intent in ANY language. EN: chart/graph/plot/visualize; FR: graphique/diagramme/courbe/visualiser; AR: رسم بياني/مخطط/تصور; ES: gráfico/diagrama/visualizar; DE: Diagramm/Grafik; IT: grafico; PT: gráfico.
-- report: the user explicitly asks to PRODUCE a standalone written report/PDF/document — "make a report on X", "generate a report", "rapport sur X". Must be an explicit creation request, NOT a summary or question.
-- define: the user asks the MEANING of a standalone technical term or acronym IN ISOLATION — only when there are no documents OR the query is clearly about a generic concept with zero reference to any uploaded file. CRITICAL: "What is the host company of this file?" → rag (asks about doc content). "What is BIM?" with no docs → define. If the query references "this", "the file", "this document", "in this", "of this", or any uploaded filename → rag, NOT define.
+        # Guard: cad route requires the query to actually be about CAD/IFC content.
+        # If the classifier suggested "cad" but the intent isn't cad_query (e.g. because
+        # a CAD file exists in session but the query is about a PDF), fall back to rag.
+        if route == "cad" and intent.primary_intent != "cad_query":
+            print(f"⚠️  classify_intent: cad route blocked — intent={intent.primary_intent!r} (not cad_query) → rag")
+            route = "rag"
 
-CRITICAL RULES:
-1. Any query about what the AI just said/did, referencing "you", "your answer", "what you said" → ALWAYS direct.
-2. Short follow-up only meaningful from last reply context → direct.
-3. "define" over "rag": if the question is clearly about the MEANING of a single term → define.
-4. When in doubt between direct and rag: AI/conversation topic → direct; document content → rag.
-5. Diagrams, schematics, wiring, rack layouts, floor plans → rag (processor already described them visually).
-6. TRUST the intent pre-analysis below — it is the result of a deep chain-of-thought analysis. Override it only when you see a clear contradiction.
-7. {_docs_context_line}
-{prior_context}
-{intent_hint}
+        print(f"{route} (conf={intent.confidence:.2f}, scope={intent.doc_scope!r})")
 
-CURRENT QUERY: {query}
-
-Reply with ONE word only — the route name."""
-
-        try:
-            route = self.llm.chat(
-                [{"role": "user", "content": routing_prompt}],
-                temperature=0.0,
-                max_tokens=10,
-            ).strip().lower()
-
-            valid_routes = ["direct", "rag", "iterative_rag", "transform", "analytics", "define", "graph", "report", "image"]
-            if route not in valid_routes:
-                for valid in valid_routes:
-                    if valid in route:
-                        route = valid
-                        break
-                else:
-                    # Fall back to classifier suggestion rather than blindly defaulting to rag
-                    try:
-                        route = intent.suggested_route  # type: ignore[name-defined]
-                    except Exception:
-                        route = "rag"
-
-            # ── Post-route safety guard: never send to define when the query is about doc content ──
-            # "what is the host company of this file?" is a RAG question, not a define question.
-            if route == "define" and _session_has_docs:
-                _doc_ref_words = ["this", "the file", "the document", "this file", "this document",
-                                  "it", "here", "uploaded", "given", "provided", "attached", "in this",
-                                  "of this", "هذا", "هذه", "الملف", "ce fichier", "ce document"]
-                _q_lower = query.lower()
-                if any(w in _q_lower for w in _doc_ref_words):
-                    route = "rag"
-                    print(f" [define→rag: query references doc content with docs present]", end="")
-
-            print(route)
-            try:
-                doc_scope_hint = getattr(intent, "doc_scope", "")  # type: ignore[name-defined]
-            except Exception:
-                doc_scope_hint = ""
-            try:
-                return {**state, "route": route, "_intent": intent.to_dict(), "doc_scope_hint": doc_scope_hint}  # type: ignore[name-defined]
-            except Exception:
-                return {**state, "route": route, "doc_scope_hint": doc_scope_hint}
-
-        except Exception as e:
-            print(f"routing_error, using fallback → ", end="")
-            return self._fallback_router(state)
-    
-    def _fallback_router(self, state: AgentState) -> AgentState:
-        """Simple keyword-based routing when LLM unavailable."""
-        query = state["query"].lower()
-
-        # Check session docs — when docs are present, ambiguous short messages go to rag
-        _fb_session_id = state.get("session_id", "")
-        _fb_user_id    = state.get("user_id")
-        try:
-            _fb_has_docs = self.vs.has_documents(user_id=_fb_user_id, session_id=_fb_session_id)
-        except Exception:
-            _fb_has_docs = False
-
-        # Code generation — route to direct
-        _CODE_VERBS = ["write", "make", "give me", "create", "generate", "build",
-                       "code", "implement", "show me", "do", "écris", "fais", "crée"]
-        _CODE_NOUNS = ["code", "function", "script", "algorithm", "algo", "program",
-                       "snippet", "class", "method", "implementation", "solution",
-                       "fonction", "algorithme", "programme", "classe", "méthode"]
-        _has_verb = any(query.startswith(v) or f" {v} " in query for v in _CODE_VERBS)
-        _has_noun = any(n in query for n in _CODE_NOUNS)
-        if _has_verb and _has_noun:
-            print("direct (code-gen fallback)")
-            return {**state, "route": "direct"}
-        
-        # Analytics route — only explicit aggregate/cross-doc requests
-        if any(kw in query for kw in ["analytics", "statistiques", "rapport analytique"]):
-            print("analytics (fallback)")
-            return {**state, "route": "analytics"}
-
-        # Transform route — translation, rewriting, reformatting
-        transform_kws = ["translat", "translate", "tradui", "traduire", "rewrite", "paraphrase",
-                         "summarise in", "summarize in", "résume en", "résumer en"]
-        if any(kw in query for kw in transform_kws):
-            print("transform (fallback)")
-            return {**state, "route": "transform"}
-
-        # Direct answer — only for clearly casual messages (greetings, thanks)
-        # NOT for short/ambiguous messages when session has documents.
-        casual_keywords = [
-            "hello", "hi", "hey", "yo", "wassup", "sup", "what's up", "whats up",
-            "thanks", "thank you", "who are you", "bonjour", "merci", "salut",
-            "how are you", "how's it going", "hows it going", "what's good", "whats good",
-        ]
-        if any(kw in query for kw in casual_keywords):
-            print("direct (fallback)")
-            return {**state, "route": "direct"}
-
-        # Short questions with no doc signals → direct ONLY when session has no documents.
-        # When docs exist, short ambiguous messages ("its uploaded", "go ahead", "yes")
-        # should go to rag — the retrieval pipeline handles empty results gracefully.
-        doc_signals = ["document", "file", "show", "find", "what does", "according",
-                       "tell me about", "explain", "summarize", "summary", "report"]
-        report_kws = ["make a report", "create a report", "generate a report", "write a report",
-                      "do a report", "make me a report", "rapport sur", "fais un rapport",
-                      "produce a report", "build a report", "prepare a report"]
-        if any(kw in query for kw in report_kws):
-            print("report (fallback)")
-            return {**state, "route": "report"}
-        is_short = len(query.split()) <= 8
-        has_doc_signal = any(kw in query for kw in doc_signals)
-        has_question_word = any(query.startswith(w) for w in ["what", "who", "when", "where", "how", "why", "which"])
-        if is_short and has_question_word and not has_doc_signal and not _fb_has_docs:
-            print("direct (fallback — short conversational question, no docs)")
-            return {**state, "route": "direct"}
-
-        # Iterative RAG for complex queries
-        if any(kw in query for kw in ["compare", "difference", "vs", "versus", "comparaison", "différence"]):
-            print("iterative_rag (fallback)")
-            return {**state, "route": "iterative_rag"}
-
-        # Default to single-pass RAG
-        print("rag (fallback)")
         if _OBS_AVAILABLE:
             _obs.log_routing(
-                session_id=state.get("session_id", ""),
-                query=state["query"],
-                route="rag",
-                confidence=0.5,
+                session_id=session_id,
+                query=query,
+                route=route,
+                confidence=intent.confidence,
                 forced=False,
             )
-        return {**state, "route": "rag"}
 
-    # ------------------------------------------------------------------ #
-    #  DIRECT ANSWER NODE                                                 #
-    # ------------------------------------------------------------------ #
+        return {
+            **state,
+            "route":          route,
+            "doc_scope_hint": intent.doc_scope,
+        }
 
     def direct_answer(self, state: AgentState) -> AgentState:
         """Handle direct questions without retrieval. Uses fallback plan — no LLM judge call needed."""
@@ -1790,39 +1545,6 @@ Reply with ONE word only — the route name."""
         }
 
     # ── Legacy retrieve() — kept for backwards compat; delegates to the three nodes ──
-
-    def retrieve(self, state: AgentState) -> AgentState:
-        """
-        Thin orchestrator kept so that the iterative_rag loop edge
-        (rewrite_query → retrieve → check_retrieval) still works without
-        changing the graph topology.  Calls the three dedicated nodes in sequence.
-        """
-        state = self.retrieve_vector(state)
-        state = self.retrieve_graph(state)
-        state = self.rerank_merge(state)
-        return state
-
-    def check_retrieval(self, state: AgentState) -> AgentState:
-        """Check if retrieval quality is good enough."""
-        chunks = state["retrieved_chunks"]
-        is_good = _is_good_retrieval(chunks)
-
-        if not chunks:
-            # Distinguish: is the current session store empty, or did the query just not match anything?
-            # Only flag __NO_DOCS__ if the session has no documents in scope.
-            session_id = state.get("session_id", "")
-            user_id_cr = state.get("user_id")
-            if not self.vs.has_documents(user_id=user_id_cr, session_id=session_id):
-                print(f"⚠️  No documents available for user={user_id_cr!r} session={session_id!r} — redirecting to direct answer")
-                return {**state, "query": f"__NO_DOCS__:{state['query']}"}
-            else:
-                print("⚠️  Retrieval found nothing for this query — proceeding to synthesis with no context")
-        elif is_good:
-            print("✅ Retrieval quality: good")
-        else:
-            print("⚠️  Retrieval quality: low (will retry if iterative)")
-
-        return state
 
     def rewrite_query(self, state: AgentState) -> AgentState:
         """
@@ -2858,6 +2580,112 @@ Answer in {plan.target_language}:"""
             "sources":        [],
             "confidence":     0.9,
         }
+
+    # ------------------------------------------------------------------ #
+    #  CAD / IFC NODE                                                     #
+    # ------------------------------------------------------------------ #
+
+    def cad_node(self, state: AgentState) -> AgentState:
+        """
+        Handle queries about uploaded CAD/IFC files (DXF, DWG, STEP, IFC).
+
+        Delegates to cad_ifc_agent._build_context_block() + _call_llm_with_judge(),
+        which already have their own judge-retry loop and status callbacks.
+        Falls back to standard RAG synthesis if cad_ifc_agent is unavailable.
+        """
+        query      = state["query"]
+        session_id = state.get("session_id", "")
+        user_id    = state.get("user_id")
+        history    = state.get("conversation_history", [])
+        doc_scope  = state.get("doc_scope_hint", "")
+
+        self._emit("cad_node", "🏗️", "Parsing CAD/IFC file structure…")
+        print(f"🏗️  cad_node → query={query[:80]!r}")
+
+        try:
+            from cad_ifc_agent import CadSharedContext, _build_context_block, _call_llm_with_judge, _SYSTEM_PROMPT
+            from datetime import datetime as _dt
+
+            # Resolve which file to use: doc_scope_hint > most recent in session
+            summary = None
+            if doc_scope:
+                # Try exact file_id match first, then filename match
+                for fid, meta in [(f, CadSharedContext.get_file(f))
+                                  for f in [doc_scope]
+                                  if CadSharedContext.get_file(f)]:
+                    summary = meta
+                    break
+            if not summary:
+                # Fall back to most recently cached file in this session
+                all_files = CadSharedContext.list_files()
+                # Filter to files belonging to this session if session_id is stored
+                session_files = [f for f in all_files if f.get("session_id") == session_id] or all_files
+                if session_files:
+                    summary = session_files[-1]
+
+            if not summary:
+                # No CAD file found — fall back to RAG
+                print("⚠️  cad_node: no CAD summary found — falling back to RAG synthesis")
+                return self.retrieve_vector({**state, "route": "rag"})
+
+            # Build context block from the parsed CAD/IFC summary
+            context = _build_context_block(summary)
+            system_prompt = _SYSTEM_PROMPT.format(
+                today=_dt.utcnow().strftime("%B %d, %Y")
+            ) + f"\n\n{context}"
+
+            # Retrieve conversation history for this session
+            cad_history = CadSharedContext.get_history(session_id) or []
+            # Also incorporate the RAG conversation history so memory works
+            for turn in history[-6:]:
+                if not any(t.get("content") == turn.get("content") for t in cad_history):
+                    cad_history.append(turn)
+
+            fname    = summary.get("filename", "file")
+            pipeline = summary.get("pipeline", "?").upper()
+            n_elem   = summary.get("total_elements") or summary.get("total_entities") or 0
+            print(f"   📂 {fname} — {n_elem} elements via {pipeline} pipeline")
+            self._emit("cad_node", "🔍", f"Loaded `{fname}` — {n_elem} elements")
+
+            answer, judge_score, judge_comment = _call_llm_with_judge(
+                system_prompt=system_prompt,
+                history=cad_history,
+                user_msg=query,
+                context=context,
+                question=query,
+            )
+
+            verdict = "✅" if judge_score >= 0.7 else "⚠️"
+            print(f"   {verdict} cad_node judge score={judge_score:.2f} — {judge_comment[:60]}")
+
+            # Store the new turn in CadSharedContext so follow-ups have memory
+            CadSharedContext.append_turn(session_id, "user",      query)
+            CadSharedContext.append_turn(session_id, "assistant", answer)
+
+            return {
+                **state,
+                "answer":     answer,
+                "raw_answer": answer,
+                "sources":    [{"filename": fname, "pipeline": pipeline}],
+                "confidence": float(judge_score),
+                "analytics":  None,
+            }
+
+        except ImportError:
+            print("⚠️  cad_node: cad_ifc_agent not installed — falling back to RAG")
+            return self.retrieve_vector({**state, "route": "rag"})
+        except Exception as e:
+            import traceback as _tb; _tb.print_exc()
+            err = f"CAD analysis failed: {e}"
+            print(f"❌ cad_node: {err}")
+            return {
+                **state,
+                "answer":     err,
+                "raw_answer": err,
+                "sources":    [],
+                "confidence": 0.0,
+                "error":      err,
+            }
 
     # ------------------------------------------------------------------ #
     #  ANALYTICS NODE                                                     #

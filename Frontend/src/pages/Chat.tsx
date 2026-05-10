@@ -5582,7 +5582,13 @@ const Chat = () => {
       activeConvIdRef.current = conv.id;
       setSessionId(null);
       sessionIdRef.current = null;
-      setMessages(conv.messages);
+      setMessages(conv.messages.map(m => {
+        const t = (m.analytics as any)?.type;
+        if (t === "chart_clarification" || t === "report_chart_clarification") {
+          return { ...m, analytics: null };
+        }
+        return m;
+      }));
       setDocuments([]);
       setConvLoading(false);
       if (sid) { setSessionId(sid); sessionIdRef.current = sid; loadDocuments(sid); loadReports(sid); }
@@ -5636,17 +5642,29 @@ const Chat = () => {
       if (res.ok) {
         const data = await res.json();
         console.log("✅ loadConversation DB response", { conversationId: conv.id, messageCount: (data.messages ?? []).length, sessionId: data.session_id });
-        const restored: Message[] = (data.messages ?? []).map((m: any) => ({
-          // Spread the raw message first (captures any flat rich fields the backend returns)
-          ...m,
-          // Then spread payload if the backend nests rich fields there
-          ...(m.payload ?? {}),
-          // Always ensure these core fields are correct types and can't be overwritten
-          id:        m.id ?? createUniqueId("msg-"),
-          role:      m.role as "user" | "assistant",
-          content:   m.content ?? "",
-          timestamp: new Date(m.timestamp ?? (m.payload?.timestamp) ?? Date.now()),
-        }));
+        const restored: Message[] = (data.messages ?? []).map((m: any) => {
+          const merged = {
+            // Spread the raw message first (captures any flat rich fields the backend returns)
+            ...m,
+            // Then spread payload if the backend nests rich fields there
+            ...(m.payload ?? {}),
+            // Always ensure these core fields are correct types and can't be overwritten
+            id:        m.id ?? createUniqueId("msg-"),
+            role:      m.role as "user" | "assistant",
+            content:   m.content ?? "",
+            timestamp: new Date(m.timestamp ?? (m.payload?.timestamp) ?? Date.now()),
+          };
+          // Strip transient clarification analytics on restore — the user already
+          // acted on these and they must not re-appear as clickable options after refresh.
+          const analyticsType = merged.analytics?.type;
+          if (
+            analyticsType === "chart_clarification" ||
+            analyticsType === "report_chart_clarification"
+          ) {
+            merged.analytics = null;
+          }
+          return merged;
+        });
         setMessages(restored);
         setConvLoading(false);
         setConversations(prev => prev.map(c => c.id === conv.id ? { ...c, messages: restored } : c));
@@ -5731,6 +5749,9 @@ const Chat = () => {
     setThinkingSteps([]);
     setThinkingExpanded(true);
     setIsLoading(true);
+    // Always set typingConvId here so the thinking indicator appears regardless
+    // of whether the caller is handleSend or an onSelect clarification handler.
+    if (activeConvIdRef.current) setTypingConvId(activeConvIdRef.current);
 
     try {
       const base =
@@ -6119,6 +6140,12 @@ const Chat = () => {
             "voice","speak","talk","audio conversation","phone","hear me",
             "verbal","call with","speak with","voice mode","conversation vocale",
             "go to call","take me to call","open call","call page","start a call","make a call",
+            // Natural call-intent phrasing
+            "can we call","can i call","wanna call","want to call","let's call","lets call",
+            "hop on a call","jump on a call","get on a call","have a call","do a call",
+            "call me","audio call","voice chat","talk to you","speak to you","chat verbally",
+            "on appelle","on se call","appel vocal","appelez","parler de vive voix",
+            "يمكننا الاتصال","نتصل","مكالمة صوتية","اتصال",
           ],
           teaser: () =>
             `Sounds like you'd prefer a voice conversation! There's a **Voice Call page** set up exactly for that — real-time audio with the agent, no typing needed.\n\nWant to head there, or are you good staying in chat?`,
@@ -6179,12 +6206,10 @@ const Chat = () => {
     const updatedUserMessages = [...originMessages, userMsg];
     setMessages(prev => [...prev, userMsg]);
     const titleToSet = activeConversation?.initialTitle ?? activeConversation?.title ?? conversationTitle;
-    // NOTE: Pass "" as title here so updateConversationMessages does NOT create
-    // a new sidebar entry yet (the guard above blocks entries with empty titles).
-    // The conversation will be inserted into the sidebar only once the assistant
-    // reply arrives and updateConversationMessages is called with the full preview
-    // and a real title — this prevents the ghost "chat" entry from appearing.
-    updateConversationMessages(convId, updatedUserMessages, "", activeConvId ? titleToSet : "");
+    // Register the conversation in the sidebar IMMEDIATELY when user sends,
+    // so the chat pill shows it right away (with the green pulsating dot while
+    // the agent is still responding). We use the user message as the title.
+    updateConversationMessages(convId, updatedUserMessages, trimmedInput.slice(0, 80), activeConvId ? titleToSet : conversationTitle);
     setInput("");
     setPendingDocIds([]);
     if (!notifyDismissed) setShowNotifyBanner(true);
@@ -6237,12 +6262,12 @@ const Chat = () => {
       const updatedMessages: Message[] = [...originMessages, userMsg, assistantMsg];
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;
       const preview  = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
-      // Pass the real title here — this is the first call that will actually
-      // insert the conversation into the sidebar (the earlier call was blocked
-      // by the empty-title guard to prevent ghost entries appearing on send).
       const finalTitle = activeConversation?.titleLocked
         ? activeConversation.title
         : (activeConversation?.initialTitle ?? activeConversation?.title ?? conversationTitle ?? rawTitle);
+      // Always directly update messages state so the answer is guaranteed to render,
+      // regardless of whether activeConvIdRef matches (fixes the "dots disappear, no answer" bug).
+      setMessages(updatedMessages);
       updateConversationMessages(convId, updatedMessages, preview, finalTitle);
       // Persist to DB (non-blocking); keep the current conversation title if it was already set
       const currentTitle = activeConversation?.title ?? finalTitle ?? rawTitle;
@@ -6894,7 +6919,7 @@ const Chat = () => {
                                 <div className="flex items-start justify-between gap-2">
                                   <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
                                   <div className="shrink-0 flex items-center mt-0.5">
-                                  {pendingConvIds[conv.id] && conv.id !== activeConvId ? (
+                                  {pendingConvIds[conv.id] ? (
                                     <span className="mr-2 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
                                   ) : null}
                                   <span className="text-[10px] text-muted-foreground/60 tabular-nums group-hover:hidden">
@@ -7901,6 +7926,11 @@ const Chat = () => {
                         analytics={msg.analytics as any}
                         onSelect={async (hint) => {
                           if (isLoading) return;
+                          // Show loading indicator immediately — before the async query starts
+                          setIsLoading(true);
+                          setThinkingSteps([]);
+                          setThinkingExpanded(true);
+                          const convId = activeConvIdRef.current;
                           const userMsg: Message = {
                             id: createUniqueId("msg-"),
                             role: "user",
@@ -7916,9 +7946,16 @@ const Chat = () => {
                             if (!assistantMsg) return;
                             setMessages(prev => [...prev, assistantMsg]);
                             setTypingMessageId(assistantMsg.id);
+                            // Persist user + assistant messages so they survive a refresh
+                            const snapshot = messagesRef.current;
+                            const preview = assistantMsg.content.replace(/\[.*?\]/g, "").slice(0, 80) + "…";
+                            const currentTitle = conversations.find(c => c.id === convId)?.title ?? hint.slice(0, 50);
+                            updateConversationMessages(convId, snapshot, preview, currentTitle);
+                            saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, snapshot);
                             fetchSuggestions(hint, assistantMsg.content);
                             fireNotification();
                           } catch (error) {
+                            setIsLoading(false);
                             const errMsg: Message = {
                               id: createUniqueId("msg-"),
                               role: "assistant",
@@ -7943,6 +7980,11 @@ const Chat = () => {
                         }}
                         onSelect={async (hint) => {
                           if (isLoading) return;
+                          // Show loading indicator immediately — before the async query starts
+                          setIsLoading(true);
+                          setThinkingSteps([]);
+                          setThinkingExpanded(true);
+                          const convId = activeConvIdRef.current;
                           const userMsg: Message = {
                             id: createUniqueId("msg-"),
                             role: "user",
@@ -7958,9 +8000,16 @@ const Chat = () => {
                             if (!assistantMsg) return;
                             setMessages(prev => [...prev, assistantMsg]);
                             setTypingMessageId(assistantMsg.id);
+                            // Persist user + assistant messages so they survive a refresh
+                            const snapshot = messagesRef.current;
+                            const preview = assistantMsg.content.replace(/\[.*?\]/g, "").slice(0, 80) + "…";
+                            const currentTitle = conversations.find(c => c.id === convId)?.title ?? hint.slice(0, 50);
+                            updateConversationMessages(convId, snapshot, preview, currentTitle);
+                            saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, snapshot);
                             fetchSuggestions(hint, assistantMsg.content);
                             fireNotification();
                           } catch (error) {
+                            setIsLoading(false);
                             const errMsg: Message = {
                               id: createUniqueId("msg-"),
                               role: "assistant",

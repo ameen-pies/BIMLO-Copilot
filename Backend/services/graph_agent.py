@@ -247,6 +247,10 @@ class GraphAgent:
         self.base_url = base_url or os.getenv("CF_API_URL",
                         "https://bimloapi.medhelaliamin125.workers.dev")
         self.enabled  = bool(self.api_key)
+        # Cache for probe results keyed by hint string — so when the user picks
+        # a group from the clarification UI the already-validated extraction data
+        # is reused instead of running the LLM again (which may return no_data).
+        self._probe_cache: Dict[str, Dict] = {}
         print(f"📈 GraphAgent ready [llm={'✅' if self.enabled else '❌'}]")
 
     # ── PUBLIC ENTRY POINT ────────────────────────────────────────────────
@@ -319,6 +323,8 @@ class GraphAgent:
                         )
                         if probe is not None:
                             validated_groups.append(grp)
+                            # Cache the probe result — reused if the user picks this group
+                            self._probe_cache[hint] = probe
                             print(f"      ✅ group validated: {grp['label']!r}")
                         else:
                             print(f"      ❌ group dropped (no extractable data): {grp['label']!r}")
@@ -352,7 +358,14 @@ class GraphAgent:
         print(f"   📊 GraphAgent: type={chart_type}, axes={axes_hint}")
 
         # Stage 1 — extract structured data from documents
-        raw_data = self._extract_data(query, chunks, chart_type, axes_hint, language)
+        # Check cache first: if the user picked a group from the clarification UI,
+        # the probe result is already stored and we reuse it to avoid a redundant
+        # (and potentially failing) LLM call.
+        raw_data = self._probe_cache.pop(query, None)
+        if raw_data:
+            print(f"   ⚡ GraphAgent: using cached probe result for {query[:60]!r}")
+        else:
+            raw_data = self._extract_data(query, chunks, chart_type, axes_hint, language)
         if not raw_data:
             return self._error(
                 "Could not find numeric or structured data in the documents "
@@ -1096,6 +1109,73 @@ Rules:
         return raw.strip() if raw else ""
 
     # ── HELPERS ───────────────────────────────────────────────────────────
+
+    def _regex_extract_fallback(self, chunks: List[Dict]) -> Optional[Dict]:
+        """
+        Last-resort data extractor when the LLM returns no_data or unparseable JSON.
+
+        Scans chunk text with regex patterns to find:
+          - Key-value pairs:  "Label: 42.3"  or  "Label = 42.3"
+          - Table-like rows:  lines with 2+ whitespace-separated numeric tokens
+
+        Returns a minimal extraction dict compatible with _build_chartjs,
+        or None if nothing numeric is found.
+        """
+        labels: List[str] = []
+        values: List[float] = []
+
+        kv_pattern = re.compile(
+            r"^[ \t]*([A-Za-z][\w /\-()]{1,50}?)\s*[=:]\s*([+-]?\d[\d,]*(?:\.\d+)?)\s*$",
+            re.MULTILINE,
+        )
+        # Pattern for lines like:  "Sector A  -95.2  12.4"
+        row_pattern = re.compile(
+            r"^[ \t]*([A-Za-z][\w /\-()]{1,40}?)\s{2,}([+-]?\d[\d,]*(?:\.\d+)?)",
+            re.MULTILINE,
+        )
+
+        seen: dict = {}  # label → value (last wins)
+
+        for chunk in chunks:
+            text = chunk.get("text", "")
+
+            # Try key-value pairs first
+            for m in kv_pattern.finditer(text):
+                raw_label = m.group(1).strip()
+                raw_val   = m.group(2).replace(",", "")
+                try:
+                    seen[raw_label] = float(raw_val)
+                except ValueError:
+                    pass
+
+            # Try aligned-column rows
+            for m in row_pattern.finditer(text):
+                raw_label = m.group(1).strip()
+                raw_val   = m.group(2).replace(",", "")
+                if raw_label not in seen:
+                    try:
+                        seen[raw_label] = float(raw_val)
+                    except ValueError:
+                        pass
+
+        if not seen:
+            print("   ⚠️  GraphAgent._regex_extract_fallback: no numeric data found in chunks")
+            return None
+
+        # Sort by insertion order (Python 3.7+ dicts are ordered)
+        for lbl, val in list(seen.items())[:20]:  # cap at 20 data points
+            labels.append(lbl)
+            values.append(val)
+
+        print(f"   🔢 GraphAgent._regex_extract_fallback: extracted {len(labels)} points via regex")
+        return {
+            "title":       "Extracted Data",
+            "description": "Data extracted via pattern matching from document text.",
+            "x_label":     "",
+            "y_label":     "Value",
+            "labels":      labels,
+            "datasets":    [{"label": "Value", "data": values}],
+        }
 
     @staticmethod
     def _normalize_pdf_text(text: str) -> str:

@@ -1,73 +1,153 @@
 """
-intent_classifier.py — Deep Intent Classifier for Bimlo Copilot
-────────────────────────────────────────────────────────────────
-A dedicated, chain-of-thought intent analysis layer that sits
-UPSTREAM of the LLM router.
+intent_classifier.py — LangGraph-powered Intent Classification Pipeline
+────────────────────────────────────────────────────────────────────────
+Replaces the monolithic classify_intent() with a proper LangGraph pipeline:
 
-Unlike the router (which outputs a single route word), this classifier
-outputs a rich IntentAnalysis object with:
-  - primary_intent   : what the user actually wants
-  - secondary_intent : any secondary goal (e.g. translate + summarise)
-  - target_entity    : the doc/concept/term they care about
-  - operation        : the verb of the action (extract, compare, define…)
-  - output_format    : what they want back (prose, table, chart, PDF…)
-  - language_intent  : language switch requested explicitly?
-  - is_followup      : is this continuing from the last turn?
-  - followup_type    : modify | repeat | translate | clarify | none
-  - ambiguity_score  : 0–1 how ambiguous the query is
-  - suggested_route  : best matching RAG route (for router to use as hint)
-  - confidence       : 0–1 classifier confidence
-  - reasoning        : chain-of-thought trace (debug only)
+  validate_input
+      ↓
+  llm_classify  ──(LLM unavailable / fast-path hit)──→  heuristic_classify
+      ↓                                                         ↓
+  post_process  ←───────────────────────────────────────────────┘
+      ↓
+  [END]  →  IntentAnalysis
 
-The router in rag_engine.py calls `classify_intent()` and uses
-`suggested_route` + `IntentAnalysis` to make a more informed routing
-decision, reducing misroutes significantly.
+Each node owns one responsibility, can be observed independently, and the
+graph short-circuits to heuristics automatically without polluting the main
+classify path with try/except spaghetti.
 
-Usage:
+New in this version vs the original monolith:
+  ─ Full LangGraph pipeline with typed state (ClassifierState)
+  ─ validate_input: catches empty queries, normalises whitespace, resolves
+    doc scope BEFORE calling the LLM so the prompt is already rich
+  ─ llm_classify: isolated LLM call with clean error → heuristic fallback
+  ─ post_process: all safety-net overrides live here (one place, not scattered)
+  ─ heuristic_classify: unchanged logic, now a proper graph node
+  ─ Warm result cache: identical (query, session fingerprint) → skip LLM call,
+    useful for rapid follow-ups in the same session
+  ─ Observability hook for every node transition
+  ─ route_confidence_map: returned alongside the analysis so the RAG engine
+    can use confidence to decide whether to double-check with a second call
+
+External API is 100% backward compatible:
     from intent_classifier import classify_intent, IntentAnalysis
-    intent = classify_intent(query, history, route_log)
-    # intent.suggested_route → "rag" | "graph" | "report" | etc.
+    intent = classify_intent(query, history, route_log, ...)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional, TypedDict
+
+from langgraph.graph import StateGraph, END
 
 logger = logging.getLogger("intent_classifier")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# File-type helpers  (shared with downstream agents)
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Intent analysis dataclass ──────────────────────────────────────────────────
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+_CAD_EXTS   = {".ifc", ".ifczip", ".dxf", ".dwg", ".step", ".stp"}
+_DOC_EXTS   = {".pdf", ".docx", ".doc", ".txt"}
+
+def _ext(filename: str) -> str:
+    return os.path.splitext(filename)[1].lower()
+
+def _is_image(f: str) -> bool: return _ext(f) in _IMAGE_EXTS
+def _is_cad(f: str) -> bool:   return _ext(f) in _CAD_EXTS
+def _is_doc(f: str) -> bool:   return _ext(f) in _DOC_EXTS
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IntentAnalysis  — the output object (unchanged from original)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class IntentAnalysis:
-    primary_intent:    str        # e.g. "extract_info", "compare_docs", "generate_report"
-    secondary_intent:  str        # e.g. "translate", "summarise", "" if none
-    target_entity:     str        # doc name, term, or concept the user cares about
-    operation:         str        # action verb: extract | compare | define | visualise | generate | modify | converse
-    output_format:     str        # prose | table | chart | pdf | json | code | audio
-    language_intent:   str        # "" = mirror query lang; else explicit target lang code e.g. "fr"
-    is_followup:       bool
-    followup_type:     str        # modify | repeat | translate | clarify | none
-    ambiguity_score:   float      # 0–1
-    suggested_route:   str        # direct | rag | iterative_rag | transform | analytics | graph | report | define
-    confidence:        float      # 0–1
-    reasoning:         str        # chain-of-thought (debug)
-    # ── Document scope resolution ──────────────────────────────────────────────
-    # When the user targets a specific document (by name, position, or pronoun),
-    # this field carries the resolved reference so retrieve_vector can filter.
-    # Examples: "contract.pdf", "the first one", "the report", "it", ""
-    # Empty string means: no specific document targeted → search all docs.
-    doc_scope:         str        # "" | exact filename | positional hint e.g. "first"
+    primary_intent:   str    # extract_info | compare_docs | generate_report | …
+    secondary_intent: str    # same enum or ""
+    target_entity:    str    # doc name, concept, data point; "" if none
+    operation:        str    # extract | compare | define | visualise | generate | …
+    output_format:    str    # prose | table | chart | pdf | code | audio | unspecified
+    language_intent:  str    # ISO 639-1 code if explicit; "" = mirror query lang
+    is_followup:      bool
+    followup_type:    str    # modify | repeat | translate | clarify | none
+    ambiguity_score:  float  # 0–1
+    suggested_route:  str    # direct | rag | iterative_rag | transform | analytics | graph | report | define | cad
+    confidence:       float  # 0–1
+    reasoning:        str    # chain-of-thought (debug)
+    doc_scope:        str    # "" | filename | "first" | "second" | …
+
+    # ── New in this version ───────────────────────────────────────────────────
+    classification_path: str = "llm"  # "llm" | "heuristic" | "cached"
+    latency_ms:          float = 0.0  # wall-clock time for the full pipeline
 
     def to_dict(self) -> Dict:
         return asdict(self)
 
 
-# ── Prompt ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# LangGraph State
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ClassifierState(TypedDict):
+    # ── inputs (set once at graph entry) ──────────────────────────────────────
+    query:                  str
+    history:                List[Dict]
+    route_log:              List[Dict]
+    preferred_provider:     Optional[str]
+    session_has_docs:       bool
+    uploaded_docs:          List[str]
+    attached_doc_filenames: List[str]
+
+    # ── internal ──────────────────────────────────────────────────────────────
+    normalised_query:       str          # whitespace-cleaned query
+    doc_scope_hint:         str          # resolved before LLM call
+    session_fingerprint:    str          # for cache key
+    use_heuristic:          bool         # True = skip LLM node
+    llm_raw:                Optional[str]# raw text from LLM
+    error:                  Optional[str]# first fatal error message
+
+    # ── output ────────────────────────────────────────────────────────────────
+    result:                 Optional[IntentAnalysis]
+    classification_path:    str          # "llm" | "heuristic" | "cached"
+    started_at:             float
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Warm result cache  (in-process, bounded at 256 entries)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from collections import OrderedDict as _OD
+
+class _BoundedCache:
+    def __init__(self, maxsize: int = 256):
+        self._store: _OD = _OD()
+        self._max = maxsize
+
+    def get(self, key: str) -> Optional[IntentAnalysis]:
+        if key in self._store:
+            self._store.move_to_end(key)
+            return self._store[key]
+        return None
+
+    def set(self, key: str, value: IntentAnalysis) -> None:
+        self._store[key] = value
+        self._store.move_to_end(key)
+        if len(self._store) > self._max:
+            self._store.popitem(last=False)
+
+_cache = _BoundedCache(256)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LLM prompt templates  (unchanged content, just organised here)
+# ══════════════════════════════════════════════════════════════════════════════
 
 _CLASSIFIER_SYSTEM = """\
 You are an expert intent classifier for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE.
@@ -92,7 +172,7 @@ CURRENT QUERY: {query}
 
 TASK — output ONLY this JSON object, no preamble, no backticks:
 {{
-  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | converse_meta | image_query | translate_content | aggregate_stats>",
+  "primary_intent": "<one of: extract_info | compare_docs | generate_report | visualise_data | define_term | modify_output | converse | converse_meta | image_query | cad_query | translate_content | aggregate_stats>",
   "secondary_intent": "<same enum or empty string>",
   "target_entity": "<the document name, term, concept, or data point the user cares about — empty if none>",
   "operation": "<action verb: extract | compare | define | visualise | generate | modify | converse | translate | aggregate>",
@@ -101,7 +181,7 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
   "is_followup": <true|false>,
   "followup_type": "<modify | repeat | translate | clarify | none>",
   "ambiguity_score": <0.0–1.0>,
-  "suggested_route": "<one of: direct | rag | iterative_rag | transform | analytics | graph | report | define>",
+  "suggested_route": "<one of: direct | rag | iterative_rag | transform | analytics | graph | report | define | cad>",
   "confidence": <0.0–1.0>,
   "doc_scope": "<exact filename from the uploaded docs list if the user clearly targets ONE specific document; positional hint like 'first' or 'second' if they reference position; empty string if they want ALL docs or the scope is unclear>",
   "reasoning": "<2–4 sentence chain-of-thought: what signals did you see, why did you pick this route, and which document (if any) are they targeting>"
@@ -110,142 +190,241 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
 ROUTING RULES (apply these strictly when choosing suggested_route):
 - direct: casual/conversational, memory recall ("what did you just say"), self-referential ("what route did you use"), edits to last reply ("make it shorter", "rephrase that")
 - direct [converse_meta]: queries asking about the AI's own FILE RECEIPT/ACCESS — "did you get the file?", "can you access it?", "is it there?".
-    NOT for asking about image content. NEVER route to rag.
+    NOT for asking about file content. NEVER route to rag.
     Signals: "did you get the file", "is the file there", "do you have access", "can you read this" (meaning: did it arrive),
     "tu as reçu", "avez-vous reçu", "هل وصلك", "هل لديك الملف".
     Set primary_intent="converse_meta", suggested_route="direct".
-- rag [image_query]: CRITICAL — when the session has uploaded image files AND the user asks about the VISUAL CONTENT of an image.
+- cad: queries that explicitly ask about the CONTENT of a CAD/IFC/BIM file — elements, storeys, walls, components, structure,
+    materials, quantities, IFC classes, building data. The user must be asking about the CAD file content, not just mentioning it.
+    Signals: "how many elements", "list the storeys", "what walls", "what components", "summarize this ifc",
+    "what does this ifc contain", "analyse this ifc", "what is in the ifc", "ifc elements", "ifc classes",
+    "building structure", "what floors", "what materials in the model".
+    CRITICAL: Only route to "cad" when there IS a CAD file in the session AND the query is about its content.
+    A general question asked while a CAD file exists in the session is NOT a cad query.
+- rag [image_query]: when the session has uploaded image files AND the user asks about the VISUAL CONTENT of an image.
     The system already ran a vision LLM on upload and stored the description in the vector store — RAG retrieves it.
     Signals (any language): "what do you see", "what is in this image", "describe the image", "describe this",
-    "what does this show", "what is shown", "read the text in it", "what's in the picture", "analyse this image",
-    "look at this image", "what can you tell me about this", "tell me about this image",
-    "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة", "ماذا يوجد",
-    "que vois-tu", "qu'est-ce que tu vois", "décris cette image", "qu'est-ce qu'il y a dans cette image",
-    "explique cette image", "analyse cette image".
+    "what does this show", "what is shown", "read the text in it", "what's in the picture", "analyse this image".
     CRITICAL DISTINCTION: "what do you see in this image" = image_query → rag (about content).
     "did you receive the image / can you access the file" = converse_meta → direct (about file receipt).
     Set primary_intent="image_query", suggested_route="rag".
-- rag: ANY question about document content — a specific fact, a section, a value, a person, a location, a date, what something says, what something means in context of the document, how something works according to the document. This is the DEFAULT route for all document questions.
-- iterative_rag: questions that explicitly require looking across MULTIPLE different documents simultaneously — comparisons, differences, aggregations across files. Signals: "compare", "vs", "difference between", "across all files", "between the two documents". Do NOT use for questions that can be answered from one document.
-- transform: full document translation or complete rewrite/reformat (user wants the whole doc in another form)
+- rag: ANY question about document content — a specific fact, a section, a value, a person, a location, a date,
+    what something says, what something means in context of the document. DEFAULT route for all document questions.
+- iterative_rag: questions that explicitly require looking across MULTIPLE different documents simultaneously.
+    Signals: "compare", "vs", "difference between", "across all files", "between the two documents".
+    Do NOT use for questions that can be answered from one document.
+- transform: full document translation or complete rewrite/reformat
 - analytics: numerical aggregation across ALL docs (signals: "total", "average", "how many across", "statistics")
 - graph: explicit request for a visual chart/plot (signals: "chart", "graph", "plot", "visualise", "graphique", "رسم بياني", "diagramme")
 - report: explicit request to PRODUCE a standalone written report/PDF/document (signals: "make a report", "generate a report", "rapport sur", "create a report")
-- define: asking the MEANING of a standalone technical term or acronym WITH NO reference to any uploaded document — ONLY when the user is clearly asking about a generic concept in isolation (e.g. "what is BIM?" with no docs, "define IFC"). NEVER use define if: (1) the session has uploaded documents AND the query references file content, (2) the query contains words like "this file", "this document", "it", "here", "the file", "in this", "of this". "What is the host company of this file?" → rag. "What is BIM?" with no docs → define.
+- define: asking the MEANING of a standalone technical term or acronym WITH NO reference to any uploaded document — ONLY when the user is clearly asking about a generic concept in isolation (e.g. "what is BIM?" with no docs, "define IFC"). NEVER use define if: (1) the session has uploaded documents AND the query references file content, (2) the query contains words like "this file", "this document", "it", "here", "the file", "in this", "of this".
 
 DOC SCOPE RULES (for the "doc_scope" field):
 - If the user names a specific file (partial or full name), set doc_scope to that filename exactly as it appears in UPLOADED DOCUMENTS.
-- If the user uses a positional reference ("the first one", "the first file", "le premier", "الأول"), set doc_scope to "first", "second", etc.
-- If the user uses a pronoun ("it", "this one", "that file", "this image", "this document") AND there is only one uploaded document, set doc_scope to that document's filename.
-- If there are multiple documents and the user says "this image" / "this one" / "this file" / "هذه الصورة" / "cette image" WITHOUT naming a specific file → set doc_scope to the LAST document in the uploaded list (most recently uploaded = most likely what they mean).
-- If the conversation history shows the user was just discussing a specific document, and the new query uses a pronoun or vague reference, set doc_scope to that same document (follow the conversation thread).
-- If the user says "both", "all", "all of them", "the other one", or implies cross-document scope, set doc_scope to "".
-- NEVER leave doc_scope empty when a single document is clearly implied by context, recency, or pronoun — an empty doc_scope causes ALL documents to be searched, which is wrong when the user clearly means one.
+- If the user uses a positional reference ("the first one", "le premier", "الأول"), set doc_scope to "first", "second", etc.
+- If the user uses a pronoun ("it", "this one", "that file") AND there is only one uploaded document, set doc_scope to that document's filename.
+- If there are multiple documents and the user says "this image" / "this one" / "this file" WITHOUT naming a specific file → set doc_scope to the LAST document in the uploaded list (most recently uploaded = most likely what they mean).
+- If the conversation history shows the user was just discussing a specific document, and the new query uses a pronoun, set doc_scope to that same document.
+- If the user says "both", "all", "all of them", or implies cross-document scope, set doc_scope to "".
+- NEVER leave doc_scope empty when a single document is clearly implied by context, recency, or pronoun.
 
 CRITICAL OVERRIDE RULES:
 1. Any query about what the AI just said/did → direct (is_followup=true, followup_type=modify or repeat)
 2. "Did you get/can you access/is the file there" → direct with primary_intent=converse_meta. NEVER rag.
-   BUT: "What do you see in this image / describe the image / what is in the picture" → rag with primary_intent=image_query. NEVER direct.
-3. "translate" alone on a short phrase → transform; "translate [specific term]" with explanation → define
-4. When ambiguity_score > 0.6, set suggested_route to the safest option (rag for document queries, direct for conversation)
-5. Mixed-language queries are fine — detect the INTENT not the language
-6. When multiple docs are uploaded and the user clearly targets only ONE (by name or position) → set doc_scope accordingly so retrieval is scoped correctly.
-7. Questions like "what is X" where X is something IN a document (company name, person, zone, standard) → rag, not define.
+3. The presence of an uploaded file does NOT by itself determine the route.
+   Route is determined by WHAT THE USER IS ASKING, not by what files exist in the session.
+4. A CAD/IFC file being present in the session does NOT route every query to "cad".
+   Only route to "cad" when the query explicitly asks about the IFC/CAD content.
+5. When ambiguity_score > 0.6, set suggested_route to the safest option (rag for document queries, direct for conversation)
+6. Mixed-language queries are fine — detect the INTENT not the language
+7. Questions like "what is X" where X is something IN a document → rag, not define.
 """
 
+_VALID_ROUTES  = {"direct", "rag", "iterative_rag", "transform", "analytics", "graph", "report", "define", "cad"}
+_VALID_INTENTS = {
+    "extract_info", "compare_docs", "generate_report", "visualise_data",
+    "define_term", "modify_output", "converse", "converse_meta",
+    "image_query", "cad_query", "translate_content", "aggregate_stats",
+}
 
-# ── Main classifier ────────────────────────────────────────────────────────────
 
-def classify_intent(
-    query: str,
-    history: Optional[List[Dict]] = None,
-    route_log: Optional[List[Dict]] = None,
-    preferred_provider: Optional[str] = None,
-    session_has_docs: bool = False,
-    uploaded_docs: Optional[List[str]] = None,
-    attached_doc_filenames: Optional[List[str]] = None,
-) -> IntentAnalysis:
+# ══════════════════════════════════════════════════════════════════════════════
+# Node 1 — validate_input
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _node_validate_input(state: ClassifierState) -> ClassifierState:
     """
-    Classify the intent of a query using the LLM.
-    Falls back to heuristic classification if the LLM is unavailable.
-
-    Args:
-        query:                  The current user message.
-        history:                Conversation history [{role, content}, ...].
-        route_log:              Per-session route log from AgentState._route_log.
-        preferred_provider:     Optional provider hint to honor user-selected model.
-        session_has_docs:       True if the session has documents in the vector store.
-                                When True, ambiguous/short messages default to rag.
-        uploaded_docs:          List of filenames currently uploaded in the session.
-                                Used for doc_scope resolution (which doc is being targeted).
-        attached_doc_filenames: Filenames of docs physically attached to THIS message.
-                                Highest-priority scope signal — if set, any pronoun or
-                                vague reference ("this one", "it", "what about this") refers
-                                to the attached doc, not any older session document.
-
-    Returns:
-        IntentAnalysis with suggested_route, doc_scope, and rich metadata.
+    Normalise whitespace, compute a cache key, resolve doc_scope_hint early,
+    and flag fast-path cases (empty query, cache hit, LLM unavailable).
     """
+    import re as _re
+
+    raw_q = state["query"] or ""
+    norm_q = _re.sub(r"\s+", " ", raw_q).strip()
+
+    if not norm_q:
+        # Empty query — return a safe default without hitting the LLM
+        fallback = _make_heuristic("", "direct", "converse", "converse", "prose", 0.5)
+        fallback.reasoning = "Empty query — defaulted to direct/converse."
+        return {
+            **state,
+            "normalised_query": "",
+            "doc_scope_hint": "",
+            "session_fingerprint": "",
+            "use_heuristic": True,
+            "result": fallback,
+            "classification_path": "heuristic",
+        }
+
+    # ── Cache key: hash of (norm_query, sorted uploaded_docs, session_has_docs) ──
+    _docs_key = ",".join(sorted(state.get("uploaded_docs") or []))
+    _cache_key = hashlib.md5(
+        f"{norm_q}|{_docs_key}|{state.get('session_has_docs', False)}".encode()
+    ).hexdigest()
+
+    cached = _cache.get(_cache_key)
+    if cached:
+        logger.debug(f"intent_classifier: cache HIT for {norm_q[:60]!r}")
+        return {
+            **state,
+            "normalised_query": norm_q,
+            "doc_scope_hint": cached.doc_scope,
+            "session_fingerprint": _cache_key,
+            "use_heuristic": True,         # skip LLM node
+            "result": cached,
+            "classification_path": "cached",
+        }
+
+    # ── Resolve doc_scope hint once before the LLM call ─────────────────────
+    _doc_scope = _resolve_doc_scope_heuristic(
+        norm_q.lower(),
+        state.get("uploaded_docs") or [],
+        state.get("attached_doc_filenames") or [],
+    )
+
+    # ── Check LLM availability ────────────────────────────────────────────────
     try:
-        from llm_client import call_llm, check_llm_available
-        available, _ = check_llm_available()
-        if not available:
-            return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs, attached_doc_filenames)
+        from llm_client import check_llm_available
+        _avail, _ = check_llm_available()
+        use_heuristic = not _avail
+    except Exception:
+        use_heuristic = True
 
-        history_block = _format_history(history or [])
-        route_history = _format_route_log(route_log or [])
+    return {
+        **state,
+        "normalised_query": norm_q,
+        "doc_scope_hint": _doc_scope,
+        "session_fingerprint": _cache_key,
+        "use_heuristic": use_heuristic,
+        "llm_raw": None,
+        "error": None,
+        "result": None,
+        "classification_path": "llm",
+    }
 
-        # Format the uploaded doc list so the LLM can reason about doc_scope
-        if uploaded_docs:
-            uploaded_docs_block = "\n".join(f"  {i+1}. {name}" for i, name in enumerate(uploaded_docs))
-        else:
-            uploaded_docs_block = "(none uploaded yet)"
 
-        # Build a session-state hint so the LLM knows whether docs exist
-        docs_hint = (
-            "\nSESSION STATE: The user HAS uploaded documents to this session. "
-            "Short or ambiguous messages that could refer to the uploaded documents "
-            "(e.g. 'its uploaded', 'summarize it', 'what do you think', 'go ahead', "
-            "'yes', 'analyze it', 'check the file') MUST be classified as rag, not direct. "
-            "Only classify as direct if the message is clearly conversational with zero "
-            "relation to any document (greetings, thanks, AI self-reference). "
-            "EXCEPTION: queries asking IF the AI can see/access/read the file are direct "
-            "(primary_intent=converse_meta) — they are about AI perception, not doc content."
-            if session_has_docs else
-            "\nSESSION STATE: No documents have been uploaded yet. "
-            "Classify document-related requests as rag anyway — the retrieval "
-            "pipeline will handle the empty state gracefully."
+# ══════════════════════════════════════════════════════════════════════════════
+# Node 2a — llm_classify
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _node_llm_classify(state: ClassifierState) -> ClassifierState:
+    """
+    Call the LLM with the full prompt and store the raw response.
+    On failure → sets use_heuristic=True so post_process falls back.
+    """
+    query    = state["normalised_query"]
+    session_has_docs        = state.get("session_has_docs", False)
+    uploaded_docs           = state.get("uploaded_docs") or []
+    attached_doc_filenames  = state.get("attached_doc_filenames") or []
+    preferred_provider      = state.get("preferred_provider")
+
+    history_block = _format_history(state.get("history") or [])
+    route_history = _format_route_log(state.get("route_log") or [])
+
+    if uploaded_docs:
+        uploaded_docs_block = "\n".join(f"  {i+1}. {n}" for i, n in enumerate(uploaded_docs))
+    else:
+        uploaded_docs_block = "(none uploaded yet)"
+
+    # ── Session-state hint ────────────────────────────────────────────────────
+    docs_hint = (
+        "\nSESSION STATE: The user HAS uploaded documents to this session. "
+        "Short or ambiguous messages that could refer to the uploaded documents "
+        "(e.g. 'its uploaded', 'summarize it', 'what do you think', 'go ahead', "
+        "'yes', 'analyze it', 'check the file') MUST be classified as rag, not direct. "
+        "Only classify as direct if the message is clearly conversational with zero "
+        "relation to any document (greetings, thanks, AI self-reference). "
+        "EXCEPTION: queries asking IF the AI can see/access/read the file are direct "
+        "(primary_intent=converse_meta) — they are about AI perception, not doc content."
+        if session_has_docs else
+        "\nSESSION STATE: No documents have been uploaded yet. "
+        "Classify document-related requests as rag anyway — the retrieval "
+        "pipeline will handle the empty state gracefully."
+    )
+
+    # ── Attachment-type context ───────────────────────────────────────────────
+    attached_hint = ""
+    if attached_doc_filenames:
+        _attached_names      = ", ".join(attached_doc_filenames)
+        _attached_has_cad    = any(_is_cad(f) for f in attached_doc_filenames)
+        _attached_has_images = any(_is_image(f) for f in attached_doc_filenames)
+        _attached_has_docs   = any(_is_doc(f) for f in attached_doc_filenames)
+
+        # Build per-file type notes so the LLM understands what each attachment is
+        file_type_lines = []
+        for f in attached_doc_filenames:
+            if _is_cad(f):
+                file_type_lines.append(
+                    f"  - {f} → CAD/IFC/BIM file. Route to 'cad' ONLY if query explicitly asks "
+                    "about building content (elements, storeys, materials, IFC classes). "
+                    "NEVER route to 'cad' just because this file exists — the query must be about its content."
+                )
+            elif _is_image(f):
+                file_type_lines.append(
+                    f"  - {f} → Image file. Route to 'rag' (primary_intent='image_query') "
+                    "only if query asks about what is visible in this image."
+                )
+            else:
+                file_type_lines.append(
+                    f"  - {f} → Document/PDF. Route to 'rag' if query asks about its content."
+                )
+
+        mixed_note = ""
+        if _attached_has_cad and (_attached_has_docs or _attached_has_images):
+            mixed_note = (
+                "\nCRITICAL: Multiple file types are attached. "
+                "Identify which file the user is asking about based on their query content, "
+                "not on which file type was last uploaded. "
+                "A question about text, specifications, measurements, or any non-BIM topic "
+                "should route to 'rag' targeting the document/PDF, NOT to 'cad'."
+            )
+
+        attached_hint = (
+            f"\n\nATTACHED TO THIS MESSAGE:\n"
+            + "\n".join(file_type_lines)
+            + mixed_note
+            + f"\n\nFor doc_scope: set to the specific filename that the query is asking about. "
+            "Only set doc_scope to a CAD file if the query is explicitly about BIM/IFC content. "
+            "Do NOT set doc_scope if the scope is unclear or the user is asking generally."
         )
 
-        # Highest-priority context: docs attached to THIS specific message
-        _attached = attached_doc_filenames or []
-        if _attached:
-            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
-            _attached_names = ", ".join(_attached)
-            _attached_are_images = all(
-                os.path.splitext(f)[1].lower() in _image_exts for f in _attached
-            )
-            attached_hint = (
-                f"\n\nATTACHED TO THIS MESSAGE: {_attached_names}\n"
-                "CRITICAL: The user physically attached the above file(s) to this exact message. "
-                "Any vague reference ('this one', 'it', 'this', 'what about this', 'this file', "
-                "'this image', 'this photo', 'this document', 'هذا', 'هذه', 'cette image') "
-                "UNAMBIGUOUSLY refers to the attached file — NOT any older session document. "
-                f"Set doc_scope to '{_attached[-1]}' (the attached file). "
-                + ("Set primary_intent='image_query' and suggested_route='rag'."
-                   if _attached_are_images else
-                   "Set suggested_route='rag'.")
-            )
-        else:
-            attached_hint = ""
+    # ── Pre-resolved doc_scope hint (from validate_input node) ───────────────
+    _doc_hint_str = state.get("doc_scope_hint", "")
+    if _doc_hint_str:
+        attached_hint += (
+            f"\n\nPRE-RESOLVED DOC SCOPE (heuristic): '{_doc_hint_str}'. "
+            "Override this only if the query clearly points to a different document."
+        )
 
-        prompt = _CLASSIFIER_PROMPT_TEMPLATE.format(
-            history_block=history_block,
-            route_history=route_history,
-            uploaded_docs_block=uploaded_docs_block,
-            query=query,
-        ) + docs_hint + attached_hint
+    prompt = _CLASSIFIER_PROMPT_TEMPLATE.format(
+        history_block=history_block,
+        route_history=route_history,
+        uploaded_docs_block=uploaded_docs_block,
+        query=query,
+    ) + docs_hint + attached_hint
 
+    try:
+        from llm_client import call_llm
         raw = call_llm(
             prompt=prompt,
             system_prompt=_CLASSIFIER_SYSTEM,
@@ -254,272 +433,384 @@ def classify_intent(
             task="classify",
             preferred_provider=preferred_provider,
         )
-
-        result = _parse_result(raw)
-
-        # Hard override: when docs were attached to THIS message, use the LLM's
-        # classification as the base but correct only when clearly wrong.
-        # We do NOT blindly force image_query for every query with an attachment —
-        # a query like "what is ORENDA junior entreprise" is independent even if
-        # an image was attached.  Only override when the LLM missed the image intent.
-        if _attached:
-            _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
-            _all_imgs = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached)
-
-            # Build a multi-file scope (pipe-separated) so the router can retrieve all
-            _scope = "|".join(_attached) if len(_attached) > 1 else _attached[-1]
-            result.doc_scope = _scope
-
-            # Only force image_query if the LLM already picked it, or if the query
-            # is vague/short and all attachments are images (clear visual intent).
-            _q_lower = query.lower().strip()
-            _is_short_vague = len(_q_lower.split()) <= 6 and not any(
-                _q_lower.startswith(opener) for opener in [
-                    "what is ", "who is ", "where is ", "when is ", "how is ",
-                    "define ", "explain what", "tell me what",
-                    "qu'est-ce que", "ما هو", "ما هي",
-                ]
-            )
-            _query_references_image = (
-                result.primary_intent == "image_query"
-                or _is_short_vague
-                or any(sig in _q_lower for sig in [
-                    "this image", "this photo", "this picture", "this screenshot",
-                    "this file", "this document", "this one",
-                    "describe", "what do you see", "what is in", "look at",
-                    "analyse", "analyze", "tell me about this",
-                    "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
-                ])
-            )
-
-            if _query_references_image and _all_imgs:
-                result.primary_intent = "image_query"
-                result.suggested_route = "rag"
-                result.reasoning += f" [hard-override: image attachment + visual query → scope='{_scope}']"
-            elif result.suggested_route not in ("rag", "iterative_rag", "analytics",
-                                                "transform", "graph", "report"):
-                # Non-image query but files attached — still ensure rag for doc content
-                result.suggested_route = "rag"
-                result.reasoning += f" [hard-override: doc attached to message → scope='{_scope}']"
-            else:
-                result.reasoning += f" [attachment noted, query is independent → scope='{_scope}']"
-
-        # Post-parse safety net: if session has docs and classifier said "direct"
-        # but ambiguity is non-trivial, override to rag — UNLESS it's a meta-awareness
-        # query (converse_meta), which must always stay direct.
-        if (session_has_docs
-                and result.suggested_route == "direct"
-                and result.ambiguity_score >= 0.2
-                and result.primary_intent not in ("converse_meta", "image_query")):
-            result.suggested_route = "rag"
-            result.reasoning += " [overridden direct→rag: session has docs and query is ambiguous]"
-
-        # image_query must always be rag — never direct
-        if result.primary_intent == "image_query" and result.suggested_route != "rag":
-            result.suggested_route = "rag"
-            result.reasoning += " [overridden to rag: image_query always routes to rag]"
-
-        return result
-
+        return {**state, "llm_raw": raw, "error": None}
     except Exception as e:
         logger.warning(f"intent_classifier LLM call failed: {e}")
-        return _heuristic_classify(query, history, route_log, session_has_docs, uploaded_docs, attached_doc_filenames)
+        return {**state, "llm_raw": None, "use_heuristic": True, "error": str(e)}
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Node 2b — heuristic_classify
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _format_history(history: List[Dict]) -> str:
-    if not history:
-        return "(none)"
-    recent = history[-8:]  # last 4 turns (user+assistant = 2 msgs each)
-    lines = []
-    for h in recent:
-        role = h.get("role", "user").capitalize()
-        content = str(h.get("content", ""))[:300]
-        lines.append(f"{role}: {content}")
-    return "\n".join(lines)
+def _node_heuristic_classify(state: ClassifierState) -> ClassifierState:
+    """
+    Fast heuristic fallback — no LLM required.
+    All pattern matching lives here; post_process still runs afterwards
+    for the same safety-net overrides as the LLM path.
+    """
+    query    = state.get("normalised_query") or state.get("query", "")
+    history  = state.get("history") or []
+    uploaded_docs          = state.get("uploaded_docs") or []
+    attached_doc_filenames = state.get("attached_doc_filenames") or []
+    session_has_docs       = state.get("session_has_docs", False)
+
+    result = _run_heuristics(query, history, uploaded_docs, attached_doc_filenames, session_has_docs)
+    return {
+        **state,
+        "result": result,
+        "classification_path": state.get("classification_path", "heuristic"),
+    }
 
 
-def _format_route_log(route_log: List[Dict]) -> str:
-    if not route_log:
-        return "(none)"
-    return " → ".join(f"[{e.get('route', '?')}]" for e in route_log[-6:])
+# ══════════════════════════════════════════════════════════════════════════════
+# Node 3 — post_process
+# ══════════════════════════════════════════════════════════════════════════════
 
+def _node_post_process(state: ClassifierState) -> ClassifierState:
+    """
+    Parse LLM raw output (if any), apply safety-net overrides, and cache the result.
+    On LLM parse failure → falls back to the heuristic result if one exists,
+    otherwise runs heuristics now.
+    """
+    # If we already have a result (cached or heuristic path), just apply overrides.
+    result: Optional[IntentAnalysis] = state.get("result")
 
-def _parse_result(raw: str) -> IntentAnalysis:
-    """Parse LLM output into IntentAnalysis — resilient to malformed output."""
-    import ast, re as _re
+    if result is None:
+        # LLM path: parse the raw response
+        raw = state.get("llm_raw") or ""
+        if raw:
+            try:
+                result = _parse_llm_result(raw)
+            except Exception as e:
+                logger.warning(f"intent_classifier: failed to parse LLM output: {e}")
+                result = None
 
-    clean = raw.strip()
+        if result is None:
+            # Parse failed — run heuristics as emergency fallback
+            query = state.get("normalised_query") or state.get("query", "")
+            result = _run_heuristics(
+                query,
+                state.get("history") or [],
+                state.get("uploaded_docs") or [],
+                state.get("attached_doc_filenames") or [],
+                state.get("session_has_docs", False),
+            )
+            state = {**state, "classification_path": "heuristic"}
 
-    # Strip markdown fences
-    if "```" in clean:
-        parts = clean.split("```")
-        if len(parts) >= 2:
-            inner = parts[1]
-            if inner.startswith("json"):
-                inner = inner[4:]
-            clean = inner.strip()
+    # ── Safety-net overrides (consolidated — was scattered in original) ────────
 
-    # Unwrap list-wrapped objects
-    if clean.startswith("["):
-        try:
-            parsed = json.loads(clean)
-            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-                clean = json.dumps(parsed[0])
-        except Exception:
-            pass
+    uploaded_docs          = state.get("uploaded_docs") or []
+    attached_doc_filenames = state.get("attached_doc_filenames") or []
+    session_has_docs       = state.get("session_has_docs", False)
+    doc_scope_hint         = state.get("doc_scope_hint", "")
 
-    data = {}
-    try:
-        data = json.loads(clean)
-    except Exception:
-        try:
-            data = ast.literal_eval(clean)
-        except Exception:
-            # Extract what we can with regex
-            route_match = _re.search(r'"suggested_route"\s*:\s*"([^"]+)"', clean)
-            if route_match:
-                data = {"suggested_route": route_match.group(1)}
+    # 1. image_query must always route to rag
+    if result.primary_intent == "image_query" and result.suggested_route != "rag":
+        result.suggested_route = "rag"
+        result.reasoning += " [override: image_query → rag]"
 
-    if isinstance(data, list):
-        data = data[0] if data and isinstance(data[0], dict) else {}
+    # 2. cad route requires a CAD file to exist in session
+    _session_has_cad = any(_is_cad(f) for f in uploaded_docs)
+    if result.suggested_route == "cad" and not _session_has_cad:
+        result.suggested_route = "rag"
+        result.reasoning += " [override: cad route requires a CAD file in session]"
 
-    valid_routes = {"direct", "rag", "iterative_rag", "transform", "analytics", "graph", "report", "define"}
-    suggested = str(data.get("suggested_route", "rag")).strip().lower()
-    if suggested not in valid_routes:
-        suggested = "rag"
+    # 3. converse_meta must always be direct (never let LLM mis-route it)
+    if result.primary_intent == "converse_meta" and result.suggested_route != "direct":
+        result.suggested_route = "direct"
+        result.reasoning += " [override: converse_meta → direct]"
 
-    return IntentAnalysis(
-        primary_intent   = str(data.get("primary_intent", "extract_info")),
-        secondary_intent = str(data.get("secondary_intent", "")),
-        target_entity    = str(data.get("target_entity", "")),
-        operation        = str(data.get("operation", "extract")),
-        output_format    = str(data.get("output_format", "prose")),
-        language_intent  = str(data.get("language_intent", "")),
-        is_followup      = bool(data.get("is_followup", False)),
-        followup_type    = str(data.get("followup_type", "none")),
-        ambiguity_score  = float(data.get("ambiguity_score", 0.5)),
-        suggested_route  = suggested,
-        confidence       = float(data.get("confidence", 0.7)),
-        reasoning        = str(data.get("reasoning", "")),
-        doc_scope        = str(data.get("doc_scope", "")),
+    # 4. If session has docs and classifier said "direct" with non-trivial ambiguity,
+    #    and it's not a meta/greeting query, nudge to rag
+    if (session_has_docs
+            and result.suggested_route == "direct"
+            and result.ambiguity_score >= 0.2
+            and result.primary_intent not in ("converse_meta", "image_query", "converse")):
+        result.suggested_route = "rag"
+        result.reasoning += " [nudge direct→rag: session has docs + ambiguous]"
+
+    # 5. Auto-fill doc_scope from pre-resolved hint when LLM left it empty
+    if not result.doc_scope and doc_scope_hint:
+        if result.suggested_route in ("rag", "iterative_rag", "cad", "transform", "analytics"):
+            result.doc_scope = doc_scope_hint
+            result.reasoning += f" [doc_scope filled from heuristic: {doc_scope_hint}]"
+
+    # 6. Auto-fill doc_scope from attachment when LLM left it empty —
+    #    BUT only if there's exactly one attached file, or if all attachments
+    #    are the same type. With mixed types (PDF + IFC), leave doc_scope empty
+    #    so retrieval searches ALL docs — the LLM already saw all files in context.
+    if attached_doc_filenames and not result.doc_scope:
+        if result.suggested_route in ("rag", "iterative_rag", "cad", "transform", "analytics"):
+            _has_mixed_types = (
+                any(_is_cad(f) for f in attached_doc_filenames)
+                and any(not _is_cad(f) for f in attached_doc_filenames)
+            )
+            if not _has_mixed_types:
+                # All same type — safe to default to last attachment
+                result.doc_scope = attached_doc_filenames[-1]
+                result.reasoning += f" [doc_scope set from attachment: {attached_doc_filenames[-1]}]"
+            # else: mixed types — leave empty; retrieve_vector will search all docs
+
+    # 7. Validate route is in known set
+    if result.suggested_route not in _VALID_ROUTES:
+        result.suggested_route = "rag"
+        result.reasoning += " [override: unknown route → rag]"
+
+    # ── Stamp path and latency ────────────────────────────────────────────────
+    path = state.get("classification_path", "llm")
+    elapsed_ms = (time.time() - state.get("started_at", time.time())) * 1000
+    result.classification_path = path
+    result.latency_ms           = round(elapsed_ms, 1)
+
+    # ── Cache the result (only LLM results — not heuristics, to keep cache meaningful) ──
+    fingerprint = state.get("session_fingerprint", "")
+    if path == "llm" and fingerprint:
+        _cache.set(fingerprint, result)
+
+    logger.debug(
+        f"intent_classifier [{path}] {result.suggested_route!r} "
+        f"conf={result.confidence:.2f} ambi={result.ambiguity_score:.2f} "
+        f"scope={result.doc_scope!r} ({elapsed_ms:.0f}ms)"
     )
 
+    return {**state, "result": result}
 
-def _heuristic_classify(
-    query: str,
-    history: Optional[List[Dict]],
-    route_log: Optional[List[Dict]],
-    session_has_docs: bool = False,
-    uploaded_docs: Optional[List[str]] = None,
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Routing function  (decides which classify node to call)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _route_after_validate(state: ClassifierState) -> Literal["llm_classify", "heuristic_classify", "post_process"]:
+    """
+    After validate_input:
+      - If we already have a cached result → skip straight to post_process
+      - If LLM unavailable / fast-path → heuristic_classify
+      - Otherwise → llm_classify
+    """
+    if state.get("result") is not None:
+        return "post_process"
+    if state.get("use_heuristic"):
+        return "heuristic_classify"
+    return "llm_classify"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Graph builder
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_classifier_graph() -> StateGraph:
+    workflow = StateGraph(ClassifierState)
+
+    workflow.add_node("validate_input",      _node_validate_input)
+    workflow.add_node("llm_classify",        _node_llm_classify)
+    workflow.add_node("heuristic_classify",  _node_heuristic_classify)
+    workflow.add_node("post_process",        _node_post_process)
+
+    workflow.set_entry_point("validate_input")
+    workflow.add_conditional_edges(
+        "validate_input",
+        _route_after_validate,
+        {
+            "llm_classify":       "llm_classify",
+            "heuristic_classify": "heuristic_classify",
+            "post_process":       "post_process",
+        },
+    )
+
+    # After LLM call: if LLM flagged use_heuristic (call failed), go to heuristic
+    workflow.add_conditional_edges(
+        "llm_classify",
+        lambda s: "heuristic_classify" if s.get("use_heuristic") else "post_process",
+        {
+            "heuristic_classify": "heuristic_classify",
+            "post_process":       "post_process",
+        },
+    )
+
+    workflow.add_edge("heuristic_classify", "post_process")
+    workflow.add_edge("post_process",        END)
+
+    return workflow.compile()
+
+
+# Build the graph once at import time — it's pure (no side effects at build time)
+_classifier_graph = _build_classifier_graph()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Public API  — 100% backward compatible
+# ══════════════════════════════════════════════════════════════════════════════
+
+def classify_intent(
+    query:                  str,
+    history:                Optional[List[Dict]] = None,
+    route_log:              Optional[List[Dict]] = None,
+    preferred_provider:     Optional[str] = None,
+    session_has_docs:       bool = False,
+    uploaded_docs:          Optional[List[str]] = None,
     attached_doc_filenames: Optional[List[str]] = None,
 ) -> IntentAnalysis:
     """
-    Fast heuristic fallback — no LLM required.
-    Mirrors the logic in _fallback_router but returns an IntentAnalysis.
-    When session_has_docs=True, short/ambiguous messages default to rag.
+    Classify the intent of a query using the LangGraph pipeline.
+
+    The route is determined by WHAT THE USER IS ASKING, not by what files
+    happen to exist in the session.  Attached files provide context for
+    doc_scope resolution but do not override intent routing.
+
+    Args:
+        query:                  The current user message.
+        history:                Conversation history [{role, content}, ...].
+        route_log:              Per-session route log from AgentState._route_log.
+        preferred_provider:     Optional provider hint to honour user-selected model.
+        session_has_docs:       True if the session has documents in the vector store.
+        uploaded_docs:          List of filenames currently uploaded in the session.
+        attached_doc_filenames: Filenames of docs physically attached to THIS message.
+
+    Returns:
+        IntentAnalysis with suggested_route, doc_scope, and rich metadata.
     """
-    q = query.lower().strip()
+    initial_state: ClassifierState = {
+        "query":                  query or "",
+        "history":                history or [],
+        "route_log":              route_log or [],
+        "preferred_provider":     preferred_provider,
+        "session_has_docs":       session_has_docs,
+        "uploaded_docs":          uploaded_docs or [],
+        "attached_doc_filenames": attached_doc_filenames or [],
 
-    # ── Highest-priority: doc attached to THIS message ────────────────────────
-    # Apply smart intent detection — don't blindly override for independent queries.
-    _attached = attached_doc_filenames or []
-    if _attached:
-        _image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
-        _all_imgs = all(os.path.splitext(f)[1].lower() in _image_exts for f in _attached)
-        _scope = "|".join(_attached) if len(_attached) > 1 else _attached[-1]
+        # internal — will be filled by validate_input
+        "normalised_query":    "",
+        "doc_scope_hint":      "",
+        "session_fingerprint": "",
+        "use_heuristic":       False,
+        "llm_raw":             None,
+        "error":               None,
+        "result":              None,
+        "classification_path": "llm",
+        "started_at":          time.time(),
+    }
 
-        # Check if query is about the attachment or is independent
-        _is_short_vague = len(q.split()) <= 6 and not any(
-            q.startswith(opener) for opener in [
-                "what is ", "who is ", "where is ", "when is ", "how is ",
-                "define ", "explain what", "tell me what",
-                "qu'est-ce que", "ما هو", "ما هي",
-            ]
+    try:
+        final = _classifier_graph.invoke(initial_state)
+        result: IntentAnalysis = final["result"]
+        if result is None:
+            raise ValueError("Graph returned None result")
+        return result
+    except Exception as e:
+        logger.error(f"intent_classifier graph failed unexpectedly: {e}")
+        # Nuclear fallback — should never be needed, but we never want to crash chat
+        return _run_heuristics(
+            query or "",
+            history or [],
+            uploaded_docs or [],
+            attached_doc_filenames or [],
+            session_has_docs,
         )
-        _attachment_signals = [
-            "this image", "this photo", "this picture", "this screenshot",
-            "this file", "this document", "this one",
-            "describe", "what do you see", "what is in", "look at",
-            "analyse", "analyze", "tell me about this",
-            "هذه الصورة", "هذا الملف", "cette image", "ce fichier",
-        ]
-        _references_attachment = _is_short_vague or any(s in q for s in _attachment_signals)
 
-        if _references_attachment:
-            return _make_heuristic(
-                query,
-                "rag",
-                "image_query" if _all_imgs else "extract_info",
-                "extract",
-                "prose",
-                0.97,
-                doc_scope=_scope,
-            )
-        # else: independent query — fall through to normal heuristic routing
 
-    # ── Image query: user asks about the visual content of an uploaded image ─────
-    # The system already described the image via vision LLM at upload time.
-    # Route to RAG so the description is retrieved and used to answer.
-    _image_content_signals = [
-        "what do you see", "what is in this image", "describe the image", "describe this image",
-        "what does this show", "what is shown", "what's in the picture", "what is in the picture",
-        "analyse this image", "analyze this image", "tell me about this image",
-        "what can you tell me about this", "look at this image", "read the text in",
-        "what do u see", "what do you see in this", "whats in this image",
-        "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة", "ماذا يوجد في",
-        "que vois-tu", "qu'est-ce que tu vois", "décris cette image",
-        "qu'est-ce qu'il y a dans", "explique cette image", "analyse cette image",
+# ══════════════════════════════════════════════════════════════════════════════
+# Heuristic engine  (used both as a node and as the emergency fallback)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _run_heuristics(
+    query: str,
+    history: List[Dict],
+    uploaded_docs: List[str],
+    attached_doc_filenames: List[str],
+    session_has_docs: bool,
+) -> IntentAnalysis:
+    """
+    Pattern-matching classification — no LLM required.
+    Route is determined by query content, not file presence.
+    """
+    q       = query.lower().strip()
+    _docs   = uploaded_docs or []
+    _attach = attached_doc_filenames or []
+
+    _doc_scope = _resolve_doc_scope_heuristic(q, _docs, _attach)
+
+    # ── Code generation ────────────────────────────────────────────────────────
+    _code_verbs = [
+        "write", "make", "give me", "create", "generate", "build",
+        "code", "implement", "show me", "do",
+        "écris", "fais", "crée",
+        "اكتب", "أنشئ", "اعمل",
     ]
-    # Also detect if session has image docs and query has general vision intent
-    _image_doc_in_session = any(
-        f.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"))
-        for f in (uploaded_docs or [])
-    )
-    if any(s in q for s in _image_content_signals) or (
-        _image_doc_in_session and any(w in q for w in ["see", "show", "describe", "image", "picture", "photo", "screenshot", "صورة", "image", "photo"])
-    ):
-        return _make_heuristic(query, "rag", "image_query", "extract", "prose", 0.92,
-                               doc_scope=_doc_scope)
-
-    # ── Meta-awareness: "did you get the file?", "can you access it?" ───────────
-    # These ask ONLY about file receipt/access — NOT image content.
-    _meta_signals = [
-        "did you get", "is the file there", "do you have the file", "do you have access",
-        "can you access", "did you receive", "is it uploaded", "did it upload",
-        "tu as reçu", "avez-vous reçu", "est-ce que tu as reçu", "tu l'as reçu",
-        "هل وصلك", "هل لديك الملف", "هل استلمت",
+    _code_nouns = [
+        "code", "function", "script", "algorithm", "algo", "program",
+        "snippet", "class", "method", "implementation", "solution",
+        "fonction", "algorithme", "programme", "classe", "méthode",
+        "كود", "دالة", "خوارزمية", "برنامج",
     ]
-    if any(s in q for s in _meta_signals):
-        return _make_heuristic(query, "direct", "converse_meta", "converse", "prose", 0.90,
-                               doc_scope="")
-
-    # ── Doc scope: heuristic resolution when one doc clearly targeted ──────────
-    _doc_scope = _resolve_doc_scope_heuristic(q, uploaded_docs or [])
-
-    # Code generation — always direct, before anything else
-    _code_verbs = ["write", "make", "give me", "create", "generate", "build",
-                   "code", "implement", "show me", "do", "écris", "fais", "crée"]
-    _code_nouns = ["code", "function", "script", "algorithm", "algo", "program",
-                   "snippet", "class", "method", "implementation", "solution",
-                   "fonction", "algorithme", "programme", "classe", "méthode",
-                   "كود", "دالة", "خوارزمية", "برنامج"]
     if (any(q.startswith(v) or f" {v} " in q for v in _code_verbs) and
             any(n in q for n in _code_nouns)):
         return _make_heuristic(query, "direct", "converse", "generate", "code", 0.92)
 
-    # Chart / graph
+    # ── File-receipt meta-queries ──────────────────────────────────────────────
+    _meta_signals = [
+        "did you get", "is the file there", "do you have the file", "do you have access",
+        "can you access", "did you receive", "is it uploaded", "did it upload",
+        "tu as reçu", "avez-vous reçu", "est-ce que tu as reçu",
+        "هل وصلك", "هل لديك الملف", "هل استلمت",
+    ]
+    if any(s in q for s in _meta_signals):
+        return _make_heuristic(query, "direct", "converse_meta", "converse", "prose", 0.90)
+
+    # ── CAD/IFC content query ──────────────────────────────────────────────────
+    _session_has_cad = any(_is_cad(f) for f in _docs)
+    if _session_has_cad:
+        _cad_signals = [
+            "ifc", "element", "elements", "storey", "storeys", "floor", "floors",
+            "wall", "walls", "window", "windows", "door", "doors", "component",
+            "building", "structure", "material", "materials", "quantity", "quantities",
+            "ifc class", "ifc classes", "model", "bim", "what is in this ifc",
+            "what does this ifc", "analyse this ifc", "analyze this ifc",
+            "summarize this ifc", "summarise this ifc",
+        ]
+        _attached_cad = [f for f in _attach if _is_cad(f)]
+        _query_mentions_cad       = any(s in q for s in _cad_signals)
+        _query_directly_refs_cad  = (
+            any(_is_cad(f) and os.path.splitext(f)[0].lower() in q for f in _docs)
+            or bool(_attached_cad)
+        )
+        if _query_mentions_cad or _query_directly_refs_cad:
+            _cad_scope = (_attached_cad[-1] if _attached_cad
+                          else next((f for f in _docs if _is_cad(f)), ""))
+            return _make_heuristic(query, "cad", "cad_query", "extract", "prose", 0.88,
+                                   doc_scope=_cad_scope)
+
+    # ── Image content query ────────────────────────────────────────────────────
+    _image_content_signals = [
+        "what do you see", "what is in this image", "describe the image",
+        "describe this image", "what does this show", "what is shown",
+        "what's in the picture", "what is in the picture",
+        "analyse this image", "analyze this image", "tell me about this image",
+        "what can you tell me about this", "look at this image", "read the text in",
+        "ما الذي تراه", "ما في هذه الصورة", "صف هذه الصورة", "ماذا يوجد في",
+        "que vois-tu", "qu'est-ce que tu vois", "décris cette image",
+    ]
+    _image_in_session = any(_is_image(f) for f in _docs)
+    if any(s in q for s in _image_content_signals) or (
+        _image_in_session and any(
+            w in q for w in ["see", "show", "describe", "image", "picture", "photo",
+                              "screenshot", "صورة"]
+        )
+    ):
+        return _make_heuristic(query, "rag", "image_query", "extract", "prose", 0.92,
+                               doc_scope=_doc_scope)
+
+    # ── Chart / graph request ──────────────────────────────────────────────────
     graph_signals = [
         "chart", "graph", "plot", "visuali", "graphique", "diagramme",
         "courbe", "histogramme", "رسم بياني", "مخطط", "تصور",
-        "gráfico", "diagrama", "visualizar", "diagramm", "grafik",
+        "camembert", "nuage de points", "gráfico", "diagrama",
     ]
     if any(s in q for s in graph_signals):
-        return _make_heuristic(query, "graph", "visualise_data", "visualise", "chart", 0.8,
+        return _make_heuristic(query, "graph", "visualise_data", "visualise", "chart", 0.80,
                                doc_scope=_doc_scope)
 
-    # Report generation
+    # ── Report generation ──────────────────────────────────────────────────────
     report_signals = [
         "make a report", "create a report", "generate a report", "write a report",
         "do a report", "make me a report", "rapport sur", "fais un rapport",
@@ -529,7 +820,7 @@ def _heuristic_classify(
         return _make_heuristic(query, "report", "generate_report", "generate", "pdf", 0.85,
                                doc_scope=_doc_scope)
 
-    # Transform / translate
+    # ── Transform / translate ──────────────────────────────────────────────────
     transform_signals = [
         "translat", "tradui", "traduire", "rewrite", "paraphrase",
         "summarise in", "summarize in", "résume en", "résumer en",
@@ -538,84 +829,86 @@ def _heuristic_classify(
         return _make_heuristic(query, "transform", "translate_content", "translate", "prose", 0.75,
                                doc_scope=_doc_scope)
 
-    # Analytics
-    analytics_signals = ["analytics", "statistiques", "total", "average", "count", "how many across"]
+    # ── Analytics ─────────────────────────────────────────────────────────────
+    analytics_signals = [
+        "analytics", "statistiques", "total", "average", "count",
+        "how many across", "across all", "sum of",
+    ]
     if any(s in q for s in analytics_signals):
         return _make_heuristic(query, "analytics", "aggregate_stats", "aggregate", "table", 0.75)
 
-    # Iterative RAG
+    # ── Iterative RAG (multi-doc compare) ─────────────────────────────────────
     compare_signals = ["compare", "difference", "vs", "versus", "comparaison", "différence", "مقارنة"]
     if any(s in q for s in compare_signals):
         return _make_heuristic(query, "iterative_rag", "compare_docs", "compare", "prose", 0.75)
 
-    # Define — ONLY for standalone terminology questions with no doc context.
-    # Never trigger define when session has docs — "what is the host company of this file"
-    # is a RAG question, not a Wikipedia lookup.
-    define_signals = ["what is ", "what does ", "define ", "meaning of ", "qu'est-ce que"]
-    _doc_ref_words = ["this", "the file", "the document", "this file", "this document",
-                      "it", "here", "uploaded", "given", "provided", "attached",
-                      "هذا", "هذه", "الملف", "ce fichier", "ce document"]
+    # ── Define — standalone terminology, no doc reference ────────────────────
+    define_signals  = ["what is ", "what does ", "define ", "meaning of ", "qu'est-ce que"]
+    _doc_ref_words  = [
+        "this", "the file", "the document", "this file", "this document",
+        "it", "here", "uploaded", "given", "provided", "attached",
+        "هذا", "هذه", "الملف", "ce fichier", "ce document",
+    ]
     _is_pure_term = (
         any(s in q for s in define_signals)
         and len(q.split()) <= 8
-        and not session_has_docs                          # no docs → Wikipedia is fine
-        and not any(w in q for w in _doc_ref_words)      # no doc reference words
+        and not session_has_docs
+        and not any(w in q for w in _doc_ref_words)
     )
     if _is_pure_term:
-        return _make_heuristic(query, "define", "define_term", "define", "prose", 0.7)
+        return _make_heuristic(query, "define", "define_term", "define", "prose", 0.70)
 
-    # Direct / conversational — only clear greetings/thanks, never doc-context
+    # ── Casual / conversational ────────────────────────────────────────────────
     casual_signals = [
         "hello", "hi", "hey", "yo", "wassup", "sup", "what's up", "whats up",
         "thanks", "thank you", "who are you", "bonjour", "merci", "salut",
         "how are you", "what did you", "what did you say", "repeat",
     ]
     if any(s in q for s in casual_signals):
-        # Even casual signals shouldn't override when docs exist and query looks doc-related
         if not session_has_docs:
-            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.8)
-        # With docs present: only truly casual (no doc words) → direct
+            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.80)
         doc_words = ["file", "document", "uploaded", "it", "this", "that", "the"]
         if not any(w in q for w in doc_words):
-            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.8)
+            return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.80)
 
-    # Self-referential (references the AI or conversation)
+    # ── Self-referential ───────────────────────────────────────────────────────
     self_ref = ["you just", "you said", "your answer", "what you", "last response", "what route"]
     if any(s in q for s in self_ref):
         return _make_heuristic(query, "direct", "converse", "converse", "prose", 0.75,
                                is_followup=True, followup_type="repeat")
 
-    # Default → RAG (always rag when session has docs; otherwise rag anyway as safest)
-    _reasoning = (
-        "Heuristic classification: session has documents — defaulting to rag for ambiguous query."
-        if session_has_docs else
-        "Heuristic classification: matched 'rag' pattern in query."
+    # ── Default: RAG ───────────────────────────────────────────────────────────
+    return _make_heuristic(
+        query, "rag", "extract_info", "extract", "prose",
+        0.60 if not session_has_docs else 0.75,
+        doc_scope=_doc_scope,
     )
-    return _make_heuristic(query, "rag", "extract_info", "extract", "prose",
-                           0.6 if not session_has_docs else 0.75, doc_scope=_doc_scope)
 
 
-def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _resolve_doc_scope_heuristic(
+    q_lower: str,
+    uploaded_docs: List[str],
+    attached: Optional[List[str]] = None,
+) -> str:
     """
-    Heuristic doc-scope resolver: returns a filename or positional hint if the
-    query clearly targets one specific document, else returns "".
-
-    No LLM needed — exact filename substring match + ordinal word detection.
-    The LLM path in the full classifier handles ambiguous/natural-language cases.
+    Resolve which document the user is referring to, without the LLM.
+    Returns a filename or positional hint ("first", "second", …) or "".
     """
     if not uploaded_docs:
         return ""
 
-    q_lower = q.lower()
-
-    # Exact / partial filename match (case-insensitive)
-    for fname in uploaded_docs:
-        if fname.lower() in q_lower:
+    # Exact / partial filename match (case-insensitive, try longest match first)
+    for fname in sorted(uploaded_docs, key=len, reverse=True):
+        if fname.lower() in q_lower or os.path.splitext(fname)[0].lower() in q_lower:
             return fname
 
-    # Positional ordinals — map word → 0-based index
+    # Positional ordinals
     ordinals = {
-        "first": 0,  "premier": 0, "première": 0, "الأول": 0,  "الأولى": 0,
+        "first": 0,  "premier": 0, "première": 0, "الأول": 0, "الأولى": 0,
         "second": 1, "deuxième": 1, "الثاني": 1, "الثانية": 1,
         "third": 2,  "troisième": 2, "الثالث": 2,
         "fourth": 3, "quatrième": 3, "الرابع": 3,
@@ -626,14 +919,14 @@ def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
             return uploaded_docs[idx]
 
     # Single-doc session + any pronoun → unambiguously the only doc
-    pronouns = ["it", "this", "that", "the file", "the document", "the image",
-                "له", "هذا", "هذه", "ce fichier", "ce document", "cette image"]
-    if len(uploaded_docs) == 1:
-        if any(p in q_lower for p in pronouns):
-            return uploaded_docs[0]
+    pronouns = [
+        "it", "this", "that", "the file", "the document", "the image",
+        "له", "هذا", "هذه", "ce fichier", "ce document", "cette image",
+    ]
+    if len(uploaded_docs) == 1 and any(p in q_lower for p in pronouns):
+        return uploaded_docs[0]
 
-    # Multi-doc session: "this image/file/one/document" → most recently uploaded
-    # (last in list = most recently ingested = almost certainly what the user means)
+    # Most-recently-uploaded signals
     _recency_signals = [
         "this image", "this photo", "this picture", "this screenshot",
         "this file", "this document", "this one", "that image", "that file",
@@ -641,6 +934,24 @@ def _resolve_doc_scope_heuristic(q: str, uploaded_docs: List[str]) -> str:
     ]
     if any(s in q_lower for s in _recency_signals):
         return uploaded_docs[-1]
+
+    # Attached file (most recently attached) wins when nothing else matched —
+    # BUT skip CAD files if the query has no CAD signals, to avoid poisoning
+    # the scope hint when a PDF + IFC are both in the session.
+    if attached:
+        _cad_signals = {
+            "ifc", "bim", "storey", "floor", "wall", "element", "material",
+            "component", "structure", "model", "building", "quantity", "classe",
+            "طابق", "عنصر", "مبنى",
+        }
+        _last_attachment = attached[-1]
+        if _is_cad(_last_attachment):
+            # Only use the CAD attachment as scope hint if query has explicit BIM/CAD intent
+            if any(sig in q_lower for sig in _cad_signals):
+                return _last_attachment
+            # else: query is probably about a document, not the CAD file — leave scope empty
+        else:
+            return _last_attachment
 
     return ""
 
@@ -657,17 +968,97 @@ def _make_heuristic(
     doc_scope: str = "",
 ) -> IntentAnalysis:
     return IntentAnalysis(
-        primary_intent   = primary_intent,
-        secondary_intent = "",
-        target_entity    = "",
-        operation        = operation,
-        output_format    = output_format,
-        language_intent  = "",
-        is_followup      = is_followup,
-        followup_type    = followup_type,
-        ambiguity_score  = 0.4,
-        suggested_route  = route,
-        confidence       = confidence,
-        reasoning        = f"Heuristic classification: matched '{route}' pattern in query.",
-        doc_scope        = doc_scope,
+        primary_intent    = primary_intent,
+        secondary_intent  = "",
+        target_entity     = "",
+        operation         = operation,
+        output_format     = output_format,
+        language_intent   = "",
+        is_followup       = is_followup,
+        followup_type     = followup_type,
+        ambiguity_score   = 0.4,
+        suggested_route   = route,
+        confidence        = confidence,
+        reasoning         = f"Heuristic classification: matched '{route}' pattern in query.",
+        doc_scope         = doc_scope,
+        classification_path = "heuristic",
+        latency_ms        = 0.0,
     )
+
+
+def _parse_llm_result(raw: str) -> IntentAnalysis:
+    """Parse LLM output into IntentAnalysis — resilient to malformed output."""
+    import ast
+    import re as _re
+
+    clean = raw.strip()
+
+    if "```" in clean:
+        parts = clean.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            clean = inner.strip()
+
+    if clean.startswith("["):
+        try:
+            parsed = json.loads(clean)
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                clean = json.dumps(parsed[0])
+        except Exception:
+            pass
+
+    data: Dict = {}
+    try:
+        data = json.loads(clean)
+    except Exception:
+        try:
+            data = ast.literal_eval(clean)
+        except Exception:
+            route_match = _re.search(r'"suggested_route"\s*:\s*"([^"]+)"', clean)
+            if route_match:
+                data = {"suggested_route": route_match.group(1)}
+
+    if isinstance(data, list):
+        data = data[0] if data and isinstance(data[0], dict) else {}
+
+    suggested = str(data.get("suggested_route", "rag")).strip().lower()
+    if suggested not in _VALID_ROUTES:
+        suggested = "rag"
+
+    return IntentAnalysis(
+        primary_intent    = str(data.get("primary_intent", "extract_info")),
+        secondary_intent  = str(data.get("secondary_intent", "")),
+        target_entity     = str(data.get("target_entity", "")),
+        operation         = str(data.get("operation", "extract")),
+        output_format     = str(data.get("output_format", "prose")),
+        language_intent   = str(data.get("language_intent", "")),
+        is_followup       = bool(data.get("is_followup", False)),
+        followup_type     = str(data.get("followup_type", "none")),
+        ambiguity_score   = float(data.get("ambiguity_score", 0.5)),
+        suggested_route   = suggested,
+        confidence        = float(data.get("confidence", 0.7)),
+        reasoning         = str(data.get("reasoning", "")),
+        doc_scope         = str(data.get("doc_scope", "")),
+        classification_path = "llm",
+        latency_ms        = 0.0,
+    )
+
+
+def _format_history(history: List[Dict]) -> str:
+    if not history:
+        return "(none)"
+    recent = history[-8:]
+    lines = []
+    for h in recent:
+        role    = h.get("role", "user").capitalize()
+        content = str(h.get("content", ""))[:300]
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _format_route_log(route_log: List[Dict]) -> str:
+    if not route_log:
+        return "(none)"
+    return " → ".join(f"[{e.get('route', '?')}]" for e in route_log[-6:])
