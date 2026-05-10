@@ -91,6 +91,65 @@ function normalize(item: any) {
   };
 }
 
+// ── Thumbnail fetcher ────────────────────────────────────────────────────────
+// Fetches the OG/twitter image from an article URL via a lightweight
+// HEAD-then-parse approach using a CORS proxy. Falls back silently.
+// Results are cached in a module-level Map so re-renders don't re-fetch.
+const _thumbCache = new Map<string, string | null>();
+const _thumbInFlight = new Set<string>();
+
+async function fetchThumbnail(articleUrl: string): Promise<string | null> {
+  if (!articleUrl || articleUrl === "#") return null;
+  if (_thumbCache.has(articleUrl)) return _thumbCache.get(articleUrl)!;
+  if (_thumbInFlight.has(articleUrl)) return null;
+  _thumbInFlight.add(articleUrl);
+  try {
+    // Use our own backend proxy — server-side og:image fetch, no CORS issues,
+    // no third-party rate limits, and the server already has browser headers set.
+    const proxy = `${API_BASE}/api/news/thumb?url=${encodeURIComponent(articleUrl)}`;
+    const res   = await fetch(proxy, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) { _thumbCache.set(articleUrl, null); return null; }
+    const data = await res.json() as { image_url: string | null };
+    const url  = data.image_url ?? null;
+    _thumbCache.set(articleUrl, url);
+    return url;
+  } catch {
+    _thumbCache.set(articleUrl, null);
+    return null;
+  } finally {
+    _thumbInFlight.delete(articleUrl);
+  }
+}
+
+// Hook used per-card: resolves thumbnail lazily and returns it
+function useThumbnail(articleUrl: string | undefined, existingImageUrl: string | null | undefined) {
+  const [thumb, setThumb] = useState<string | null>(existingImageUrl ?? null);
+  useEffect(() => {
+    if (existingImageUrl) { setThumb(existingImageUrl); return; }
+    if (!articleUrl || articleUrl === "#") return;
+    // Check cache synchronously first
+    if (_thumbCache.has(articleUrl)) { setThumb(_thumbCache.get(articleUrl) ?? null); return; }
+    let cancelled = false;
+    fetchThumbnail(articleUrl).then(url => { if (!cancelled) setThumb(url); });
+    return () => { cancelled = true; };
+  }, [articleUrl, existingImageUrl]);
+  return thumb;
+}
+
+// ── Stale article guard ──────────────────────────────────────────────────────
+// Articles with no valid published_at, or older than MAX_ARTICLE_AGE_DAYS,
+// are considered stale cache artefacts and filtered out of the feed.
+const MAX_ARTICLE_AGE_DAYS = 4;
+
+function isArticleFresh(publishedAt: string): boolean {
+  if (!publishedAt) return false;                         // no timestamp → stale
+  const ts = new Date(publishedAt).getTime();
+  if (isNaN(ts)) return false;                           // unparseable → stale
+  const ageMs = Date.now() - ts;
+  if (ageMs < 0) return true;                            // future-dated → keep
+  return ageMs < MAX_ARTICLE_AGE_DAYS * 24 * 60 * 60 * 1000;
+}
+
 // ── Static overlay gradient ──────────────────────────────────────────────────
 const overlayGradient =
   "linear-gradient(to top,rgba(0,0,0,0.88) 0%,rgba(0,0,0,0.40) 55%,rgba(0,0,0,0.08) 100%)";
@@ -296,17 +355,21 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
   const meta  = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href  = item.articleUrl && item.articleUrl !== "#" ? item.articleUrl : item.sourceUrl;
   const [imgError, setImgError] = useState(false);
+  // Resolve thumbnail: use stored imageUrl or lazily fetch OG image from article
+  const resolvedImage = useThumbnail(item.articleUrl, item.imageUrl);
   // Clearbit logos should be displayed as a small centred badge, not a cover photo
-  const isClearbit  = !!(item.imageUrl && item.imageUrl.includes("logo.clearbit.com"));
-  const hasImage    = item.imageUrl && !imgError && !isClearbit;
-  const hasLogo     = item.imageUrl && !imgError && isClearbit;
+  const isClearbit  = !!(resolvedImage && resolvedImage.includes("logo.clearbit.com"));
+  const hasImage    = resolvedImage && !imgError && !isClearbit;
+  const hasLogo     = resolvedImage && !imgError && isClearbit;
   const hasAiImpact = !!item.aiImpact;
+  const logoSrc     = "/favicon.svg";
 
   // Collapse wide/featured spans when chat pushes grid to 3 cols to avoid overflow
   const effectiveSize: CardSize = chatOpen && (size === "wide" || size === "featured") ? "normal" : size;
   const isFeatured  = effectiveSize === "featured";
   const isWide      = effectiveSize === "wide";
   const isTall      = effectiveSize === "tall" || isFeatured;
+  const logoSize    = isFeatured ? 96 : isTall ? 80 : isWide ? 72 : 60;
   const colSpan     = (effectiveSize === "wide" || effectiveSize === "featured") ? 2 : 1;
   const rowSpan     = (effectiveSize === "tall" || effectiveSize === "featured") ? 2 : 1;
   const titleSize   = isFeatured ? "1.08rem" : isWide ? "0.92rem" : "0.82rem";
@@ -354,34 +417,34 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
       {/* Background */}
       {hasImage
         ? <img
-            src={item.imageUrl} alt=""
+            src={resolvedImage ?? undefined} alt=""
             onError={() => setImgError(true)}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", transition: "transform 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)", transformOrigin: "center center" }}
           />
-        : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"], display: "flex", alignItems: "center", justifyContent: "center" }}>
+        : <div style={{ position: "absolute", inset: 0, background: FALLBACK_GRADIENTS[item.category] ?? FALLBACK_GRADIENTS["General"], display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
             {hasLogo
               ? <img
-                  src={item.imageUrl} alt=""
+                  src={resolvedImage ?? undefined} alt=""
                   onError={() => setImgError(true)}
                   style={{
                     width:  isFeatured ? 80 : isTall ? 64 : isWide ? 60 : 48,
                     height: isFeatured ? 80 : isTall ? 64 : isWide ? 60 : 48,
                     objectFit: "contain",
-                    opacity: 0.72,
+                    opacity: 0.90,
                     borderRadius: 12,
-                    filter: "drop-shadow(0 2px 8px rgba(0,0,0,0.5))",
+                    filter: "brightness(0) invert(1) drop-shadow(0 2px 12px rgba(0,0,0,0.6))",
                     userSelect: "none",
                   }}
                 />
               : <img
-                  src="/favicon.svg"
+                  src={logoSrc}
                   alt=""
                   style={{
-                    width:  isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
-                    height: isFeatured ? 72 : isTall ? 56 : isWide ? 52 : 40,
+                    width:  logoSize,
+                    height: logoSize,
                     objectFit: "contain",
-                    opacity: 0.18,
-                    filter: "brightness(0) invert(1)",
+                    opacity: 0.22,
+                    filter: "brightness(0) invert(1) drop-shadow(0 2px 24px rgba(0,0,0,0.5))",
                     userSelect: "none",
                     pointerEvents: "none",
                   }}
@@ -1282,6 +1345,8 @@ const NewsPage = () => {
 
   const addArticles = useCallback((items: any[]) => {
     const fresh = items.map(normalize).filter(a => {
+      // Drop stale cache artefacts — articles with no valid/recent timestamp
+      if (!isArticleFresh(a.publishedAt)) return false;
       const id = a.id ?? a.articleUrl ?? a.title ?? String(Math.random());
       if (renderedIds.current.has(id)) return false;
       renderedIds.current.add(id); return true;
@@ -1292,7 +1357,7 @@ const NewsPage = () => {
 
   const fetchPage = useCallback(async (pageNum: number): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_BASE}/api/news/pages/${pageNum}`);
+      const res = await fetch(`${API_BASE}/api/news/pages/${pageNum}`, { cache: "no-store" });
       if (!res.ok) return false;
       const data = await res.json();
       addArticles(data.items ?? []);
@@ -1307,7 +1372,7 @@ const NewsPage = () => {
     async function init() {
       setIsInitialLoading(true);
       try {
-        const metaRes = await fetch(`${API_BASE}/api/news/meta`);
+        const metaRes = await fetch(`${API_BASE}/api/news/meta`, { cache: "no-store" });
         if (!metaRes.ok) throw new Error("No cache yet");
         const meta = await metaRes.json();
         if (!cancelled) { setTotalPages(meta.total_pages ?? 0); knownRunAt.current = meta.run_at ?? null; }
@@ -1327,11 +1392,11 @@ const NewsPage = () => {
   const pollUntilReady = useCallback(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/news/status`);
+        const res = await fetch(`${API_BASE}/api/news/status`, { cache: "no-store" });
         const data = await res.json();
         if (!data.running && data.total_pages > 0) {
           clearInterval(interval);
-          const metaRes = await fetch(`${API_BASE}/api/news/meta`);
+          const metaRes = await fetch(`${API_BASE}/api/news/meta`, { cache: "no-store" });
           const meta = await metaRes.json();
           setTotalPages(meta.total_pages ?? 0);
           knownRunAt.current = meta.run_at ?? null;
@@ -1346,7 +1411,7 @@ const NewsPage = () => {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/news/status`);
+        const res = await fetch(`${API_BASE}/api/news/status`, { cache: "no-store" });
         const data = await res.json();
         if (knownRunAt.current !== null && data.last_run_at !== null && data.last_run_at !== knownRunAt.current)
           setNewRunAvailable(true);
@@ -1361,7 +1426,7 @@ const NewsPage = () => {
     prevVisibleCount.current = 0; setCurrentPage(0); setHasMore(true);
     setNewRunAvailable(false); setIsInitialLoading(true);
     try {
-      const metaRes = await fetch(`${API_BASE}/api/news/meta`);
+      const metaRes = await fetch(`${API_BASE}/api/news/meta`, { cache: "no-store" });
       const meta = await metaRes.json();
       setTotalPages(meta.total_pages ?? 0); knownRunAt.current = meta.run_at ?? null;
       await fetchPage(0);
@@ -1388,7 +1453,7 @@ const NewsPage = () => {
       await fetch(`${API_BASE}/api/news/trigger?force=true`, { method: "POST" });
       const poll = setInterval(async () => {
         try {
-          const res = await fetch(`${API_BASE}/api/news/status`);
+          const res = await fetch(`${API_BASE}/api/news/status`, { cache: "no-store" });
           const data = await res.json();
           if (!data.running) { clearInterval(poll); setIsRefreshing(false); await resetAndReload(); }
         } catch (_) {}

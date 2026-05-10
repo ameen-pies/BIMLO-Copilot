@@ -103,7 +103,7 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
   useEffect(() => {
     (async () => {
       try {
-        const res  = await fetch(`${API_BASE}/api/news/pages/0`);
+        const res  = await fetch(`${API_BASE}/api/news/pages/0`, { cache: "no-store" });
         if (!res.ok) throw new Error("no cache");
         const data = await res.json();
         setArticles(data.items ?? []);

@@ -903,11 +903,13 @@ export default function AdminPage() {
     loadHealth();
   }, [loadUsers, loadStats, loadHealth]);
 
-  // Auto-refresh health every 30s
+  // Auto-refresh health every 30s; accelerate to every 5s while pipeline is running
+  const isPipelineRunning = health?.news_pipeline?.running ?? false;
   useEffect(() => {
-    const interval = setInterval(loadHealth, 30_000);
+    const delay = isPipelineRunning ? 5_000 : 30_000;
+    const interval = setInterval(loadHealth, delay);
     return () => clearInterval(interval);
-  }, [loadHealth]);
+  }, [loadHealth, isPipelineRunning]);
 
   // ── Live log SSE ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1159,7 +1161,10 @@ export default function AdminPage() {
             const { token } = JSON.parse(localStorage.getItem("bimlo_auth") || "{}");
             const res = await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(token || "") });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            setTimeout(loadHealth, 2000);
+            // Reload health quickly so the Running state is reflected immediately,
+            // then the isPipelineRunning effect takes over and polls every 5s.
+            setTimeout(loadHealth, 1000);
+            setTimeout(loadHealth, 3000);
           }} />
         </div>
 

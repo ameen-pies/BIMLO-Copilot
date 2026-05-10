@@ -38,9 +38,14 @@ services:
       - VISION_MODEL=@cf/meta/llama-3.2-11b-vision-instruct
       - HF_HUB_DISABLE_PROGRESS_BARS=1
       - LOGO_PATH=/app/assets/favicon.png
+      - LOGO_SVG_PATH=/app/assets/favicon.svg
+      - NEWS_CACHE_DIR=/data/news_cache
+      - NEWSDATA_API_KEY=${NEWSDATA_API_KEY}
     volumes:
       - hf_cache:/root/.cache/huggingface
+      - news_cache:/data/news_cache
       - ../Frontend/public/favicon.png:/app/assets/favicon.png:ro
+      - ../Frontend/public/favicon.svg:/app/assets/favicon.svg:ro
     depends_on:
       neo4j:
         condition: service_healthy
@@ -59,3 +64,4 @@ volumes:
   chroma_data:
   neo4j_data:
   hf_cache:
+  news_cache:

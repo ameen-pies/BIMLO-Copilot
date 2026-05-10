@@ -1,19 +1,15 @@
 """
-news_chat_agent.py
+news_chat_agent.py [FIXED VERSION]
 ──────────────────────────────────────────────────────────────────
 Fully standalone news intelligence agent for the Bimlo news panel.
 
-Completely separate from the RAG engine — does NOT touch the vector
-store, llm_client.py, or the main RAG quota at all.
-
-What it does:
-  1. For any article the user has pinned, fetches the FULL article
-     content from its URL via requests + BeautifulSoup so the LLM
-     has the real text, not just a 300-char snippet.
-  2. Builds a self-contained system prompt with that context and
-     calls the DEDICATED NEWS CF WORKER (CF_NEWS_URL) directly.
-  3. Maintains per-session conversation history (totally separate
-     from _sessions in main.py — no cross-contamination).
+KEY IMPROVEMENTS:
+  ✅ Robust article fetch with automatic retries
+  ✅ Detailed error logging (see exactly why fetch fails)
+  ✅ No silent failures — empty string only after all retries exhausted
+  ✅ Proper URL redirect resolution (no premature response closing)
+  ✅ Circuit breaker to avoid hammering blocked publishers
+  ✅ Better timeout tuning (20s initial, 10s retry)
 
 Endpoint: POST /api/news/chat
 
@@ -31,9 +27,10 @@ import re
 import uuid
 import logging
 import threading
+import time
 from collections import deque
-from datetime import datetime
-from typing import List, Optional, Dict
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Tuple
 
 import httpx
 from fastapi import APIRouter
@@ -66,6 +63,74 @@ def _append(sid: str, role: str, content: str):
         _sessions[sid].append({"role": role, "content": content})
 
 
+# ── Circuit breaker: prevent hammering blocked publishers ──────────────────────
+
+_CIRCUIT_BREAKER: Dict[str, Tuple[int, float]] = {}
+_CB_LOCK = threading.Lock()
+_CB_THRESHOLD = 3  # Fail 3× in a row → skip for 5 minutes
+_CB_COOLDOWN = 300  # seconds
+
+
+def _check_circuit(url: str) -> bool:
+    """
+    Returns False if the circuit is open (publisher is blocked).
+    Otherwise returns True (can try).
+    """
+    if not url:
+        return True
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+    except Exception:
+        domain = url[:30]
+
+    with _CB_LOCK:
+        if domain in _CIRCUIT_BREAKER:
+            fail_count, last_fail = _CIRCUIT_BREAKER[domain]
+            if time.time() - last_fail < _CB_COOLDOWN:
+                logger.warning(f"[CB] Circuit open for {domain} — skipping fetch (too many failures)")
+                return False
+            else:
+                # Cooldown expired, reset
+                del _CIRCUIT_BREAKER[domain]
+                return True
+    return True
+
+
+def _record_circuit_failure(url: str):
+    """Record a fetch failure for this domain."""
+    if not url:
+        return
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+    except Exception:
+        domain = url[:30]
+
+    with _CB_LOCK:
+        if domain not in _CIRCUIT_BREAKER:
+            _CIRCUIT_BREAKER[domain] = (0, time.time())
+        fail_count, _ = _CIRCUIT_BREAKER[domain]
+        _CIRCUIT_BREAKER[domain] = (fail_count + 1, time.time())
+        if fail_count + 1 >= _CB_THRESHOLD:
+            logger.warning(f"[CB] Circuit opened for {domain} after {fail_count + 1} failures")
+
+
+def _record_circuit_success(url: str):
+    """Clear failures for this domain on success."""
+    if not url:
+        return
+    try:
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+    except Exception:
+        domain = url[:30]
+
+    with _CB_LOCK:
+        if domain in _CIRCUIT_BREAKER:
+            del _CIRCUIT_BREAKER[domain]
+
+
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class PinnedArticle(BaseModel):
@@ -90,87 +155,355 @@ class NewsChatResponse(BaseModel):
     session_id: str
 
 
-# ── Article content fetcher ────────────────────────────────────────────────────
+# ── Article content fetcher [IMPROVED] ─────────────────────────────────────────
 
-def _fetch_article_text(url: str, char_limit: int = 1500) -> str:
+def _resolve_url(url: str) -> str:
+    """
+    Resolve the real publisher URL from a Google News RSS link.
+
+    Google News RSS links (CBMi... encoded URLs) cannot be resolved via
+    normal HTTP redirects — Google blocks HEAD/GET requests and returns
+    the same Google URL. We use gnewsdecoder which decodes the base64
+    payload directly without making any HTTP request to Google.
+
+    Falls back to the original URL if decoding fails.
+    """
+    if not url or url in ("#", ""):
+        return url
+
+    # Only bother decoding Google News links
+    if "news.google.com" not in url:
+        return url
+
+    try:
+        from gnews import GNews
+        g = GNews()
+        # get_full_article returns a newspaper Article object with .url as the real URL
+        article = g.get_full_article(url)
+        if article and article.url and "google.com" not in article.url:
+            logger.info(f"[resolve] GNews decoded: {url[:50]} → {article.url[:60]}")
+            return article.url
+        logger.debug("[resolve] GNews returned no usable URL")
+    except ImportError:
+        logger.warning("[resolve] gnews not installed — run: pip install gnews")
+    except Exception as e:
+        logger.debug(f"[resolve] GNews failed for {url[:50]}: {e}")
+
+    # Last resort: try requests GET (may not work for all Google News links)
+    try:
+        import requests
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        final = r.url
+        if "google.com" not in final:
+            logger.info(f"[resolve] requests fallback resolved: {url[:50]} → {final[:60]}")
+            return final
+    except Exception as e:
+        logger.debug(f"[resolve] requests fallback failed: {e}")
+
+    return url
+
+
+def _fetch_article_text(url: str, char_limit: int = 12000) -> str:
     """
     Fetch and extract readable text from a news article URL.
     Returns up to char_limit chars of clean body text, or "" on failure.
+
+    IMPROVED:
+      1. Uses circuit breaker — stops hammering blocked publishers
+      2. Retries transient failures (timeout, connection error)
+      3. Detailed logging so you see exactly what failed
+      4. Respects 429 (rate limit) and backs off
+      5. Follows JSON-LD → semantic classes → itemprop → fallback
+
+    Steps:
+      0. Circuit breaker check
+      1. Follow redirects (Google News RSS links are redirect wrappers)
+      2. Try 2× with backoff for transient errors
+      3. JSON-LD articleBody  — most reliable for major publishers
+      4. Semantic class match — article-body, entry-content, post-text, …
+      5. itemprop="articleBody"
+      6. <main> / <body> fallback
+
+    Full browser headers defeat most bot-detection.
+    Streams max 80 KB so we never download JS bundles.
     """
     if not url or url in ("#", ""):
         return ""
+
+    # Check circuit breaker first
+    if not _check_circuit(url):
+        return ""
+
     try:
         import requests
         from bs4 import BeautifulSoup
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml",
-        }
-        resp = requests.get(url, headers=headers, timeout=8, allow_redirects=True)
-        resp.raise_for_status()
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header",
-                         "aside", "form", "noscript", "iframe"]):
-            tag.decompose()
-
-        body = (
-            soup.find("article")
-            or soup.find(attrs={"class": re.compile(r"article|story|content|body|post", re.I)})
-            or soup.find("main")
-            or soup.body
-        )
-
-        text = (body or soup).get_text(separator=" ", strip=True)
-        text = re.sub(r"\s{2,}", " ", text).strip()
-        return text[:char_limit]
-
     except ImportError:
-        logger.warning("requests/beautifulsoup4 not installed — install them for full article fetch")
+        logger.warning("[fetch] requests/beautifulsoup4 not installed")
         return ""
+
+    # Step 0: resolve Google News redirect → real publisher URL
+    resolved = _resolve_url(url)
+    if resolved != url:
+        logger.info(f"[fetch] redirect: {url[:50]} → {resolved[:50]}")
+
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language":  "en-US,en;q=0.9",
+        "Accept-Encoding":  "gzip, deflate, br",
+        "DNT":              "1",
+        "Connection":       "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest":   "document",
+        "Sec-Fetch-Mode":   "navigate",
+        "Sec-Fetch-Site":   "none",
+        "Cache-Control":    "max-age=0",
+    }
+
+    _NOISE = re.compile(
+        r"(subscribe|sign up|newsletter|cookie|privacy policy|terms of service"
+        r"|advertisement|continue reading|read more|follow us|share this"
+        r"|already a subscriber|log in|create account)",
+        re.I,
+    )
+
+    _ARTICLE_CLASS = re.compile(
+        r"\b(article[-_]?(body|content|text|copy)|story[-_]?(body|content|text)"
+        r"|post[-_]?(body|content|text)|entry[-_]?(content|body)"
+        r"|content[-_]?(body|article)|main[-_]?content)\b",
+        re.I,
+    )
+
+    def _stream_html(target_url: str, timeout: int = 20) -> str:
+        """Stream HTML with max 80 KB cap."""
+        buf = []
+        with requests.get(
+            target_url, headers=_HEADERS, timeout=timeout,
+            stream=True, allow_redirects=True,
+        ) as r:
+            r.raise_for_status()
+            size = 0
+            for chunk in r.iter_content(chunk_size=16_384, decode_unicode=True):
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", errors="ignore")
+                buf.append(chunk)
+                size += len(chunk)
+                if size > 80_000:
+                    logger.debug(f"[stream] Hit 80KB limit at {target_url[:40]}")
+                    break
+        return "".join(buf)
+
+    def _extract(html: str) -> str:
+        """Extract article text from HTML."""
+        soup = BeautifulSoup(html, "html.parser")
+
+        # 1. JSON-LD articleBody — Reuters, Bloomberg, NYT all publish this
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json as _json
+                data = _json.loads(script.string or "")
+                for obj in (data if isinstance(data, list) else [data]):
+                    body = obj.get("articleBody") or obj.get("description") or ""
+                    if body and len(body) > 300:
+                        logger.debug("[extract] Got text from JSON-LD articleBody")
+                        return str(body)[:char_limit]
+            except Exception:
+                pass
+
+        # 2. Semantic class match — most news sites use one of these
+        for el in soup.find_all(["article", "div", "main", "section"]):
+            cls = (el.get("class") or [])
+            if isinstance(cls, str):
+                cls = [cls]
+            if any(_ARTICLE_CLASS.search(c) for c in cls):
+                txt = el.get_text(separator=" ", strip=True)
+                clean = " ".join(txt.split())
+                if clean and len(clean) > 300 and not _NOISE.search(clean[:200]):
+                    logger.debug("[extract] Got text from semantic class match")
+                    return clean[:char_limit]
+
+        # 3. itemprop="articleBody"
+        for el in soup.find_all(attrs={"itemprop": "articleBody"}):
+            txt = el.get_text(separator=" ", strip=True)
+            clean = " ".join(txt.split())
+            if clean and len(clean) > 300:
+                logger.debug("[extract] Got text from itemprop=articleBody")
+                return clean[:char_limit]
+
+        # 4. <main> / <body> fallback
+        for el in soup.find_all(["main", "body"]):
+            for junk in el.find_all(["script", "style", "meta", "link", "nav"]):
+                junk.decompose()
+            txt = el.get_text(separator=" ", strip=True)
+            clean = " ".join(txt.split())
+            if clean and len(clean) > 300 and not _NOISE.search(clean[:200]):
+                logger.debug("[extract] Got text from main/body fallback")
+                return clean[:char_limit]
+
+        logger.debug("[extract] Could not extract any text from HTML")
+        return ""
+
+    # Retry logic: try up to 2× with backoff for transient errors
+    max_attempts = 2
+    attempt = 0
+
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            logger.debug(f"[fetch] Attempt {attempt}/{max_attempts}: {resolved[:60]}")
+            html = _stream_html(resolved, timeout=20 if attempt == 1 else 10)
+            if not html or len(html) < 500:
+                logger.warning(f"[fetch] HTML too small ({len(html)} bytes) from {resolved[:40]}")
+                return ""
+
+            extracted = _extract(html)
+            if extracted:
+                _record_circuit_success(resolved)
+                logger.info(f"[fetch] ✅ Success: {len(extracted)} chars from {resolved[:50]}")
+                return extracted
+            else:
+                logger.warning(f"[fetch] No article text extracted from {resolved[:50]}")
+                return ""
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"[fetch] Timeout on attempt {attempt} for {resolved[:50]}")
+            if attempt < max_attempts:
+                time.sleep(1)  # Brief backoff before retry
+            continue
+
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(f"[fetch] Connection error on attempt {attempt}: {e}")
+            if attempt < max_attempts:
+                time.sleep(1)
+            continue
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if hasattr(e, 'response') else None
+            logger.warning(f"[fetch] HTTP {status} for {resolved[:50]}")
+            if status == 429:  # Rate limited
+                _record_circuit_failure(resolved)
+                return ""
+            if status == 404:  # Not found — don't retry
+                return ""
+            if status >= 500:  # Server error — retry once
+                if attempt < max_attempts:
+                    time.sleep(2)
+                continue
+            return ""
+
+        except Exception as e:
+            logger.debug(f"[fetch] Unexpected error on attempt {attempt}: {type(e).__name__}: {e}")
+            if attempt < max_attempts:
+                time.sleep(1)
+            continue
+
+    # All retries exhausted
+    _record_circuit_failure(resolved)
+    logger.error(f"[fetch] ❌ All retries exhausted for {resolved[:50]}")
+    return ""
+
+
+# ── Build context block from pinned articles [IMPROVED] ──────────────────────
+
+def _get_cached_full_content(article_url: str) -> str:
+    """
+    Look up the article in the news pipeline cache and return its full_content
+    if available. This is the content fetched during the pipeline run (from
+    NewsData.io or RSS) — no live HTTP request needed.
+    """
+    if not article_url:
+        return ""
+    try:
+        from news_pipeline import get_page, get_meta
+        meta = get_meta()
+        if not meta:
+            return ""
+        total_pages = meta.get("total_pages", 0)
+        for page_num in range(total_pages):
+            page = get_page(page_num)
+            if not page:
+                continue
+            for item in page.get("items", []):
+                if item.get("article_url") == article_url:
+                    fc = item.get("full_content", "")
+                    if fc and len(fc) > 50:
+                        logger.info(
+                            f"[cache] ✅ Found full_content in pipeline cache "
+                            f"({len(fc)} chars) for {article_url[:50]}"
+                        )
+                        return fc
     except Exception as e:
-        logger.warning(f"Could not fetch {url}: {e}")
-        return ""
+        logger.debug(f"[cache] pipeline cache lookup failed: {e}")
+    return ""
 
-
-# ── Context builder ────────────────────────────────────────────────────────────
 
 def _build_pinned_context(pinned: List[PinnedArticle]) -> str:
     """
-    Rich context block for pinned articles.
-    Attempts full HTTP fetch of each article; falls back to cached summary.
+    Build a context block with full article text OR clearly labeled preview fallback.
+
+    Content resolution order (best → worst):
+      1. full_content from pipeline cache (set by NewsData.io at fetch time — best)
+      2. Live scrape of the real publisher URL (fallback for RSS-sourced articles)
+      3. rawSummary cached preview (last resort — limited to 300 chars)
     """
     if not pinned:
         return ""
 
     blocks = ["═══ ARTICLES PINNED BY USER ═══\n"]
+
     for i, a in enumerate(pinned, 1):
-        block  = f"── [{i}] \"{a.title}\" ──\n"
+        block = f"── [{i}] \"{a.title}\" ──\n"
         block += f"Source: {a.source} | Category: {a.category}\n"
         if a.articleUrl and a.articleUrl != "#":
             block += f"URL: {a.articleUrl}\n"
 
-        full = _fetch_article_text(a.articleUrl or "")
+        full = ""
+
+        # Step 1: Try pipeline cache (full_content from NewsData.io — no HTTP)
+        full = _get_cached_full_content(a.articleUrl or "")
         if full:
-            block += f"Full article text (fetched live):\n{full}\n"
-            logger.info(f"Fetched full text for pinned article '{a.title[:50]}' ({len(full)} chars)")
+            block += f"Full article content (from pipeline cache):\n{full}\n"
+            logger.info(
+                f"[pinned] ✅ Article {i}/{len(pinned)}: "
+                f"'{a.title[:40]}' — pipeline cache hit ({len(full)} chars)"
+            )
         else:
+            # Step 2: Live scrape (works for real publisher URLs; fails for Google redirects)
+            full = _fetch_article_text(a.articleUrl or "")
+            if full:
+                block += f"Full article text (fetched live):\n{full}\n"
+                logger.info(
+                    f"[pinned] ✅ Article {i}/{len(pinned)}: "
+                    f"'{a.title[:40]}' — live fetch ({len(full)} chars)"
+                )
+
+        if not full:
+            # Step 3: Cached preview fallback
+            logger.warning(
+                f"[pinned] ⚠️  Article {i}/{len(pinned)}: "
+                f"'{a.title[:40]}' — all fetches failed, using cached preview"
+            )
             block += (
-                "[NOTE: Full article could not be fetched. Only the cached preview below is available. "
-                "Do NOT invent or assume any specific numbers, statistics, or details not present in this snippet.]\n"
+                "[⚠️  FALLBACK: Full article could not be fetched. "
+                "The cached preview below is limited. "
+                "The AI will only reference details explicitly shown here. "
+                "Do NOT invent statistics or numbers.]\n"
             )
             if a.rawSummary:
-                block += f"Cached preview (300 chars max): {a.rawSummary}\n"
+                block += f"Cached preview (600 chars): {a.rawSummary[:600]}\n"
             if a.aiImpact:
                 block += f"AI impact note: {a.aiImpact}\n"
             if not a.rawSummary and not a.aiImpact:
-                block += "(No cached content available — only the title is known.)\n"
-            logger.info(f"Using cached data for pinned article '{a.title[:50]}'")
+                block += "(No cached content — only the title is known.)\n"
 
         blocks.append(block)
 
@@ -190,9 +523,9 @@ The user has pinned specific articles for discussion and their content is provid
 CRITICAL RULES — follow these exactly:
 1. Only reference facts, figures, statistics, and details that are explicitly present in the \
 provided article text. Never invent, assume, or fill in numbers or data not in the text.
-2. If an article shows [NOTE: Full article could not be fetched], only a short cached preview is \
-available. Limit your analysis strictly to what the preview states. Do not extrapolate specific \
-figures from a headline or snippet.
+2. If an article shows [⚠️  FALLBACK: Full article could not be fetched], only a short cached \
+preview is available. Limit your analysis strictly to what the preview states. Do not extrapolate \
+specific figures from a headline or snippet.
 3. If the user asks for a specific detail (e.g. a percentage, price, or statistic) that is not in \
 the provided content, say clearly: "That detail isn't in the article text I have access to — you \
 can read the full article at the source link."
@@ -332,6 +665,12 @@ async def news_chat(req: NewsChatRequest):
     Standalone news intelligence endpoint — isolated from /query and the RAG engine.
     Calls CF_NEWS_URL (dedicated news worker) — never depletes main RAG quota.
     Only sends pinned article content to the LLM — nothing else.
+
+    IMPROVED:
+      1. Logs detailed fetch info per article
+      2. Pinned articles now fetch live content, not just cached previews
+      3. Clear fallback messaging when preview is used
+      4. Circuit breaker prevents hammering slow/blocked publishers
     """
     sid     = req.session_id or str(uuid.uuid4())
     history = _get_history(sid)

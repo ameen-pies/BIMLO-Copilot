@@ -57,8 +57,11 @@ PAGE_SIZE     = int(os.getenv("NEWS_PAGE_SIZE",  "20"))   # 20 per page → more
 CYCLE_DAYS    = int(os.getenv("NEWS_CYCLE_DAYS", "4"))    # run every 4 days — matches article expiry window
 MAX_SEEN_URLS = 2000   # prune seen_urls.json after this many entries
 
-_BUILD_DIR = CACHE_DIR + "_building"
-_PREV_DIR  = CACHE_DIR + "_prev"
+# _BUILD_DIR and _PREV_DIR are now SUBDIRECTORIES inside CACHE_DIR, not siblings.
+# Docker named volumes mount the directory itself as a mount point — you cannot
+# rename/move/rmtree the mount point root. All rotation happens inside the volume.
+_BUILD_DIR = os.path.join(CACHE_DIR, "_building")
+_PREV_DIR  = os.path.join(CACHE_DIR, "_prev")
 
 # ── Dedicated news worker ──────────────────────────────────────────────────────
 
@@ -525,16 +528,30 @@ def _paginate_node(state: PipelineState) -> PipelineState:
 
 def _persist_node(state: PipelineState) -> PipelineState:
     """
-    Atomic cache rotation:
-      1. Write everything to CACHE_DIR_building/
-      2. Move CACHE_DIR          → CACHE_DIR_prev  (fallback during next build)
-      3. Move CACHE_DIR_building → CACHE_DIR        (goes live instantly)
+    Atomic cache rotation — Docker-volume safe.
+
+    CACHE_DIR is a Docker named-volume mount point. The kernel marks mount-point
+    roots as busy, so os.rename / shutil.move on the root directory itself raises
+    [Errno 16] Device or resource busy. The old sibling-directory rotation
+    (_building → swap → _prev) therefore cannot work.
+
+    New strategy — everything stays INSIDE the volume:
+      1. Write new pages + meta into  CACHE_DIR/_building/
+      2. Copy current live files into CACHE_DIR/_prev/       (fallback)
+      3. Copy _building files into    CACHE_DIR/              (atomic per-file)
+      4. Remove CACHE_DIR/_building/
+
+    Per-file copy is not transactional but is safe: readers always see either
+    the old or the new complete file (written via .tmp + os.replace).
+    The window where meta.json is new but page_0.json is still old is ~ms.
     """
     pages  = state["pages"]
     run_id = state["run_id"]
 
-    os.makedirs(_BUILD_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR,   exist_ok=True)
+    os.makedirs(_BUILD_DIR,  exist_ok=True)
 
+    # ── Step 1: write new pages + meta into _building ─────────────────────────
     for i, page in enumerate(pages):
         _write_atomic(
             os.path.join(_BUILD_DIR, f"page_{i}.json"),
@@ -565,118 +582,60 @@ def _persist_node(state: PipelineState) -> PipelineState:
         },
     )
 
-    # shutil.move instead of os.rename — avoids [Errno 18] across Docker FS boundaries
-    if os.path.exists(_PREV_DIR):
-        shutil.rmtree(_PREV_DIR)
-    if os.path.exists(CACHE_DIR):
-        _seen     = os.path.join(CACHE_DIR, "seen_urls.json")
-        _seen_tmp = _seen + ".bak"
-        if os.path.exists(_seen):
-            shutil.copy2(_seen, _seen_tmp)
-        shutil.move(CACHE_DIR, _PREV_DIR)
-        if os.path.exists(_seen_tmp):
-            shutil.copy2(_seen_tmp, os.path.join(_BUILD_DIR, "seen_urls.json"))
-            os.remove(_seen_tmp)
-    shutil.move(_BUILD_DIR, CACHE_DIR)
-
-    logger.info(f"✅ persist_node: cache live — {len(pages)} pages, run_id={run_id}")
-
-    # ── Background image resolution pass ───────────────────────────────────────
-    # After the cache goes live, resolve missing thumbnails in the background
-    # so the pipeline isn't blocked. Articles with images already set are skipped.
-    threading.Thread(
-        target=_resolve_missing_images_bg,
-        args=(pages,),
-        daemon=True,
-        name="img-resolver",
-    ).start()
-
-    return state
-
-
-# ── Background image resolution ────────────────────────────────────────────────
-
-def _patch_article_image_in_cache(article_id: str, image_url: str) -> None:
-    """
-    Patch a single article's image_url in-place inside the live cache pages.
-    Walks page_0.json … page_N.json and rewrites the file atomically when a
-    matching article id is found.
-    """
+    # ── Step 2: snapshot current live files into _prev (best-effort) ──────────
     try:
-        meta = _read_json(os.path.join(CACHE_DIR, "meta.json"), None)
-        if not meta:
-            return
-        total_pages = meta.get("total_pages", 0)
-        for page_num in range(total_pages):
-            path = os.path.join(CACHE_DIR, f"page_{page_num}.json")
-            page_data = _read_json(path, None)
-            if not page_data:
-                continue
-            items = page_data.get("items", [])
-            changed = False
-            for item in items:
-                if item.get("id") == article_id and not item.get("image_url"):
-                    item["image_url"] = image_url
-                    changed = True
-                    break
-            if changed:
-                _write_atomic(path, page_data)
-                logger.debug(f"[img-resolver] patched image for {article_id}")
-                return
+        os.makedirs(_PREV_DIR, exist_ok=True)
+        for fname in os.listdir(CACHE_DIR):
+            # Don't recurse into subdirs (_building, _prev, _prev_old)
+            src = os.path.join(CACHE_DIR, fname)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(_PREV_DIR, fname))
     except Exception as e:
-        logger.debug(f"[img-resolver] patch failed for {article_id}: {e}")
+        logger.warning(f"   persist_node: _prev snapshot failed (non-fatal): {e}")
 
+    # ── Step 3: promote _building files into live CACHE_DIR ───────────────────
+    # seen_urls.json lives in CACHE_DIR and must survive the rotation.
+    _seen_src = os.path.join(CACHE_DIR, "seen_urls.json")
+    _seen_bak = _seen_src + ".bak"
+    if os.path.exists(_seen_src):
+        try:
+            shutil.copy2(_seen_src, _seen_bak)
+        except Exception:
+            pass
 
-def _resolve_missing_images_bg(pages: list) -> None:
-    """
-    Background pass that resolves image_url for any article that came through
-    without one. Runs after persist_node so it never blocks the pipeline.
-
-    Uses news_agent._fetch_og_image and _decode_gnews_url — already imported
-    at the time this runs. Concurrency capped at 4 to stay polite.
-    """
-    try:
-        from news_agent import _fetch_og_image, _decode_gnews_url
-    except ImportError:
-        logger.warning("[img-resolver] news_agent not importable — skipping background pass")
-        return
-
-    # Flatten all pages into a single list of articles missing images
-    no_img = []
-    for page in pages:
-        for art in page:
-            if not art.get("image_url"):
-                no_img.append(art)
-
-    if not no_img:
-        logger.info("[img-resolver] all articles already have images — nothing to do")
-        return
-
-    logger.info(f"[img-resolver] resolving images for {len(no_img)} articles in background…")
-
-    def _resolve_one(art: dict):
-        url        = art.get("article_url", "")
-        source_url = art.get("source_url", "")
-        if not url:
-            return
-        real_url = _decode_gnews_url(url) if "news.google.com" in url else url
-        img = _fetch_og_image(real_url, source_domain=source_url, timeout=8)
-        if img:
-            art["image_url"] = img
-            _patch_article_image_in_cache(art["id"], img)
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(_resolve_one, art) for art in no_img]
-        resolved = 0
-        for f in as_completed(futures):
+    promoted = 0
+    for fname in os.listdir(_BUILD_DIR):
+        src = os.path.join(_BUILD_DIR, fname)
+        if os.path.isfile(src):
+            dst = os.path.join(CACHE_DIR, fname)
             try:
-                f.result()
-                resolved += 1
-            except Exception as e:
-                logger.debug(f"[img-resolver] worker error: {e}")
+                # os.replace is atomic on POSIX — readers never see a partial file
+                os.replace(src, dst)
+                promoted += 1
+            except OSError:
+                # Cross-device replace can fail on some FS; fall back to copy+replace
+                shutil.copy2(src, dst + ".tmp")
+                os.replace(dst + ".tmp", dst)
+                promoted += 1
 
-    patched = sum(1 for a in no_img if a.get("image_url"))
-    logger.info(f"[img-resolver] done — {patched}/{len(no_img)} images resolved in background")
+    # Restore seen_urls.json if it was accidentally overwritten
+    if os.path.exists(_seen_bak):
+        if not os.path.exists(_seen_src):
+            os.replace(_seen_bak, _seen_src)
+        else:
+            os.remove(_seen_bak)
+
+    # ── Step 4: clean up _building ────────────────────────────────────────────
+    try:
+        shutil.rmtree(_BUILD_DIR)
+    except Exception as e:
+        logger.warning(f"   persist_node: _building cleanup failed (non-fatal): {e}")
+
+    logger.info(
+        f"✅ persist_node: {promoted} files promoted to live cache — "
+        f"{len(pages)} pages, run_id={run_id}"
+    )
+    return state
 
 
 # ── LangGraph pipeline ─────────────────────────────────────────────────────────

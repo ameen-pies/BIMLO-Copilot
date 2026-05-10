@@ -4,11 +4,14 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from io import BytesIO
+import logging
 import os, mimetypes, uuid, json, asyncio, threading, queue, hashlib
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import deque
 from neo4j_auth import router as auth_router, init_neo4j
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 groq_ok = bool(os.getenv("GROQ_API_KEY"))
@@ -442,11 +445,11 @@ class QueryRequest(BaseModel):
     force_route:            Optional[str]  = None
     voice_mode:             Optional[bool] = False
     conversation_id:        Optional[str]  = None
-    pending_doc_ids:        Optional[List[str]] = []
+    pending_doc_ids:        Optional[List[str]] = None
     preferred_provider:     Optional[str]  = None  # "cf_primary" | "cf_backup" | "groq" | "nvidia"
     # Filenames of files explicitly attached to THIS message (resolved by frontend from pending_doc_ids).
     # Highest-priority scope signal — bypasses intent classifier guessing.
-    attached_doc_filenames: Optional[List[str]] = []
+    attached_doc_filenames: Optional[List[str]] = None
 
 
 class QueryResponse(BaseModel):
@@ -1562,7 +1565,8 @@ async def delete_document(
             raise HTTPException(status_code=404, detail="Document not found")
 
         doc_type = (rows[0].get("doc_type") or "").lower()
-        if _cad_ifc_available and doc_type in {'.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp'}:
+        normalized_doc_type = (doc_type or "").lstrip('.').lower()
+        if _cad_ifc_available and normalized_doc_type in {'ifc', 'ifczip', 'dxf', 'dwg', 'step', 'stp'}:
             try:
                 from cad_ifc_agent import CadSharedContext
                 CadSharedContext.delete_file(doc_id)
@@ -1627,16 +1631,12 @@ async def get_document_content(
             fname = pairs[0][0].get("filename", fallback_filename) if pairs else fallback_filename
             return fname, "\n\n".join(t for _, t in pairs)
 
-        # ── Search with per-user/session isolation ─────────────────────────────
-        results = vector_store.search(
-            query="",  # Empty query to get all chunks
-            top_k=10000,  # Get all
-            user_id=user_id,
-            session_id=session_id,
-        )
-        
-        # Filter to just this document
-        doc_results = [r for r in results if r["metadata"].get("document_id") == doc_id]
+        collection = vector_store._get_collection(user_id=user_id, session_id=session_id)
+        results = collection.get(where={"document_id": doc_id})
+        doc_results = []
+        if results and results.get("ids"):
+            for meta, text in zip(results.get("metadatas", []), results.get("documents", [])):
+                doc_results.append({"metadata": meta, "text": text})
         if doc_results:
             print(f"✅ [content] {len(doc_results)} chunks via document_id for user_{user_id or 'anon'}_session_{session_id}")
             fname = doc_results[0]["metadata"].get("filename", doc_id)
@@ -1664,7 +1664,8 @@ async def get_document_content(
                 print(f"⚠️  [content] Neo4j lookup failed: {ne}")
 
         if fallback_filename:
-            results2 = vector_store.collection.get(where={"filename": fallback_filename})
+            collection = vector_store._get_collection(user_id=user_id, session_id=session_id)
+            results2 = collection.get(where={"filename": fallback_filename})
             print(f"🔍 [content] by filename={fallback_filename!r} → {len(results2.get('ids') or [])} chunks")
             if results2 and results2.get("ids"):
                 meta0 = results2["metadatas"][0] if results2.get("metadatas") else {}
@@ -1723,7 +1724,8 @@ async def download_document(doc_id: str, session_id: Optional[str] = None):
                     },
                 )
 
-        results = vector_store.collection.get(where={"document_id": doc_id})
+        collection = vector_store._get_collection(user_id=None, session_id=session_id)
+        results = collection.get(where={"document_id": doc_id})
         if not results or not results.get("ids"):
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -1848,10 +1850,10 @@ async def news_page(page_num: int):
     total_pages = meta.get("total_pages", 0) if meta else 0
     data["has_more"] = (page_num + 1) < total_pages
 
-    # Pages are immutable within a cycle — cache aggressively
+    # Pages are immutable within a cycle, but refresh should still return fresh data.
     return JSONResponse(
         content=data,
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=1800"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -1904,6 +1906,131 @@ async def news_soft_refresh():
     if meta is None:
         raise HTTPException(503, "No news cache available yet.")
     return meta
+
+@app.get("/api/news/thumb")
+async def news_thumb(url: str):
+    """
+    Article thumbnail resolver — returns {"image_url": <url>|null}.
+ 
+    Resolution order (fastest to slowest):
+      1. Pipeline cache  — image_url stored by NewsData.io at fetch time (instant)
+      2. og:image scrape — streams first 48KB of the real publisher page (fallback)
+ 
+    Google News redirect URLs are no longer stored — NewsData.io gives real
+    publisher URLs, so scraping works first try on cache miss.
+    Returns {"image_url": null} → frontend shows branded placeholder.
+    """
+    import re as _re
+ 
+    if not url or url == "#":
+        return {"image_url": None}
+ 
+    # ── Step 1: Check pipeline cache ──────────────────────────────────────────
+    if _news_pipeline_available:
+        try:
+            meta = get_meta()
+            if meta:
+                for page_num in range(meta.get("total_pages", 0)):
+                    page = get_page(page_num)
+                    if not page:
+                        continue
+                    for item in page.get("items", []):
+                        if item.get("article_url") == url:
+                            cached_img = item.get("image_url")
+                            if cached_img:
+                                logger.debug(f"thumb: cache hit for {url[:50]}")
+                                return {"image_url": cached_img}
+                            break
+                    else:
+                        continue
+                    break
+        except Exception as _ce:
+            logger.debug(f"thumb: cache lookup error: {_ce}")
+ 
+    # ── Step 2: Skip Google redirect URLs — cannot scrape them ────────────────
+    if "news.google.com" in url:
+        return {"image_url": None}
+ 
+    # ── Step 3: og:image scrape from real publisher URL ───────────────────────
+    _HDRS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+ 
+    def _is_ok(candidate: str) -> bool:
+        if not candidate or candidate.startswith("data:"):
+            return False
+        low = candidate.lower()
+        junk = ("sprite", "avatar", "pixel", "tracker", "beacon",
+                "1x1", "spacer", "ad.", "doubleclick", "analytics", "stat.")
+        if any(p in low for p in junk):
+            return False
+        if _re.search(r"[?&][wh]=\d{1,2}", low):
+            return False
+        return True
+ 
+    image_url = None
+    try:
+        import requests as _req
+        html = ""
+        with _req.get(url, headers=_HDRS, timeout=8, stream=True, allow_redirects=True) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_content(chunk_size=16_384, decode_unicode=True):
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", errors="ignore")
+                html += chunk
+                if ("</head>" in html.lower() and len(html) > 4_000) or len(html) > 48_000:
+                    break
+ 
+        meta_pats = [
+            r"""<meta[^>]+property=["']og:image(?::url)?["'][^>]+content=["']([^"']+)["']""",
+            r"""<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::url)?["']""",
+            r"""<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']""",
+            r"""<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']""",
+        ]
+        for pat in meta_pats:
+            m = _re.search(pat, html, _re.IGNORECASE)
+            if m and _is_ok(m.group(1)):
+                image_url = m.group(1).strip()
+                break
+ 
+        if not image_url:
+            body_m = _re.search(r"<(?:article|main)[^>]*>(.*)", html, _re.IGNORECASE | _re.DOTALL)
+            body_html = body_m.group(1) if body_m else html
+            img_pat = _re.compile(
+                r"""<img[^>]+(?:src|data-src|data-lazy-src)=["']([^"']+)["']""",
+                _re.IGNORECASE,
+            )
+            for img_m in img_pat.finditer(body_html):
+                candidate = img_m.group(1).strip()
+                if candidate.startswith("//"):
+                    candidate = "https:" + candidate
+                elif candidate.startswith("/"):
+                    origin_m = _re.match(r"(https?://[^/]+)", url)
+                    if origin_m:
+                        candidate = origin_m.group(1) + candidate
+                if not _is_ok(candidate):
+                    continue
+                low = candidate.lower()
+                if (
+                    _re.search(r"\.(jpg|jpeg|png|webp|gif|avif)(\?|$|#)", low)
+                    or _re.search(r"(images?|media|photos?|cdn|assets|thumbs?)[./]", low)
+                ):
+                    image_url = candidate
+                    break
+ 
+    except Exception as _e:
+        logger.debug(f"thumb proxy failed for {url[:60]}: {_e}")
+ 
+    return {"image_url": image_url or None}
 
 
 @app.get("/health")
@@ -2019,7 +2146,7 @@ async def health_check():
             "active_sessions":  len(_sessions),
             "report_count":     report_count,
 
-            "services": f"{sum([cf_primary_ok, cf_backup_ok, groq_ok, groq_ok, elevenlabs_ok, _cad_ifc_available, _news_pipeline_available])} services active",
+            "services": f"{sum([cf_primary_ok, cf_backup_ok, groq_ok, nvidia_ok, elevenlabs_ok, _cad_ifc_available, _news_pipeline_available])} services active",
         }
     except Exception as e:
         return {"status": "degraded", "timestamp": datetime.now().isoformat(), "error": str(e)}
