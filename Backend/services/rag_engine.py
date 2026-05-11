@@ -721,11 +721,13 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None, attached_doc_filenames: Optional[List[str]] = None) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None, attached_doc_filenames: Optional[List[str]] = None, cancel_event=None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py.
 
         attached_doc_filenames: filenames of documents explicitly attached to THIS message
             by the user (resolved from pending_doc_ids by main.py before calling here).
+        cancel_event: optional threading.Event — when set, long-running nodes (report, graph
+            probe) will abort early so the worker thread exits promptly on Stop/disconnect.
             This is the highest-priority scope signal and bypasses the intent classifier.
         """
 
@@ -740,6 +742,7 @@ class RAGEngine:
         # Store callback on instance so node wrappers can access it without going through state
         # (state keys starting with _ are stripped by pydantic/langgraph)
         self._status_callback = status_callback or (lambda *_: None)
+        self._cancel_event = cancel_event  # threading.Event or None — set by main.py on Stop
         self._voice_mode = voice_mode
         # Store preferred provider so CloudflareClient.complete() can forward it to call_llm
         self._preferred_provider = preferred_provider
@@ -2846,7 +2849,12 @@ Remember: ALL text fields must be in {target_lang}."""
             if clarif_mode == "metric":
                 print(f"   🤔 graph_node: validating {len(raw_groups)} metric groups…")
                 valid_groups = []
+                _cancel_ev = getattr(self, "_cancel_event", None)
                 for grp in raw_groups:
+                    # Stop probing if the user already pressed Stop
+                    if _cancel_ev and _cancel_ev.is_set():
+                        print("   🛑 graph_node: group probe cancelled by stop event")
+                        break
                     hint = grp.get("hint") or grp.get("label", "")
                     if not hint:
                         continue
@@ -2863,7 +2871,11 @@ Remember: ALL text fields must be in {target_lang}."""
                         else:
                             print(f"      ❌ group invalid (no data): {grp.get('label','?')}")
                     except Exception as _ve:
-                        print(f"      ⚠️  group probe failed for '{hint}': {_ve}")
+                        # Probe failed due to LLM error (e.g. Groq 429) — keep the group
+                        # rather than silently dropping it; a transient error doesn't mean
+                        # the data doesn't exist.
+                        valid_groups.append(grp)
+                        print(f"      ⚠️  group probe failed for '{hint}' (kept): {_ve}")
 
                 if not valid_groups:
                     print(f"   ⚠️  graph_node: no valid chart groups found after validation")
@@ -3210,7 +3222,13 @@ Remember: ALL text fields must be in {target_lang}."""
                 ("💾",  "Finalising report…"),
             ]
             _ping_idx = 0
+            _cancel_ev = getattr(self, "_cancel_event", None)
             while not done_event.wait(timeout=5):
+                if _cancel_ev and _cancel_ev.is_set():
+                    print(f"   🛑 report_node: cancelled by stop event — aborting wait")
+                    error_box[0] = RuntimeError("Cancelled by user")
+                    done_event.set()
+                    break
                 if callable(cb):
                     _icon, _msg = _progress_msgs[min(_ping_idx, len(_progress_msgs) - 1)]
                     cb("report_node", _icon, _msg)

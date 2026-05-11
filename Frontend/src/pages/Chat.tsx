@@ -5720,6 +5720,18 @@ const Chat = () => {
     deletedConvIdsRef.current.add(convId);
     setConversations(prev => prev.filter(c => c.id !== convId));
     if (convId === activeConvId) {
+      // Tell the backend to cancel any in-flight generation to avoid wasting tokens
+      const sid = sessionIdRef.current || sessionId;
+      if (sid) {
+        const base =
+          (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+          "http://localhost:8000";
+        fetch(`${base}/query-stream/cancel`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sid }),
+        }).catch(() => {/* non-critical */});
+      }
       // Abort any in-flight transcription or streaming for this conversation
       transcribeAbortRef.current?.abort();
       transcribeAbortRef.current = null;
@@ -6324,6 +6336,18 @@ const Chat = () => {
   };
 
   const handleStop = () => {
+    // Tell the backend to abort the in-flight generation to avoid wasting tokens
+    const sid = sessionIdRef.current || sessionId;
+    if (sid) {
+      const base =
+        (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) ||
+        "http://localhost:8000";
+      fetch(`${base}/query-stream/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+      }).catch(() => {/* non-critical */});
+    }
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setIsLoading(false);

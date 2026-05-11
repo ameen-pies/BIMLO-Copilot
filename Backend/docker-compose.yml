@@ -34,13 +34,29 @@ services:
       - WIKI_USER_AGENT=BimloRAG/1.0
       - HF_HOME=/root/.cache/huggingface
       - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface/sentence_transformers
-      - TRANSFORMERS_CACHE=/root/.cache/huggingface/hub
+      # TRANSFORMERS_CACHE removed — deprecated since transformers v5.
+      # HF_HOME above already covers the same path and is the correct var.
       - VISION_MODEL=@cf/meta/llama-3.2-11b-vision-instruct
       - HF_HUB_DISABLE_PROGRESS_BARS=1
       - LOGO_PATH=/app/assets/favicon.png
       - LOGO_SVG_PATH=/app/assets/favicon.svg
       - NEWS_CACHE_DIR=/data/news_cache
       - NEWSDATA_API_KEY=${NEWSDATA_API_KEY}
+      # Cloudflare Workers AI — primary
+      - CF_API_KEY=${CF_API_KEY}
+      - CF_API_URL=${CF_API_URL}
+      # Cloudflare Workers AI — backup
+      - CF_BACKUP_URL=${CF_BACKUP_URL}
+      - CF_BACKUP_API_KEY=${CF_BACKUP_API_KEY}
+      # Cloudflare Workers AI — backup2 (third worker)
+      - CF_BACKUP2_URL=${CF_BACKUP2_URL}
+      - CF_BACKUP2_API_KEY=${CF_BACKUP2_API_KEY}
+      # News worker
+      - CF_NEWS_URL=${CF_NEWS_URL}
+      - CF_NEWS_API_KEY=${CF_NEWS_API_KEY}
+      # Other LLM providers
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
     volumes:
       - hf_cache:/root/.cache/huggingface
       - news_cache:/data/news_cache

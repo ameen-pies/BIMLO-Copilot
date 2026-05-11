@@ -276,10 +276,19 @@ def _node_validate_input(state: ClassifierState) -> ClassifierState:
             "classification_path": "heuristic",
         }
 
-    # ── Cache key: hash of (norm_query, sorted uploaded_docs, session_has_docs) ──
+    # ── Cache key: hash of (norm_query, sorted uploaded_docs, session_has_docs,
+    #    recent history turns).  History MUST be part of the key so that a
+    #    follow-up with the same text as a prior standalone message doesn't
+    #    get a stale "not a follow-up" result from the cache.
     _docs_key = ",".join(sorted(state.get("uploaded_docs") or []))
+    _history   = state.get("history") or []
+    # Use last 4 turns as the context fingerprint (role+first-80-chars)
+    _hist_key  = "|".join(
+        f"{h.get('role','')}:{str(h.get('content',''))[:80]}"
+        for h in _history[-4:]
+    )
     _cache_key = hashlib.md5(
-        f"{norm_q}|{_docs_key}|{state.get('session_has_docs', False)}".encode()
+        f"{norm_q}|{_docs_key}|{state.get('session_has_docs', False)}|{_hist_key}".encode()
     ).hexdigest()
 
     cached = _cache.get(_cache_key)
@@ -521,14 +530,24 @@ def _node_post_process(state: ClassifierState) -> ClassifierState:
         result.suggested_route = "direct"
         result.reasoning += " [override: converse_meta → direct]"
 
-    # 4. If session has docs and classifier said "direct" with non-trivial ambiguity,
-    #    and it's not a meta/greeting query, nudge to rag
+    # 4. If session has docs and classifier said "direct" with HIGH ambiguity,
+    #    and it's not a meta/greeting/follow-up, nudge to rag.
+    #
+    #    IMPORTANT CHANGES vs original:
+    #    - Threshold raised from 0.2 → 0.65 (0.2 fired on almost everything)
+    #    - is_followup=True is now fully exempt — when the LLM says it's a
+    #      follow-up, we trust it. Follow-ups should stay "direct", not get
+    #      silently re-routed to rag just because docs exist.
+    #    - confidence must also be low (<0.55) to trigger — if the LLM is
+    #      confident about "direct", we shouldn't override it.
     if (session_has_docs
             and result.suggested_route == "direct"
-            and result.ambiguity_score >= 0.2
+            and not result.is_followup                   # ← follow-ups are exempt
+            and result.confidence < 0.55                 # ← only override low-confidence calls
+            and result.ambiguity_score >= 0.65           # ← raised from 0.2 → 0.65
             and result.primary_intent not in ("converse_meta", "image_query", "converse")):
         result.suggested_route = "rag"
-        result.reasoning += " [nudge direct→rag: session has docs + ambiguous]"
+        result.reasoning += " [nudge direct→rag: session has docs + high ambiguity + low confidence]"
 
     # 5. Auto-fill doc_scope from pre-resolved hint when LLM left it empty
     if not result.doc_scope and doc_scope_hint:
@@ -761,18 +780,27 @@ def _run_heuristics(
     _session_has_cad = any(_is_cad(f) for f in _docs)
     if _session_has_cad:
         _cad_signals = [
-            "ifc", "element", "elements", "storey", "storeys", "floor", "floors",
-            "wall", "walls", "window", "windows", "door", "doors", "component",
-            "building", "structure", "material", "materials", "quantity", "quantities",
-            "ifc class", "ifc classes", "model", "bim", "what is in this ifc",
-            "what does this ifc", "analyse this ifc", "analyze this ifc",
+            # Unambiguous IFC/BIM terms only.
+            # Generic words (model, building, structure, material, component, wall,
+            # floor, element) have been removed — they appear in PDF specs/reports
+            # and caused RAG queries to be misrouted to the CAD agent.
+            "ifc", "bim",
+            "storey", "storeys",
+            "ifc class", "ifc classes",
+            "ifc element", "ifc elements",
+            "what is in this ifc", "what does this ifc",
+            "analyse this ifc", "analyze this ifc",
             "summarize this ifc", "summarise this ifc",
         ]
         _attached_cad = [f for f in _attach if _is_cad(f)]
         _query_mentions_cad       = any(s in q for s in _cad_signals)
-        _query_directly_refs_cad  = (
-            any(_is_cad(f) and os.path.splitext(f)[0].lower() in q for f in _docs)
-            or bool(_attached_cad)
+        # Only treat CAD attachment as routing signal when the user explicitly
+        # names the CAD file by (partial) filename in their query.
+        # Previously, _attached_cad being non-empty was enough — that caused
+        # every query sent alongside an IFC to be routed to cad.
+        _query_directly_refs_cad  = any(
+            _is_cad(f) and os.path.splitext(f)[0].lower() in q
+            for f in _docs
         )
         if _query_mentions_cad or _query_directly_refs_cad:
             _cad_scope = (_attached_cad[-1] if _attached_cad
@@ -940,9 +968,15 @@ def _resolve_doc_scope_heuristic(
     # the scope hint when a PDF + IFC are both in the session.
     if attached:
         _cad_signals = {
-            "ifc", "bim", "storey", "floor", "wall", "element", "material",
-            "component", "structure", "model", "building", "quantity", "classe",
+            # These are unambiguously IFC/BIM — keep them
+            "ifc", "bim", "storey", "storeys",
+            "ifc class", "ifc classes", "ifc element", "ifc elements",
             "طابق", "عنصر", "مبنى",
+            # Structural terms only count when paired with explicit BIM context,
+            # so we keep only the most unambiguous standalone ones here.
+            # Generic words like "model", "structure", "building", "material"
+            # are intentionally REMOVED — they appear in PDF specs too and were
+            # causing PDF queries to get misrouted to the CAD agent.
         }
         _last_attachment = attached[-1]
         if _is_cad(_last_attachment):

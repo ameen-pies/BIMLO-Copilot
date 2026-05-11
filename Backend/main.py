@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Header, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -168,6 +168,11 @@ _session_routes: Dict[str, str] = {}
 _session_route_log: Dict[str, list] = {}
 # session_id -> user_id (for linking auto-created conversations to user accounts)
 _session_user_context: Dict[str, str] = {}
+
+# ── Per-session cancellation events ──────────────────────────────────────────
+# Set by /query-stream/cancel or when the SSE client disconnects.
+# The run_query thread checks this before and after expensive operations.
+_cancel_events: Dict[str, threading.Event] = {}
 # session_id -> ordered list of filenames uploaded/referenced in this session (most recent last).
 # Used so follow-up questions without an explicit attachment can inherit the last active file.
 _session_file_stack: Dict[str, List[str]] = {}
@@ -852,8 +857,22 @@ async def query_documents(
         raise HTTPException(500, f"Error processing query: {e}")
 
 
+@app.post("/query-stream/cancel")
+async def cancel_stream(body: dict):
+    """
+    Signal the backend to abort an in-progress /query-stream for a session.
+    Called by the frontend on Stop or chat delete.
+    """
+    sid = body.get("session_id", "")
+    if sid and sid in _cancel_events:
+        _cancel_events[sid].set()
+        print(f"\U0001f6d1 Cancel requested for session {sid}")
+    return {"status": "ok"}
+
+
 @app.post("/query-stream")
 async def query_stream(
+    http_request: FastAPIRequest,
     request: QueryRequest,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -904,7 +923,15 @@ async def query_stream(
     q: queue.Queue = queue.Queue()
     DONE_SENTINEL = object()
 
+    # ── Cancellation event ────────────────────────────────────────────────────
+    # Set by /query-stream/cancel endpoint OR when the SSE client disconnects.
+    # The run_query thread checks it at key yield points to stop early.
+    cancel_event = threading.Event()
+    _cancel_events[session_id] = cancel_event
+
     def status_callback(node: str, icon: str, message: str):
+        if cancel_event.is_set():
+            return  # don't queue status events after cancellation
         print(f"[SSE status] node={node} icon={icon} message={message}")
         q.put({"type": "status", "node": node, "icon": icon, "message": message})
 
@@ -915,6 +942,12 @@ async def query_stream(
             if _pending:
                 print(f"📎 /query-stream: {len(_pending)} pending doc(s) — ensuring indexed")
                 commit_pending_docs(_pending, session_id, user_id)
+
+            # ── Early exit if already cancelled ──────────────────────────────
+            if cancel_event.is_set():
+                print(f"🛑 /query-stream: cancelled before LLM call (session={session_id})")
+                q.put(DONE_SENTINEL)
+                return
 
             # Build attached_doc_filenames: only pass files the user EXPLICITLY attached
             # to this message. Do NOT inherit the last uploaded file automatically —
@@ -944,7 +977,15 @@ async def query_stream(
                 voice_mode=request.voice_mode,
                 preferred_provider=request.preferred_provider,
                 attached_doc_filenames=_attached,
+                cancel_event=cancel_event,
             )
+
+            # ── Discard result if client already cancelled ────────────────────
+            if cancel_event.is_set():
+                print(f"🛑 /query-stream: result discarded (cancelled) session={session_id}")
+                q.put(DONE_SENTINEL)
+                return
+
             print(f"✅ /query-stream done route={result.get('route')!r} preferred_provider={request.preferred_provider!r}")
             # Persist session
             import re as _re
@@ -1046,9 +1087,12 @@ async def query_stream(
             # a proper signal instead of the stream just closing silently.
             # A silently-closing stream causes the bouncing dots to disappear
             # with no error message shown to the user.
-            q.put({"type": "error", "message": f"Server error: {e}"})
+            if not cancel_event.is_set():
+                q.put({"type": "error", "message": f"Server error: {e}"})
         finally:
             q.put(DONE_SENTINEL)
+            # Remove cancel event from registry so it doesn't linger
+            _cancel_events.pop(session_id, None)
 
     # Run blocking RAG in a thread so we don't block the event loop
     thread = threading.Thread(target=run_query, daemon=True)
@@ -1057,6 +1101,15 @@ async def query_stream(
     async def event_generator():
         loop = asyncio.get_event_loop()
         while True:
+            # ── Disconnect detection ──────────────────────────────────────────
+            # FastAPI's request.is_disconnected() lets us detect when the browser
+            # closed the connection (stop button / chat deleted) so we can signal
+            # the worker thread to abort before wasting more tokens.
+            if await http_request.is_disconnected():
+                cancel_event.set()
+                print(f"🛑 /query-stream: client disconnected (session={session_id})")
+                break
+
             # Poll queue without blocking the event loop.
             # Use a short timeout (5s) so we can emit SSE keepalive comments
             # that prevent Docker/nginx from closing idle connections.
@@ -1071,7 +1124,9 @@ async def query_stream(
                 continue
             if item is DONE_SENTINEL:
                 break
-            yield f"data: {json.dumps(item)}\n\n"
+            # Don't send events after cancellation (race: item was queued just before cancel)
+            if not cancel_event.is_set():
+                yield f"data: {json.dumps(item)}\n\n"
 
     return StreamingResponse(
         event_generator(),

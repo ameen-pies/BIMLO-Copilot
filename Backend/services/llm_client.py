@@ -4,6 +4,7 @@ llm_client.py — Shared LLM gateway for all Bimlo services
 User-selectable providers:
   "cf_primary"  — Cloudflare Workers AI primary worker
   "cf_backup"   — Cloudflare Workers AI backup worker
+  "cf_backup2"  — Cloudflare Workers AI third worker
   "groq"        — Groq API (llama-3.3-70b-versatile / llama-3.1-8b-instant)
   "nvidia"      — NVIDIA NIM API (minimaxai/minimax-m2.7)
 
@@ -13,15 +14,18 @@ the call falls through to the standard priority chain so responses are never los
 Standard priority chain (when no preference is set):
   1. Cloudflare Workers AI — Primary   (CF_API_KEY  / CF_API_URL)
   2. Cloudflare Workers AI — Backup    (CF_BACKUP_API_KEY / CF_BACKUP_URL)
-  3. Groq API                          (GROQ_API_KEY)
+  3. Cloudflare Workers AI — Backup2   (CF_BACKUP2_API_KEY / CF_BACKUP2_URL)
+  4. Groq API                          (GROQ_API_KEY)
 
 Env vars:
-  CF_API_KEY         — primary worker bearer token
-  CF_API_URL         — primary worker URL       (default: bimloapi.medhelaliamin125.workers.dev)
-  CF_BACKUP_URL      — backup worker URL        (default: bimlo.amepies3.workers.dev)
-  CF_BACKUP_API_KEY  — backup worker token      (falls back to CF_API_KEY if omitted)
-  GROQ_API_KEY       — Groq last-resort key
-  NVIDIA_API_KEY     — NVIDIA NIM API key (nvapi-...)
+  CF_API_KEY          — primary worker bearer token
+  CF_API_URL          — primary worker URL       (default: bimloapi.medhelaliamin125.workers.dev)
+  CF_BACKUP_URL       — backup worker URL        (default: bimlo.amepies3.workers.dev)
+  CF_BACKUP_API_KEY   — backup worker token      (falls back to CF_API_KEY if omitted)
+  CF_BACKUP2_URL      — third worker URL
+  CF_BACKUP2_API_KEY  — third worker token       (falls back to CF_API_KEY if omitted)
+  GROQ_API_KEY        — Groq last-resort key
+  NVIDIA_API_KEY      — NVIDIA NIM API key (nvapi-...)
 """
 
 from __future__ import annotations
@@ -87,8 +91,9 @@ class _CircuitBreaker:
                 return False
             return True
 
-_cb_primary = _CircuitBreaker("cf_primary")
-_cb_backup  = _CircuitBreaker("cf_backup")
+_cb_primary  = _CircuitBreaker("cf_primary")
+_cb_backup   = _CircuitBreaker("cf_backup")
+_cb_backup2  = _CircuitBreaker("cf_backup2")
 
 
 def _is_fatal_cf_error(response_text: str) -> bool:
@@ -349,10 +354,12 @@ def call_llm(
     }
 
     # Resolve CF keys once — used across all CF routing below
-    cf_primary_key = os.getenv("CF_API_KEY", "").strip()
-    cf_primary_url = os.getenv("CF_API_URL", _CF_DEFAULT_URL)
-    cf_backup_key  = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
-    cf_backup_url  = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
+    cf_primary_key  = os.getenv("CF_API_KEY", "").strip()
+    cf_primary_url  = os.getenv("CF_API_URL", _CF_DEFAULT_URL)
+    cf_backup_key   = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
+    cf_backup_url   = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
+    cf_backup2_key  = os.getenv("CF_BACKUP2_API_KEY", cf_primary_key).strip()
+    cf_backup2_url  = os.getenv("CF_BACKUP2_URL", "").strip()
 
     print(f"🧠 llm_client: call_llm preferred_provider={preferred_provider or 'auto'} max_tokens={max_tokens} task={task}")
     last_reason: str = "no providers tried"
@@ -379,6 +386,17 @@ def call_llm(
         else:
             last_reason = "no CF backup key available"
             print(f"⚠️  llm_client: preferred cf_backup requested but {last_reason}")
+
+    elif preferred_provider == "cf_backup2":
+        if cf_backup2_key and cf_backup2_url:
+            text, reason = _call_cf_worker(cf_backup2_url, cf_backup2_key, cf_payload, "backup2", _cb_backup2)
+            if text is not None:
+                return text
+            last_reason = reason or "cf_backup2 failed"
+            print(f"⚠️  llm_client: preferred cf_backup2 failed ({last_reason}) — falling through")
+        else:
+            last_reason = "CF_BACKUP2_URL or CF_BACKUP2_API_KEY not set"
+            print(f"⚠️  llm_client: preferred cf_backup2 requested but {last_reason}")
 
     elif preferred_provider == "groq":
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -408,7 +426,7 @@ def call_llm(
     # Each provider is skipped if it was already tried as preferred_provider above.
     # This prevents double-calling and keeps the log honest.
 
-    if preferred_provider and preferred_provider not in ("cf_primary", "cf_backup", "groq", "nvidia"):
+    if preferred_provider and preferred_provider not in ("cf_primary", "cf_backup", "cf_backup2", "groq", "nvidia"):
         print(f"⚠️  llm_client: unknown preferred_provider={preferred_provider!r} — using auto chain")
 
     # CF Primary
@@ -430,10 +448,22 @@ def call_llm(
                 print("✅ llm_client: CF backup worker answered")
                 return text
             last_reason = reason or "cf_backup failed"
-            print(f"⚠️  llm_client: CF backup also failed ({last_reason}) — falling back to Groq")
+            print(f"⚠️  llm_client: CF backup also failed ({last_reason}) — trying backup2 worker")
         else:
             last_reason = "no CF key available for backup worker"
             print(f"⚠️  llm_client: {last_reason}")
+
+    # CF Backup2
+    if preferred_provider != "cf_backup2":
+        if cf_backup2_key and cf_backup2_url:
+            text, reason = _call_cf_worker(cf_backup2_url, cf_backup2_key, cf_payload, "backup2", _cb_backup2)
+            if text is not None:
+                print("✅ llm_client: CF backup2 worker answered")
+                return text
+            last_reason = reason or "cf_backup2 failed"
+            print(f"⚠️  llm_client: CF backup2 also failed ({last_reason}) — falling back to Groq")
+        else:
+            print("⚠️  llm_client: CF_BACKUP2_URL/KEY not set — skipping backup2")
 
     # Groq — skip if already tried as preferred OR if nvidia was preferred (keep nvidia opt-in only)
     if preferred_provider not in ("groq", "nvidia"):
@@ -494,9 +524,26 @@ def check_llm_available() -> tuple[bool, str]:
             )
             if resp.status_code == 200:
                 return True, "Cloudflare Workers AI (backup)"
-            print(f"⚠️  llm_client: CF backup responded {resp.status_code} — checking Groq")
+            print(f"⚠️  llm_client: CF backup responded {resp.status_code} — checking backup2")
         except Exception as e:
-            print(f"⚠️  llm_client: CF backup unreachable ({e}) — checking Groq")
+            print(f"⚠️  llm_client: CF backup unreachable ({e}) — checking backup2")
+
+    cf_backup2_key = os.getenv("CF_BACKUP2_API_KEY", cf_primary_key).strip()
+    cf_backup2_url = os.getenv("CF_BACKUP2_URL", "").strip()
+
+    if cf_backup2_key and cf_backup2_url:
+        try:
+            resp = requests.post(
+                cf_backup2_url,
+                headers={"Authorization": f"Bearer {cf_backup2_key}", "Content-Type": "application/json"},
+                json={"prompt": "hi", "max_tokens": 5},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return True, "Cloudflare Workers AI (backup2)"
+            print(f"⚠️  llm_client: CF backup2 responded {resp.status_code} — checking Groq")
+        except Exception as e:
+            print(f"⚠️  llm_client: CF backup2 unreachable ({e}) — checking Groq")
 
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     if groq_key:

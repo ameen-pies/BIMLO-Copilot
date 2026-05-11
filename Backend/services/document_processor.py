@@ -49,10 +49,12 @@ class DocumentProcessor:
     def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size      = chunk_size
         self.chunk_overlap   = chunk_overlap
-        self._api_key        = os.getenv("CF_API_KEY", "")
-        self._api_url        = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
-        self._backup_api_key = os.getenv("CF_BACKUP_API_KEY", self._api_key)
-        self._backup_api_url = os.getenv("CF_BACKUP_URL", "https://bimlo.amepies3.workers.dev/")
+        self._api_key         = os.getenv("CF_API_KEY", "")
+        self._api_url         = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
+        self._backup_api_key  = os.getenv("CF_BACKUP_API_KEY", self._api_key)
+        self._backup_api_url  = os.getenv("CF_BACKUP_URL", "https://bimlo.amepies3.workers.dev/")
+        self._backup2_api_key = os.getenv("CF_BACKUP2_API_KEY", self._api_key)
+        self._backup2_api_url = os.getenv("CF_BACKUP2_URL", "")
         self._vision_model   = os.getenv("VISION_MODEL", self._DEFAULT_VISION_MODEL)
         self._vision_max_dim = int(os.getenv("VISION_MAX_DIM", "1024"))
         self._skip_vision    = os.getenv("SKIP_VISION", "0").strip() == "1"
@@ -500,12 +502,18 @@ class DocumentProcessor:
         }
 
         workers = [
-            (self._api_url,        self._api_key,        "primary"),
-            (self._backup_api_url, self._backup_api_key, "backup"),
+            (self._api_url,         self._api_key,         "primary"),
+            (self._backup_api_url,  self._backup_api_key,  "backup"),
+            (self._backup2_api_url, self._backup2_api_key, "backup2"),
         ]
-        # Deduplicate if both URLs happen to be the same
-        if self._api_url == self._backup_api_url:
-            workers = workers[:1]
+        # Deduplicate: remove entries with no URL, and skip duplicates of earlier URLs
+        _seen_urls = set()
+        _deduped = []
+        for _url, _key, _label in workers:
+            if _url and _url not in _seen_urls:
+                _seen_urls.add(_url)
+                _deduped.append((_url, _key, _label))
+        workers = _deduped
 
         for url, key, label in workers:
             if not key:
