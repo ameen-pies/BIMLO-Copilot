@@ -48,6 +48,7 @@ import React, {
   useEffect,
   useCallback,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -266,6 +267,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
   sessionId,
   onAnswer,
 }) => {
+  const { t } = useTranslation();
   // ── State ──────────────────────────────────────────────────────────────────
   const [files, setFiles]                   = useState<CadFile[]>([]);
   const [activeFile, setActiveFile]         = useState<CadFile | null>(null);
@@ -679,7 +681,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
                         value={input}
                         onChange={e => setInput(e.target.value)}
                         onKeyDown={handleKey}
-                        placeholder="Ask about this file…"
+                        placeholder={t("chat.ask_about_file")}
                         rows={1}
                         className="flex-1 resize-none bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground/40 outline-none leading-relaxed overflow-hidden"
                         style={{ minHeight: "24px", maxHeight: "120px" }}

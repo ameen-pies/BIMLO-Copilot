@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Loader2, Eye, EyeOff, LogIn, UserPlus } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 declare global { interface Window { google?: any; } }
 
@@ -27,10 +28,12 @@ async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; e
     const res = await fetch(`${BASE}${path}`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body:    JSON.stringify(body),
     });
     const json = await res.json();
     if (!res.ok) return { error: json.detail || "Something went wrong" };
+    // Note: error strings are not translated here — they come from the backend
     return { data: json as AuthUser };
   } catch {
     return { error: "Network error — is the server running?" };
@@ -91,6 +94,7 @@ const GoogleIcon = () => (
 );
 
 export default function AuthModal({ open, onClose, onSuccess }: Props) {
+  const { t } = useTranslation();
   const [tab,      setTab]      = useState<"login" | "signup">("login");
   const [email,    setEmail]    = useState("");
   const [username, setUsername] = useState("");
@@ -106,21 +110,20 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
     }
   }, [open, tab]);
 
-  useEffect(() => {
-    document.body.style.overflow = open ? "hidden" : "";
-    return () => { document.body.style.overflow = ""; };
-  }, [open]);
+  // Intentionally no body/html overflow toggling —
+  // the fixed backdrop already blocks interaction,
+  // and toggling overflow causes scrollbar jitter.
 
 
   const handleGoogleClick = () => {
-    if (!GOOGLE_CLIENT_ID) { setError("Google Sign-In not configured."); return; }
+    if (!GOOGLE_CLIENT_ID) { setError(t("auth.google_not_configured")); return; }
 
     const loadAndOpen = () => {
       const client = window.google.accounts.oauth2.initTokenClient({
         client_id: GOOGLE_CLIENT_ID,
         scope: "openid email profile",
         callback: async (tokenResponse: any) => {
-          if (tokenResponse.error) { setError("Google sign-in failed."); return; }
+          if (tokenResponse.error) { setError(t("auth.google_signin_failed")); return; }
           // Exchange access token for user info, then send to backend as credential
           setLoading(true);
           setError(null);
@@ -148,7 +151,7 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
               onClose();
               setTimeout(() => onSuccess(userWithAvatar), 50);
             }
-          } catch { setError("Google sign-in failed. Try again."); }
+          } catch { setError(t("auth.google_signin_failed_try_again")); }
           finally { setLoading(false); }
         },
       });
@@ -168,8 +171,8 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
 
   const handleSubmit = async () => {
     setError(null);
-    if (!email.trim() || !password.trim()) { setError("Please fill in all fields."); return; }
-    if (tab === "signup" && !username.trim()) { setError("Please choose a username."); return; }
+    if (!email.trim() || !password.trim()) { setError(t("validation.fill_all_fields")); return; }
+    if (tab === "signup" && !username.trim()) { setError(t("validation.choose_username")); return; }
     setLoading(true);
     const path = tab === "login" ? "/auth/login" : "/auth/signup";
     const body = tab === "login"
@@ -253,7 +256,7 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
                     BIMLO Copilot
                   </p>
                   <h2 style={{ fontSize: 19, fontWeight: 700, color: fg, margin: 0 }}>
-                    {tab === "login" ? "Welcome back" : "Create account"}
+                    {tab === "login" ? t("auth.welcome_back") : t("auth.create_account")}
                   </h2>
                 </div>
                 <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: mutedFg, padding: 4, borderRadius: 6, display: "flex", alignItems: "center" }}>
@@ -263,19 +266,19 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
 
               {/* Tab switcher */}
               <div style={{ display: "flex", gap: 2, padding: 3, background: isDark ? "rgba(30,41,59,0.6)" : "rgba(241,245,249,1)", borderRadius: 10 }}>
-                {(["login", "signup"] as const).map(t => (
+                {(["login", "signup"] as const).map(mode => (
                   <button
-                    key={t}
-                    onClick={() => { setTab(t); setError(null); }}
+                    key={mode}
+                    onClick={() => { setTab(mode); setError(null); }}
                     style={{
                       flex: 1, padding: "7px", border: "none", borderRadius: 8,
                       cursor: "pointer", fontSize: 13, fontWeight: 600, transition: "all 0.15s",
-                      background: tab === t ? "#3b82f6" : "transparent",
-                      color:      tab === t ? "#fff"    : mutedFg,
-                      boxShadow:  tab === t ? "0 1px 6px rgba(59,130,246,0.3)" : "none",
+                      background: tab === mode ? "#3b82f6" : "transparent",
+                      color:      tab === mode ? "#fff"    : mutedFg,
+                      boxShadow:  tab === mode ? "0 1px 6px rgba(59,130,246,0.3)" : "none",
                     }}
                   >
-                    {t === "login" ? "Log in" : "Sign up"}
+                    {mode === "login" ? t("auth.login") : t("auth.signup")}
                   </button>
                 ))}
               </div>
@@ -296,19 +299,19 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
                 onMouseLeave={e => { e.currentTarget.style.background = isDark ? "rgba(255,255,255,0.06)" : "#fff"; }}
               >
                 <GoogleIcon />
-                Continue with Google
+                {t("auth.google_login")}
               </button>
 
               {/* Divider */}
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ flex: 1, height: 1, background: dividerClr }} />
-                <span style={{ fontSize: 11, color: mutedFg, whiteSpace: "nowrap" }}>or with email</span>
+                <span style={{ fontSize: 11, color: mutedFg, whiteSpace: "nowrap" }}>{t("auth.or_with_email")}</span>
                 <div style={{ flex: 1, height: 1, background: dividerClr }} />
               </div>
 
               {/* Form */}
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <Input label="Email" type="email" value={email} onChange={setEmail} placeholder="you@example.com" autoFocus />
+                <Input label={t("auth.email")} type="email" value={email} onChange={setEmail} placeholder={t("auth.email_placeholder")} autoFocus />
                 <AnimatePresence>
                   {tab === "signup" && (
                     <motion.div
@@ -319,16 +322,16 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
                       transition={{ duration: 0.18 }}
                       style={{ overflow: "hidden" }}
                     >
-                      <Input label="Username" value={username} onChange={setUsername} placeholder="how should we call you?" />
+                      <Input label={t("auth.username")} value={username} onChange={setUsername} placeholder={t("auth.username_placeholder")} />
                     </motion.div>
                   )}
                 </AnimatePresence>
                 <Input
-                  label="Password"
+                  label={t("auth.password")}
                   type={showPw ? "text" : "password"}
                   value={password}
                   onChange={setPassword}
-                  placeholder={tab === "signup" ? "min. 6 characters" : "your password"}
+                  placeholder={tab === "signup" ? t("auth.password_placeholder_signup") : t("auth.password_placeholder_login")}
                   suffix={
                     <button type="button" onClick={() => setShowPw(v => !v)}
                       style={{ background: "transparent", border: "none", cursor: "pointer", color: mutedFg, display: "flex" }}>
@@ -370,8 +373,8 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
                 {loading
                   ? <Loader2 size={15} className="animate-spin" />
                   : tab === "login"
-                    ? <><LogIn size={15} /> Log in</>
-                    : <><UserPlus size={15} /> Create account</>
+                    ? <><LogIn size={15} /> {t("auth.login")}</>
+                    : <><UserPlus size={15} /> {t("auth.create_account")}</>
                 }
               </button>
 
@@ -379,9 +382,9 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
               <p style={{ textAlign: "center", fontSize: 12, color: mutedFg, margin: 0 }}>
                 or{" "}
                 <button onClick={onClose} style={{ background: "transparent", border: "none", cursor: "pointer", color: mutedFg, textDecoration: "underline", fontSize: 12, padding: 0 }}>
-                  continue as guest
+                  {t("auth.continue_as_guest")}
                 </button>
-                {" "}(no history saved)
+                {" "}{t("auth.no_history_saved")}
               </p>
             </motion.div>
           </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, RefreshCw, ExternalLink, Zap,
@@ -352,6 +353,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
   isPinned: boolean;
   chatOpen: boolean;
 }) {
+  const { t } = useTranslation();
   const meta  = CATEGORY_META[item.category] ?? CATEGORY_META["General"];
   const href  = item.articleUrl && item.articleUrl !== "#" ? item.articleUrl : item.sourceUrl;
   const [imgError, setImgError] = useState(false);
@@ -472,7 +474,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
       <div style={{ position: "absolute", top: 10, right: 10, display: "flex", gap: "0.35rem", alignItems: "center" }}>
         <button
           onClick={() => onPin(item)}
-          title={isPinned ? "Remove from chat" : "Mention in Bimlo chat"}
+          title={isPinned ? t("news.remove_from_chat") : t("news.mention_in_chat")}
           style={{
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             width: 24, height: 24, borderRadius: 6,
@@ -591,10 +593,11 @@ function NewsChatPanel({
   onClose: () => void;
   currentUser: any;
 }) {
+  const { t } = useTranslation();
   const WELCOME: ChatMessage = {
     id: "welcome",
     role: "assistant",
-    content: "Hey! I'm Bimlo. Tap the 💬 icon on any article to pin it here, then ask me anything — trends, impact, comparisons. What's on your mind?",
+    content: t("news.welcome_message"),
     timestamp: new Date(),
   };
 
@@ -850,8 +853,8 @@ function NewsChatPanel({
               <img src="/favicon.svg" alt="" style={{ width: 16, height: 16, objectFit: "contain", filter: "brightness(0) invert(1)" }} />
             </div>
             <div>
-              <div style={{ fontSize: "0.8rem", fontWeight: 700, color: dark ? "#fff" : "#111", lineHeight: 1.2 }}>Ask Bimlo</div>
-              <div style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.38)" : "rgba(0,0,0,0.38)" }}>News Intelligence</div>
+              <div style={{ fontSize: "0.8rem", fontWeight: 700, color: dark ? "#fff" : "#111", lineHeight: 1.2 }}>{t("news.ask_bimlo")}</div>
+              <div style={{ fontSize: "0.58rem", color: dark ? "rgba(255,255,255,0.38)" : "rgba(0,0,0,0.38)" }}>{t("news.intelligence")}</div>
             </div>
           </div>
           {/* Right controls: history + new chat + close */}
@@ -860,7 +863,7 @@ function NewsChatPanel({
               <>
                 <button
                   onClick={() => { setShowHistory(h => !h); if (!showHistory) loadHistory(); }}
-                  title="Chat history"
+                  title={t("news.chat_history")}
                   style={{
                     width: 26, height: 26, borderRadius: 7, border: "none",
                     background: showHistory
@@ -873,7 +876,7 @@ function NewsChatPanel({
                 ><History size={11} /></button>
                 <button
                   onClick={startNewChat}
-                  title="New chat"
+                  title={t("news.new_chat")}
                   style={{
                     width: 26, height: 26, borderRadius: 7, border: "none",
                     background: dark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)",
@@ -912,7 +915,7 @@ function NewsChatPanel({
             borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.05)"}`,
             display: "flex", alignItems: "center", justifyContent: "space-between",
           }}>
-            <span>Past news chats</span>
+            <span>{t("news.past_news_chats")}</span>
             <button
               onClick={() => setShowHistory(false)}
               style={{
@@ -931,7 +934,7 @@ function NewsChatPanel({
               padding: "2rem 1rem", textAlign: "center",
               fontSize: "0.68rem", color: dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.28)",
             }}>
-              No past news chats yet.<br />Start a conversation above!
+              {t("news.no_past_chats")}<br />{t("news.start_conversation_above")}
             </div>
           ) : (
             <div style={{ overflowY: "auto", flex: 1 }}>
@@ -971,7 +974,7 @@ function NewsChatPanel({
                   </div>
                   <button
                     onClick={(e) => deleteConversation(conv.id, e)}
-                    title="Delete"
+                    title={t("chat.delete")}
                     style={{
                       background: "none", border: "none", cursor: "pointer", padding: "0.2rem",
                       color: dark ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.25)",
@@ -1082,7 +1085,7 @@ function NewsChatPanel({
                             setCopiedMsgId(msg.id);
                             setTimeout(() => setCopiedMsgId(null), 1500);
                           }}
-                          title="Copy response"
+                          title={t("news.copy_response")}
                           style={{
                             display: "inline-flex", alignItems: "center", gap: "0.2rem",
                             padding: "0.18rem 0.38rem", borderRadius: 5, border: "none",
@@ -1097,12 +1100,12 @@ function NewsChatPanel({
                           }}
                         >
                           {copiedMsgId === msg.id
-                            ? <><Check size={9} /><span>Copied</span></>
-                            : <><Copy size={9} /><span>Copy</span></>}
+                            ? <><Check size={9} /><span>{t("news.copied")}</span></>
+                            : <><Copy size={9} /><span>{t("news.copy_response")}</span></>}
                         </button>
                         <button
                           onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
-                          title="Good response"
+                          title={t("news.good_response")}
                           style={{
                             display: "inline-flex", padding: "0.22rem", borderRadius: 5,
                             border: "none", cursor: "pointer", background: "transparent",
@@ -1112,7 +1115,7 @@ function NewsChatPanel({
                         ><ThumbsUp size={9} /></button>
                         <button
                           onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "dislike" ? null : "dislike" }))}
-                          title="Bad response"
+                          title={t("news.bad_response")}
                           style={{
                             display: "inline-flex", padding: "0.22rem", borderRadius: 5,
                             border: "none", cursor: "pointer", background: "transparent",
@@ -1123,7 +1126,7 @@ function NewsChatPanel({
                         <button
                           onClick={() => handleRedo(msg.id)}
                           disabled={isLoading}
-                          title="Regenerate"
+                          title={t("news.regenerate")}
                           style={{
                             display: "inline-flex", padding: "0.22rem", borderRadius: 5,
                             border: "none", cursor: isLoading ? "not-allowed" : "pointer",
@@ -1268,6 +1271,7 @@ function NewsChatPanel({
 const NewsPage = () => {
   const navigate = useNavigate();
   const { currentUser, logout } = useAuth();
+  const { t } = useTranslation();
   const navbarRef = useRef<HTMLDivElement>(null);
   const [navbarHeight, setNavbarHeight] = useState(108);
 
@@ -1545,12 +1549,12 @@ const NewsPage = () => {
       {/* ── Header ────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.9rem" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <button onClick={() => navigate(-1)} style={{ display: "inline-flex", alignItems: "center", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", background: "none", border: "none", cursor: "pointer", padding: 0, opacity: 0.6 }}>
+          <button onClick={() => navigate(-1)} title={t("common.back")} style={{ display: "inline-flex", alignItems: "center", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", background: "none", border: "none", cursor: "pointer", padding: 0, opacity: 0.6 }}>
             <ArrowLeft size={15} />
           </button>
           <div>
-            <h1 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 800, color: theme === "dark" ? "#fff" : "#000", lineHeight: 1.2 }}>Industry Briefing</h1>
-            <p style={{ margin: "0.1rem 0 0", fontSize: "0.72rem", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", opacity: 0.65 }}>Telecom &amp; construction intelligence</p>
+            <h1 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 800, color: theme === "dark" ? "#fff" : "#000", lineHeight: 1.2 }}>{t("news.industry_briefing")}</h1>
+            <p style={{ margin: "0.1rem 0 0", fontSize: "0.72rem", color: theme === "dark" ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.6)", opacity: 0.65 }}>{t("news.telecom_intelligence")}</p>
           </div>
         </div>
 
@@ -1558,7 +1562,7 @@ const NewsPage = () => {
           {/* Category filter — CardNav */}
           <CardNav
             filterMode
-            filterLabel={filter === "All" ? "All Categories" : filter}
+            filterLabel={filter === "All" ? t("news.all_categories") : filter}
             theme={theme}
             ease="power3.out"
             items={[

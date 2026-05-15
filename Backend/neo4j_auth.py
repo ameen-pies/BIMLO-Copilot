@@ -21,22 +21,26 @@ Mount in main.py:
     # and in startup call init_neo4j() ONCE
 """
 
-from __future__ import annotations
-
 import os
 import uuid
 import hashlib
 import secrets
 import time
+import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+from cachetools import LRUCache
 
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Cookie, Response, Request
+from core.deps import limiter
 from pydantic import BaseModel
 from dotenv import load_dotenv
 load_dotenv()  # must run before os.getenv() calls below
 
+from core.config import settings
+
 import logging
+logger = logging.getLogger("auth")
 # Suppress Neo4j notification spam (INFO/WARNING about missing props/relations
 # on empty databases — harmless, just noisy during first-run)
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
@@ -63,23 +67,26 @@ except ImportError:
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
-NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://127.0.0.1:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_URI      = settings.neo4j_uri
+NEO4J_USER     = settings.neo4j_user
+NEO4J_PASSWORD = settings.neo4j_password
 # ⚠️  IMPORTANT: Community Edition ONLY supports the default "neo4j" database.
 # Named databases (like "users") require Enterprise or AuraDB Pro.
 # On Community, keep this as "neo4j" and use labels to separate data.
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+NEO4J_DATABASE = settings.neo4j_database
 
 print(f"🔍 NEO4J DEBUG — URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
 
 # Token TTL
 TOKEN_TTL_HOURS = 72
+ACCESS_TOKEN_TTL_MINUTES = 15
+REFRESH_TOKEN_TTL_DAYS = 7
 
 # ── In-memory cache (fast path) ───────────────────────────────────────────────
 # Tokens are ALSO persisted to Neo4j as (:Token) nodes so they survive restarts.
 # On a cache miss we hit Neo4j once, then warm the cache.
-_active_tokens: Dict[str, Dict] = {}
+# Bounded LRU: prevents unbounded memory growth from stale tokens.
+_active_tokens: Dict[str, Dict] = LRUCache(maxsize=5000)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,27 +155,39 @@ def _setup_constraints():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _hash_password(password: str) -> str:
-    salt = secrets.token_hex(16)
-    digest = hashlib.sha256((salt + password).encode()).hexdigest()
-    return f"{salt}:{digest}"
+    """Hash a password with bcrypt (work factor 12)."""
+    return bcrypt.hashpw(
+        password.encode("utf-8"),
+        bcrypt.gensalt(rounds=12)
+    ).decode("utf-8")
 
 
 def _verify_password(password: str, stored: str) -> bool:
+    """
+    Verify a password against the stored string.
+    Automatically handles legacy SHA-256 hashes (format "salt:digest")
+    as well as bcrypt hashes.
+    """
     try:
-        salt, digest = stored.split(":", 1)
-        return hashlib.sha256((salt + password).encode()).hexdigest() == digest
+        # Compatibility with existing SHA-256 hashes (migration path)
+        if ":" in stored and len(stored.split(":")[0]) == 32:
+            salt, digest = stored.split(":", 1)
+            return hashlib.sha256((salt + password).encode()).hexdigest() == digest
+        # Modern bcrypt verification
+        return bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
     except Exception:
         return False
 
 
-def _issue_token(user_id: str, username: str, email: str, role: str = "user") -> str:
+def _issue_token(user_id: str, username: str, email: str, role: str = "user",
+                 token_type: str = "access", ttl_seconds: Optional[int] = None) -> str:
+    if ttl_seconds is None:
+        ttl_seconds = ACCESS_TOKEN_TTL_MINUTES * 60 if token_type == "access" else REFRESH_TOKEN_TTL_DAYS * 86400
     token      = secrets.token_urlsafe(32)
-    expires_at = time.time() + TOKEN_TTL_HOURS * 3600
-    payload    = {"user_id": user_id, "username": username, "email": email, "expires_at": expires_at, "role": role}
-    # role stored in payload for fast auth checks without extra DB round-trip
-    # Warm in-memory cache
+    expires_at = time.time() + ttl_seconds
+    payload    = {"user_id": user_id, "username": username, "email": email,
+                  "expires_at": expires_at, "role": role, "type": token_type}
     _active_tokens[token] = payload
-    # Persist to Neo4j so the token survives server restarts
     try:
         _run(
             """
@@ -176,16 +195,26 @@ def _issue_token(user_id: str, username: str, email: str, role: str = "user") ->
             CREATE (t:Token {
                 token:      $token,
                 expires_at: $expires_at,
+                type:       $token_type,
                 created_at: $now
             })
             MERGE (u)-[:HAS_TOKEN]->(t)
             """,
             {"user_id": user_id, "token": token,
-             "expires_at": expires_at, "now": datetime.utcnow().isoformat()},
+             "expires_at": expires_at, "token_type": token_type,
+             "now": datetime.utcnow().isoformat()},
         )
     except Exception as e:
         print(f"⚠️  Token persist failed (auth still works this session): {e}")
     return token
+
+
+def _issue_token_pair(user_id: str, username: str, email: str, role: str = "user") -> tuple:
+    """Issue both access (15 min) and refresh (7 day) tokens, return (access, refresh)."""
+    access  = _issue_token(user_id, username, email, role, token_type="access")
+    refresh = _issue_token(user_id, username, email, role, token_type="refresh",
+                           ttl_seconds=REFRESH_TOKEN_TTL_DAYS * 86400)
+    return access, refresh
 
 
 def _revoke_token(token: str):
@@ -221,7 +250,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
             """
             MATCH (u:User)-[:HAS_TOKEN]->(t:Token {token: $token})
             RETURN u.id AS user_id, u.username AS username, u.email AS email,
-                   u.role AS role, t.expires_at AS expires_at
+                   u.role AS role, t.expires_at AS expires_at, t.type AS type
             """,
             {"token": token},
         )
@@ -238,6 +267,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
             "email":      row["email"],
             "expires_at": row["expires_at"],
             "role":       row.get("role") or "user",
+            "type":       row.get("type") or "access",
         }
         _active_tokens[token] = payload
         return payload
@@ -250,23 +280,29 @@ def _resolve_token(token: str) -> Optional[Dict]:
 # DEPENDENCY: optional auth (doesn't raise — returns None for guests)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def optional_user(authorization: Optional[str] = Header(default=None)) -> Optional[Dict]:
-    print(f"🔐 AUTH — header: {repr(authorization)[:80]}")
-    if not authorization or not authorization.startswith("Bearer "):
-        print(f"   → REJECTED: no/missing Bearer header")
+def optional_user(
+    authorization: Optional[str] = Header(default=None),
+    bimlo_token: Optional[str] = Cookie(default=None),
+) -> Optional[Dict]:
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif bimlo_token:
+        token = bimlo_token
+    if not token:
         return None
-    token = authorization.split(" ", 1)[1]
     result = _resolve_token(token)
-    print(f"   → token={token[:16]}... in_memory={token in _active_tokens} resolved={result is not None}")
+    logger.debug("auth: %s", "ok" if result else "rejected")
     return result
 
 
-def require_user(authorization: Optional[str] = Header(default=None)) -> Dict:
-    user = optional_user(authorization)
+def require_user(
+    authorization: Optional[str] = Header(default=None),
+    bimlo_token: Optional[str] = Cookie(default=None),
+) -> Dict:
+    user = optional_user(authorization, bimlo_token)
     if not user:
-        print(f"❌ 401 — header was: {repr(authorization)[:80]}")
         raise HTTPException(status_code=401, detail="Authentication required")
-    print(f"✅ AUTH OK — user={user.get('username')}")
     return user
 
 
@@ -324,7 +360,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/signup", response_model=AuthResponse)
-def signup(req: SignupRequest):
+@limiter.limit("3/minute")
+def signup(request: Request, req: SignupRequest, response: Response):
     email    = req.email.strip().lower()
     username = req.username.strip()
     password = req.password
@@ -364,13 +401,22 @@ def signup(req: SignupRequest):
          "password_hash": password_hash, "now": now},
     )
 
-    token = _issue_token(user_id, username, email, role="user")
+    access_token, refresh_token = _issue_token_pair(user_id, username, email, role="user")
+    response.set_cookie(
+        key="bimlo_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
+    )
     print(f"✅ auth: new user '{username}' ({email})")
-    return AuthResponse(token=token, user_id=user_id, username=username, email=email, role="user")
+    return AuthResponse(token=access_token, user_id=user_id, username=username, email=email, role="user")
 
 
 @router.post("/login", response_model=AuthResponse)
-def login(req: LoginRequest):
+@limiter.limit("5/minute")
+def login(request: Request, req: LoginRequest, response: Response):
     email = req.email.strip().lower()
 
     rows = _run(
@@ -384,38 +430,96 @@ def login(req: LoginRequest):
     if not _verify_password(req.password, row["ph"]):
         raise HTTPException(401, "Invalid email or password")
 
+    # ── Migration: if password is still stored as SHA-256, re-hash with bcrypt ──
+    stored_hash = row["ph"]
+    if ":" in stored_hash and len(stored_hash.split(":")[0]) == 32:
+        new_hash = _hash_password(req.password)
+        _run(
+            "MATCH (u:User {id: $id}) SET u.password_hash = $h",
+            {"id": row["id"], "h": new_hash},
+        )
+
     # Update last_seen
     _run(
         "MATCH (u:User {id: $id}) SET u.last_seen = $now",
         {"id": row["id"], "now": datetime.utcnow().isoformat()},
     )
 
-    role  = row.get("role") or "user"
-    token = _issue_token(row["id"], row["username"], email, role=role)
+    role = row.get("role") or "user"
+    access_token, refresh_token = _issue_token_pair(row["id"], row["username"], email, role=role)
+    response.set_cookie(
+        key="bimlo_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
+    )
     print(f"✅ auth: login '{row['username']}' (role={role})")
-    return AuthResponse(token=token, user_id=row["id"], username=row["username"], email=email, role=role)
+    return AuthResponse(token=access_token, user_id=row["id"], username=row["username"], email=email, role=role)
 
 
 @router.post("/logout")
-def logout(user: Dict = Depends(require_user), authorization: Optional[str] = Header(default=None)):
+def logout(
+    response: Response,
+    user: Dict = Depends(require_user),
+    authorization: Optional[str] = Header(default=None),
+    bimlo_token: Optional[str] = Cookie(default=None),
+):
+    token = None
     if authorization and authorization.startswith("Bearer "):
-        _revoke_token(authorization.split(" ", 1)[1])
+        token = authorization.split(" ", 1)[1]
+    elif bimlo_token:
+        token = bimlo_token
+    if token:
+        _revoke_token(token)
+    response.delete_cookie("bimlo_token")
     return {"ok": True}
 
 
+@router.post("/refresh")
+def refresh_token(
+    response: Response,
+    bimlo_token: Optional[str] = Cookie(default=None),
+):
+    if not bimlo_token:
+        raise HTTPException(401, "No refresh token provided")
+    payload = _resolve_token(bimlo_token)
+    if not payload or payload.get("type") != "refresh":
+        raise HTTPException(401, "Invalid refresh token")
+    _revoke_token(bimlo_token)
+    new_access, new_refresh = _issue_token_pair(
+        payload["user_id"], payload["username"],
+        payload["email"], payload.get("role", "user"),
+    )
+    response.set_cookie(
+        key="bimlo_token",
+        value=new_refresh,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
+    )
+    return {"access_token": new_access, "token_type": "bearer"}
+
+
 @router.delete("/delete-account")
-def delete_account(user: Dict = Depends(require_user), authorization: Optional[str] = Header(default=None)):
-    """
-    Permanently delete the authenticated user and all their data:
-    conversations, messages, documents, and tokens.
-    """
+def delete_account(
+    response: Response,
+    user: Dict = Depends(require_user),
+    authorization: Optional[str] = Header(default=None),
+    bimlo_token: Optional[str] = Cookie(default=None),
+):
+    """Permanently delete the authenticated user and all their data."""
     user_id = user["user_id"]
-
-    # Revoke token from cache + Neo4j
+    token = None
     if authorization and authorization.startswith("Bearer "):
-        _revoke_token(authorization.split(" ", 1)[1])
-
-    # Delete everything linked to the user in one Cypher sweep
+        token = authorization.split(" ", 1)[1]
+    elif bimlo_token:
+        token = bimlo_token
+    if token:
+        _revoke_token(token)
+    response.delete_cookie("bimlo_token")
     _run(
         """
         MATCH (u:User {id: $user_id})
@@ -440,7 +544,7 @@ class GoogleTokenRequest(BaseModel):
 
 
 @router.post("/google-token", response_model=AuthResponse)
-def google_token_auth(req: GoogleTokenRequest):
+def google_token_auth(req: GoogleTokenRequest, response: Response):
     """
     Accept a Google OAuth2 access token + basic user info from the frontend.
     Verifies the token is valid by hitting Google's tokeninfo endpoint,
@@ -508,8 +612,16 @@ def google_token_auth(req: GoogleTokenRequest):
         )
         print(f"✅ auth/google-token: new user '{username}' ({email})")
 
-    token = _issue_token(user_id, username, email, role=role)   # ← role now always correct
-    return AuthResponse(token=token, user_id=user_id, username=username, email=email, avatar_url=req.picture, display_name=req.name, role=role)
+    access_token, refresh_token = _issue_token_pair(user_id, username, email, role=role)
+    response.set_cookie(
+        key="bimlo_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
+    )
+    return AuthResponse(token=access_token, user_id=user_id, username=username, email=email, avatar_url=req.picture, display_name=req.name, role=role)
 
 
 @router.get("/me")
@@ -527,7 +639,7 @@ def me(user: Dict = Depends(require_user)):
     )
     if not rows:
         raise HTTPException(404, "User not found")
-    return {**rows[0], "user_id": user["user_id"]}
+    return {**rows[0], "user_id": user["user_id"], "token": ""}
 
 
 @router.post("/heartbeat")
@@ -563,12 +675,12 @@ def contact(req: ContactRequest):
     from email.mime.multipart import MIMEMultipart
     from email.utils import formataddr
 
-    smtp_host  = os.getenv("SMTP_HOST", "")
-    smtp_port  = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user  = os.getenv("SMTP_USER", "")
-    smtp_pass  = os.getenv("SMTP_PASS", "")
-    smtp_from  = os.getenv("SMTP_FROM", smtp_user or "noreply@bimlo.local")
-    bimlo_inbox = os.getenv("CONTACT_TO", smtp_user or smtp_from)
+    smtp_host  = settings.smtp_host
+    smtp_port  = settings.smtp_port
+    smtp_user  = settings.smtp_user
+    smtp_pass  = settings.smtp_pass
+    smtp_from  = settings.smtp_from or smtp_user or "noreply@bimlo.local"
+    bimlo_inbox = settings.contact_to or smtp_user or smtp_from
 
     body_text = (
         f"Name:    {req.name}\n"
@@ -1186,8 +1298,11 @@ def _seed_admin() -> None:
         print(f"⚠️  Admin seed failed (non-fatal): {e}")
 
 
-def require_admin(authorization: Optional[str] = Header(default=None)) -> Dict:
-    user = optional_user(authorization)
+def require_admin(
+    authorization: Optional[str] = Header(default=None),
+    bimlo_token: Optional[str] = Cookie(default=None),
+) -> Dict:
+    user = optional_user(authorization, bimlo_token)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     if user.get("role") != "admin":
@@ -1363,11 +1478,11 @@ def admin_send_email(req: AdminSendEmailRequest, admin: Dict = Depends(require_a
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
 
-    smtp_host = os.getenv("SMTP_HOST", "")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER", "")
-    smtp_pass = os.getenv("SMTP_PASS", "")
-    smtp_from = os.getenv("SMTP_FROM", smtp_user or "noreply@bimlo.local")
+    smtp_host = settings.smtp_host
+    smtp_port = settings.smtp_port
+    smtp_user = settings.smtp_user
+    smtp_pass = settings.smtp_pass
+    smtp_from = settings.smtp_from or smtp_user or "noreply@bimlo.local"
 
     # Fetch emails for target user_ids
     rows = _run(

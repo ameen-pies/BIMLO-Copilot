@@ -1,35 +1,28 @@
 """
 cad_context_bridge.py
 ─────────────────────────────────────────────────────────────────────────────
-Wires the CAD/IFC agent into the shared session memory owned by main.py.
+Wires the CAD/IFC agent into the shared session memory owned by
+core/session_state.py.
 
-WHY THIS EXISTS
-───────────────
 cad_ifc_agent.py runs in its own isolated router.  After answering a CAD
 question it updates CadSharedContext (its own store) but never tells the
-main RAG engine what it found.  So when the user asks a follow-up like
-"what did you just do?" or "make a report about that IFC file", the RAG
-engine has no memory of the CAD session.
+main RAG engine what it found.  This module bridges the gap.
 
 This module provides a single call — `sync_cad_turn_to_main()` — that the
 cad_ifc_agent calls at the end of every /api/cad/query response.  It writes:
 
-  1.  main.py _sessions      ← so history / direct route knows about the turn
-  2.  SharedContext.history   ← so report_agent can reference the CAD context
-  3.  SharedContext.chunks    ← synthetic "chunk" built from the IFC summary
-                                so RAG retrieval can surface CAD data
-
-No circular imports: this module imports lazily from sys.modules so it only
-resolves after main.py has already registered everything.
-─────────────────────────────────────────────────────────────────────────────
+  1.  Session state (append_turn / log_route) ← so history / direct route knows
+  2.  SharedContext.history                      ← so report_agent can reference
+  3.  SharedContext.chunks                       ← synthetic chunk from IFC
 """
 
 from __future__ import annotations
 
-import sys
 import json
 import logging
 from typing import Optional
+
+from core.session_state import append_turn, log_route, get_history
 
 logger = logging.getLogger("cad_context_bridge")
 
@@ -63,22 +56,10 @@ def sync_cad_turn_to_main(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _write_to_main_sessions(session_id: str, user_query: str, answer: str) -> None:
-    """Append this turn to main.py's _sessions store."""
-    # Resolve main module — already loaded when the FastAPI app started
-    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
-    if main_mod is None:
-        logger.debug("[cad_bridge] main module not in sys.modules — skipping _sessions sync")
-        return
-
-    append_turn = getattr(main_mod, "append_turn", None)
-    log_route   = getattr(main_mod, "log_route",   None)
-
-    if callable(append_turn):
-        append_turn(session_id, "user",      user_query)
-        append_turn(session_id, "assistant", answer)
-
-    if callable(log_route):
-        log_route(session_id, "cad_ifc", user_query)
+    """Append this turn to the shared session store."""
+    append_turn(session_id, "user",      user_query)
+    append_turn(session_id, "assistant", answer)
+    log_route(session_id, "cad_ifc", user_query)
 
 
 def _write_to_shared_context(
@@ -87,25 +68,15 @@ def _write_to_shared_context(
     file_summary: dict,
 ) -> None:
     """Push history + a synthetic CAD chunk into SharedContext."""
-    # Resolve SharedContext — registered by services.report_agent in main.py
     SharedContext = _resolve_shared_context()
     if SharedContext is None:
         logger.debug("[cad_bridge] SharedContext not resolvable — skipping")
         return
 
-    # ── 1. History sync ──────────────────────────────────────────────────────
-    # Retrieve latest history from main._sessions and push it to SharedContext
-    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
-    if main_mod:
-        get_history = getattr(main_mod, "get_history", None)
-        if callable(get_history):
-            history = get_history(session_id)
-            if hasattr(SharedContext, "set_history"):
-                SharedContext.set_history(session_id, history)
+    history = get_history(session_id)
+    if hasattr(SharedContext, "set_history"):
+        SharedContext.set_history(session_id, history)
 
-    # ── 2. Synthetic chunk ───────────────────────────────────────────────────
-    # Build a plain-text "chunk" from the IFC/CAD summary so that RAG routes
-    # (rag, report, direct) can cite it in future turns.
     chunk = _build_synthetic_chunk(answer, file_summary)
     if hasattr(SharedContext, "set_chunks"):
         SharedContext.set_chunks(session_id, [chunk])

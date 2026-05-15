@@ -2,9 +2,11 @@ import { Link } from "react-router-dom";
 import { Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
+import LangToggle from "@/components/LangToggle";
 import Logo from "@/components/Logo";
 import { useAuth } from "@/context/AuthContext";
 import { useState, useRef, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 
 // ── Reusable profile bubble used by Navbar, Chat, CallPage, NewsPage ─────────
 export interface ProfileUser { username: string; email: string; avatar_url?: string; display_name?: string; }
@@ -20,6 +22,7 @@ export const ProfileBubble = ({
   onDeleteAccount: () => void;
   align?: "right" | "left";
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen]       = useState(false);
   const [confirm, setConfirm] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -143,7 +146,7 @@ export const ProfileBubble = ({
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
             </svg>
-            Log out
+            {t("auth.logout")}
           </button>
 
           {/* Divider */}
@@ -174,12 +177,12 @@ export const ProfileBubble = ({
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
               </svg>
-              Delete account
+              {t("auth.delete_account")}
             </button>
           ) : (
             <div style={{ padding: "10px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
               <p style={{ margin: 0, fontSize: 12, color: "#f87171", fontWeight: 600 }}>
-                This is permanent. Are you sure?
+                {t("auth.delete_confirm")}
               </p>
               <div style={{ display: "flex", gap: 6 }}>
                 <button
@@ -190,7 +193,7 @@ export const ProfileBubble = ({
                     fontSize: 12, fontWeight: 700, cursor: "pointer",
                   }}
                 >
-                  Yes, delete
+                  {t("common.confirm_delete")}
                 </button>
                 <button
                   onClick={() => setConfirm(false)}
@@ -201,7 +204,7 @@ export const ProfileBubble = ({
                     fontSize: 12, fontWeight: 600, cursor: "pointer",
                   }}
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
             </div>
@@ -222,6 +225,7 @@ const scrollTo = (id: string, extraOffset = 0) => (e: React.MouseEvent) => {
 };
 
 const Navbar = () => {
+  const { t } = useTranslation();
   const { currentUser, showAuthModal, logout, setCurrentUser } = useAuth();
 
   const deleteAccount = async () => {
@@ -241,31 +245,32 @@ const Navbar = () => {
       WebkitBackdropFilter: 'blur(12px)',
       backgroundColor: 'hsl(var(--background) / 0.55)',
       borderBottom: '1px solid hsl(var(--border) / 0.3)',
+      boxShadow: '0 1px 4px hsl(var(--border) / 0.4)',
     }}>
       <div className="container mx-auto flex items-center justify-between h-16 px-6">
         <Link to="/" className="flex items-center gap-2">
           <Logo className="h-8 w-8" />
-          <span className="font-heading text-xl font-bold text-foreground">
-            Bimlo Copilot
+            <span className="font-heading text-xl font-bold text-foreground">
+            {t("nav.title")}
           </span>
         </Link>
 
         <div className="hidden md:flex items-center gap-8">
           <a href="#trending" onClick={scrollTo('trending', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            Trending
+            {t("nav.trending")}
           </a>
           <a href="#features" onClick={scrollTo('features', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            Features
+            {t("nav.features")}
           </a>
           <a href="#how-it-works" onClick={scrollTo('how-it-works', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            How it works
+            {t("nav.how_it_works")}
           </a>
           <a href="#contact" onClick={scrollTo('contact', 0)}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            Contact
+            {t("nav.contact")}
           </a>
         </div>
 
@@ -299,10 +304,11 @@ const Navbar = () => {
                   }}
                 >
                   <Shield size={11} />
-                  Dashboard
+                  {t("nav.dashboard")}
                 </Link>
               )}
               <ProfileBubble user={currentUser} onLogout={logout} onDeleteAccount={deleteAccount} align="right" />
+              <LangToggle />
               <ThemeToggle />
             </>
           ) : (
@@ -319,13 +325,14 @@ const Navbar = () => {
                 onMouseEnter={e => { (e.currentTarget).style.background = "rgba(96,165,250,0.18)"; }}
                 onMouseLeave={e => { (e.currentTarget).style.background = "rgba(96,165,250,0.08)"; }}
               >
-                Log in
+                {t("auth.login")}
               </button>
               <Link to="/chat">
                 <Button size="sm" className="h-9 px-4 py-[6px] rounded-[8px] bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold">
-                  Launch Copilot
+                  {t("nav.launch_copilot")}
                 </Button>
               </Link>
+              <LangToggle />
               <ThemeToggle />
             </>
           )}

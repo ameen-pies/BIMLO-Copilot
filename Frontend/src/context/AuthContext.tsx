@@ -21,7 +21,10 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import api from "@/services/api";
 import AuthModal from "@/components/AuthModal";
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -72,28 +75,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [modalOpen, setModalOpen]           = useState(false);
   const pendingActionRef                    = useRef<PendingAction>(null);
 
-  // Rehydrate from localStorage on mount
+  // Rehydrate via /auth/me (HttpOnly cookie-based session)
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("bimlo_auth");
-      if (stored) {
-        const parsed: AuthUser = JSON.parse(stored);
-        if (parsed.token && parsed.user_id) {
-          setCurrentUserState(parsed);
+      fetch(`${API_BASE_URL}/auth/me`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        if (data.user_id) {
+          // Try to get a fresh access token
+          fetch(`${API_BASE_URL}/auth/refresh`, { method: "POST", credentials: "include" })
+            .then(r => r.ok ? r.json() : null)
+            .then(refresh => {
+              if (refresh?.access_token) {
+                api.setToken(refresh.access_token);
+              }
+            })
+            .catch(() => {});
+          setCurrentUserState({
+            token: "",
+            user_id: data.user_id,
+            username: data.username,
+            email: data.email,
+            role: data.role,
+            avatar_url: data.avatar_url || "",
+          });
         }
-      }
-    } catch {
-      localStorage.removeItem("bimlo_auth");
-    }
+      })
+      .catch(() => {});
   }, []);
 
   const setCurrentUser = useCallback((u: AuthUser | null) => {
     setCurrentUserState(u);
-    if (u) {
-      localStorage.setItem("bimlo_auth", JSON.stringify(u));
-    } else {
-      localStorage.removeItem("bimlo_auth");
-    }
   }, []);
 
   const showAuthModal = useCallback((onSuccess: PendingAction = null) => {
@@ -107,39 +118,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const handleAuthSuccess = useCallback((user: AuthUser) => {
+    api.setToken(user.token);
     setCurrentUser(user);
-    setModalOpen(false); // belt-and-suspenders in case onClose wasn't called
+    setModalOpen(false);
     if (pendingActionRef.current) {
       const action = pendingActionRef.current;
       pendingActionRef.current = null;
-      setTimeout(action, 150); // wait for modal exit animation
+      setTimeout(action, 150);
     }
   }, [setCurrentUser]);
 
   // ── Heartbeat: ping /auth/heartbeat every 60s while logged in ──────────────
   useEffect(() => {
-    if (!currentUser?.token) return;
+    if (!currentUser?.user_id) return;
     const ping = () =>
-      fetch("/auth/heartbeat", {
+      fetch(`${API_BASE_URL}/auth/heartbeat`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${currentUser.token}` },
+        credentials: "include",
       }).catch(() => {});
-    ping(); // fire immediately on login / page load
+    ping();
     const id = setInterval(ping, 60_000);
     return () => clearInterval(id);
-  }, [currentUser?.token]);
+  }, [currentUser?.user_id]);
 
   const logout = useCallback(async () => {
-    if (currentUser?.token) {
-      try {
-        await fetch("/auth/logout", {
-          method:  "POST",
-          headers: { Authorization: `Bearer ${currentUser.token}` },
-        });
-      } catch { /* ignore */ }
-    }
+    try {
+      await fetch(`${API_BASE_URL}/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch { /* ignore */ }
+    api.setToken(null);
     setCurrentUser(null);
-  }, [currentUser, setCurrentUser]);
+  }, [setCurrentUser]);
 
   return (
     <AuthContext.Provider

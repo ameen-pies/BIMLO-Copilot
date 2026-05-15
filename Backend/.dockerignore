@@ -1,0 +1,13 @@
+.env
+.env.local
+.env.production
+__pycache__/
+*.py[cod]
+*.egg-info/
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+tests/
+*.md

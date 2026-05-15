@@ -1,0 +1,3 @@
+setup:
+  project: bimlo-copilot
+  config: prd

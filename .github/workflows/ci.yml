@@ -1,0 +1,60 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      neo4j:
+        image: neo4j:5.17
+        env:
+          NEO4J_AUTH: neo4j/testpass
+        ports:
+          - 7687:7687
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      CF_API_KEY: ${{ secrets.CF_API_KEY }}
+      NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r Backend/requirements.txt
+      - run: pip install ruff pytest-cov
+      - run: ruff check Backend/
+      - run: cd Backend && pytest --cov=services --cov-fail-under=70
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: cd Frontend && npm ci
+      - run: cd Frontend && npm run lint
+      - run: cd Frontend && npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: cd Frontend && npm ci
+      - run: cd Frontend && npx playwright install chromium
+      - run: cd Frontend && npx playwright test
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          severity: HIGH,CRITICAL
+          exit-code: 1

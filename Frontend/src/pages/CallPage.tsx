@@ -18,182 +18,14 @@
 import React, {
   useState, useEffect, useRef, useCallback,
 } from "react";
-
-// ── Colour helpers ────────────────────────────────────────────────────────────
-function hueToRgb(h: number, isDark: boolean): [number, number, number] {
-  // light mode: very dark + saturated so lines contrast against pale bg
-  const s = isDark ? 0.65 : 0.90;
-  const l = isDark ? 0.55 : 0.30;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n: number) => {
-    const k = (n + h / 30) % 12;
-    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
-  };
-  return [f(0), f(8), f(4)];
-}
-
-function rgbToHex(r: number, g: number, b: number): number {
-  return (Math.round(r * 255) << 16) | (Math.round(g * 255) << 8) | Math.round(b * 255);
-}
-
-function lerpRgb(
-  a: [number,number,number],
-  b: [number,number,number],
-  t: number
-): [number,number,number] {
-  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
-}
-
-function targetRgb(orbHue: number, isDark: boolean): [number,number,number] {
-  // orbHue 0 = idle → indigo/blue; 360 = speaking → red
-  if (orbHue === 0)   return isDark ? [0.39,0.40,0.95] : [0.20,0.15,0.80]; // indigo / deep indigo
-  if (orbHue === 360) return isDark ? [0.20,0.50,0.95] : [0.05,0.20,0.78]; // blue / deep blue
-  return hueToRgb(orbHue, isDark);
-}
-
-// Lines use a darker/more-saturated tint so they're visible on the light bg
-function lineTargetRgb(orbHue: number, isDark: boolean): [number,number,number] {
-  if (isDark) return targetRgb(orbHue, isDark); // dark mode: lines same as dots
-  // light mode: very dark so lines strongly contrast against the pale background
-  if (orbHue === 0)   return [0.18, 0.10, 0.62]; // deep indigo-violet
-  if (orbHue === 360) return [0.05, 0.12, 0.68]; // deep blue
-  const [r, g, b] = hueToRgb(orbHue, isDark);
-  // darken aggressively for light mode lines
-  return [r * 0.35, g * 0.35, b * 0.35];
-}
-
-// ── Vanta NET background with side-only mask ──────────────────────────────────
-const VantaBackground: React.FC<{ isDark: boolean; orbHue: number }> = ({ isDark, orbHue }) => {
-  const vantaRef   = useRef<HTMLDivElement>(null);
-  const effectRef  = useRef<any>(null);
-  const readyRef   = useRef(false);
-  const [visible, setVisible] = useState(false);
-
-  // current animated rgb (stored in ref so RAF doesn't stale-close)
-  const currentRgb     = useRef<[number,number,number]>(targetRgb(orbHue, isDark));
-  const targetRef      = useRef<[number,number,number]>(targetRgb(orbHue, isDark));
-  const currentLineRgb = useRef<[number,number,number]>(lineTargetRgb(orbHue, isDark));
-  const lineTargetRef  = useRef<[number,number,number]>(lineTargetRgb(orbHue, isDark));
-  const rafRef         = useRef<number>(0);
-
-  // smooth lerp loop
-  const startLerp = useCallback(() => {
-    cancelAnimationFrame(rafRef.current);
-    const tick = () => {
-      const cur = currentRgb.current;
-      const tgt = targetRef.current;
-      const next = lerpRgb(cur, tgt, 0.035) as [number,number,number];
-      const diff = Math.abs(next[0]-tgt[0]) + Math.abs(next[1]-tgt[1]) + Math.abs(next[2]-tgt[2]);
-      currentRgb.current = next;
-
-      const curL = currentLineRgb.current;
-      const tgtL = lineTargetRef.current;
-      const nextL = lerpRgb(curL, tgtL, 0.035) as [number,number,number];
-      currentLineRgb.current = nextL;
-
-      if (effectRef.current) {
-        effectRef.current.setOptions({ color: rgbToHex(...next), lineColor: rgbToHex(...nextL) });
-      }
-      if (diff > 0.001) rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  }, []);
-
-  // init Vanta once
-  useEffect(() => {
-    const loadScript = (src: string) =>
-      new Promise<void>((resolve, reject) => {
-        if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-        const s = document.createElement("script");
-        s.src = src; s.onload = () => resolve(); s.onerror = reject;
-        document.head.appendChild(s);
-      });
-
-    let cancelled = false;
-
-    const init = async () => {
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js");
-      await loadScript("https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.net.min.js");
-      if (cancelled || !vantaRef.current || !(window as any).VANTA) return;
-
-      const initRgb  = targetRgb(orbHue, isDark);
-      const initLine = lineTargetRgb(orbHue, isDark);
-      currentRgb.current     = initRgb;
-      targetRef.current      = initRgb;
-      currentLineRgb.current = initLine;
-      lineTargetRef.current  = initLine;
-
-      effectRef.current = (window as any).VANTA.NET({
-        el: vantaRef.current,
-        mouseControls: true, touchControls: true, gyroControls: false,
-        minHeight: 200, minWidth: 200, scale: 1.0, scaleMobile: 1.0,
-        color: rgbToHex(...initRgb),
-        lineColor: rgbToHex(...initLine),
-        backgroundColor: isDark ? 0x07080f : 0xf5f4fb,
-        points: isDark ? 5.0 : 7.0,
-        maxDistance: isDark ? 24.0 : 20.0,
-        spacing: isDark ? 20.0 : 16.0,
-      });
-      readyRef.current = true;
-      // Re-assert colors immediately after init — Vanta can silently overwrite
-      // lineColor with its own default during THREE scene setup
-      effectRef.current.setOptions({
-        color:     rgbToHex(...initRgb),
-        lineColor: rgbToHex(...initLine),
-      });
-      setVisible(true);
-    };
-
-    init().catch(console.error);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafRef.current);
-      if (effectRef.current) { effectRef.current.destroy(); effectRef.current = null; }
-      readyRef.current = false;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // animate toward new target when orbHue or theme changes
-  useEffect(() => {
-    if (!readyRef.current) return;
-    targetRef.current     = targetRgb(orbHue, isDark);
-    lineTargetRef.current = lineTargetRgb(orbHue, isDark);
-    startLerp();
-  }, [orbHue, isDark, startLerp]);
-
-  // instantly swap bg color on theme change — also re-assert lineColor so
-  // Vanta doesn't silently reset it to its internal default after setOptions
-  useEffect(() => {
-    if (!readyRef.current || !effectRef.current) return;
-    effectRef.current.setOptions({
-      backgroundColor: isDark ? 0x07080f : 0xf5f4fb,
-      color:     rgbToHex(...currentRgb.current),
-      lineColor: rgbToHex(...currentLineRgb.current),
-    });
-  }, [isDark]);
-
-  return (
-    <div
-      ref={vantaRef}
-      style={{
-        position: "fixed", inset: 0, zIndex: 0,
-        opacity: visible ? 1 : 0,
-        transition: "opacity 0.8s ease",
-        WebkitMaskImage:
-          "linear-gradient(to right, black 0%, black 18%, transparent 38%, transparent 62%, black 82%, black 100%)",
-        maskImage:
-          "linear-gradient(to right, black 0%, black 18%, transparent 38%, transparent 62%, black 82%, black 100%)",
-        pointerEvents: "none",
-      }}
-    />
-  );
-};
+import { useTranslation } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { PhoneOff, Mic, MicOff, Volume2, VolumeX, ChevronDown, X } from "lucide-react";
+import LangToggle from "@/components/LangToggle";
 import Orb from "../components/Orb";
 import ThemeToggle from "../components/ThemeToggle";
+import BackgroundManager from "../components/BackgroundManager";
 
 // ── API base (same helper as Chat.tsx) ───────────────────────────────────────
 const API =
@@ -291,18 +123,6 @@ function stripMarkdown(text: string): string {
     .trim();
 }
 
-// ── Status labels ─────────────────────────────────────────────────────────────
-const STATE_LABEL: Record<CallState, string> = {
-  idle:         "Ready",
-  connecting:   "Connecting…",
-  listening:    "Listening…",
-  detecting:    "Hearing you…",
-  transcribing: "Understanding…",
-  thinking:     "Thinking…",
-  speaking:     "Speaking…",
-  ended:        "Call ended",
-};
-
 const STATE_COLOR: Record<CallState, string> = {
   idle:         "text-zinc-400",
   connecting:   "text-amber-400",
@@ -314,8 +134,24 @@ const STATE_COLOR: Record<CallState, string> = {
   ended:        "text-zinc-500",
 };
 
+function getStateBg(callState: CallState, isDark: boolean): string {
+  const hue =
+    callState === "speaking"    ? 0 :
+    callState === "thinking"    ? 40 :
+    callState === "transcribing"? 40 :
+    callState === "detecting"   ? 195 :
+    callState === "listening"   ? 160 :
+    callState === "connecting"  ? 210 :
+    null;
+  if (hue === null) return isDark ? "#07080f" : "#f5f4fb";
+  const sat = isDark ? 10 : 18;
+  const light = isDark ? 2.5 : 96;
+  return `hsl(${hue}, ${sat}%, ${light}%)`;
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 const CallPage: React.FC = () => {
+  const { t } = useTranslation();
   const navigate   = useNavigate();
   const location   = useLocation();
   const locState   = (location.state ?? {}) as { sessionId?: string; convId?: string };
@@ -383,6 +219,10 @@ const CallPage: React.FC = () => {
   const durationTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
   const silenceWarnShownRef = useRef(false);
 
+  // Unlock audio on first user gesture to satisfy browser autoplay policy
+  const beepAudioRef    = useRef<HTMLAudioElement | null>(null);
+  const audioUnlocked   = useRef(false);
+
   // Keep refs in sync with state
   useEffect(() => { stateRef.current   = callState; }, [callState]);
   useEffect(() => { mutedRef.current   = muted;     }, [muted]);
@@ -415,6 +255,24 @@ const CallPage: React.FC = () => {
   function addTurn(role: "user" | "assistant", content: string) {
     setTurns(prev => [...prev, { role, content, id: uuid4() }]);
   }
+
+  // Create + unlock audio on first user gesture to satisfy browser autoplay policy
+  const ensureAudio = useCallback(() => {
+    if (beepAudioRef.current) return beepAudioRef.current;
+    const audio = new Audio("/beep.wav");
+    audio.preload = "auto";
+    beepAudioRef.current = audio;
+    if (!audioUnlocked.current) {
+      audio.volume = 0;
+      audio.play().then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.volume = 1;
+        audioUnlocked.current = true;
+      }).catch(() => {});
+    }
+    return audio;
+  }, []);
 
   // ── VAD loop (runs on animationFrame while LISTENING or DETECTING) ─────────
   const startVAD = useCallback(() => {
@@ -771,7 +629,10 @@ const CallPage: React.FC = () => {
         body:    JSON.stringify({ text: ttsText, voice: selectedVoice }),
         signal:  ttsAbortRef.current.signal,
       });
-      if (!ttsRes.ok) throw new Error("TTS failed");
+      if (!ttsRes.ok) {
+        const errBody = await ttsRes.text().catch(() => "");
+        throw new Error(`TTS failed (${ttsRes.status}): ${errBody}`);
+      }
       const ttsBytes = await ttsRes.arrayBuffer();
       if (!ttsBytes.byteLength || stateRef.current === "ended") return;
 
@@ -952,10 +813,20 @@ const CallPage: React.FC = () => {
     if (stateRef.current === "ended") return;
 
     const stream = streamRef.current;
-    if (!stream) return;
+    if (!stream) {
+      console.warn("[CallPage] startListening: no mic stream available");
+      return;
+    }
 
-    const mime     = mimeRef.current;
-    const recorder = new MediaRecorder(stream, { mimeType: mime });
+    const mime = mimeRef.current;
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: mime });
+    } catch (err) {
+      console.error("[CallPage] MediaRecorder constructor failed:", err);
+      setError(t("call.recording_not_supported"));
+      return;
+    }
     recorderRef.current = recorder;
     // Cleared AFTER assigning recorderRef so any stale ondataavailable firing
     // between here and recorder.start() is either ref-guarded or immediately flushed.
@@ -974,7 +845,13 @@ const CallPage: React.FC = () => {
       processBlob(blob);
     };
 
-    recorder.start(100);
+    try {
+      recorder.start(100);
+    } catch (err) {
+      console.error("[CallPage] MediaRecorder.start failed:", err);
+      setError(t("call.could_not_start_recording"));
+      return;
+    }
     setState("listening");
     startVAD();
   }, [processBlob, startVAD]);
@@ -985,6 +862,7 @@ const CallPage: React.FC = () => {
 
   // ── Start the call ─────────────────────────────────────────────────────────
   const startCall = useCallback(async () => {
+    ensureAudio();
     setState("connecting");
     setError(null);
     setTurns([]);
@@ -1025,10 +903,11 @@ const CallPage: React.FC = () => {
       startListening();
 
     } catch (err: any) {
+      console.error("[CallPage] startCall error:", err?.message ?? err);
       setState("idle");
-      setError(err?.message ?? "Microphone access denied");
+      setError(err?.message ?? t("call.mic_access_denied"));
     }
-  }, [startListening]);
+  }, [ensureAudio, startListening]);
 
   // ── End the call ───────────────────────────────────────────────────────────
   const endCall = useCallback(() => {
@@ -1103,14 +982,14 @@ const CallPage: React.FC = () => {
   return (
     <motion.div
       className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden"
-      style={{ background: isDark ? "#07080f" : "#f5f4fb", transition: "background 0.15s ease" }}
+      style={{ background: getStateBg(callState, isDark), transition: "background 0.6s ease" }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.4, ease: "easeOut" }}
     >
 
-      {/* ── Vanta NET background — side-masked ── */}
-      <VantaBackground isDark={isDark} orbHue={orbHue} />
+      {/* ── Line waves background ── */}
+      <BackgroundManager />
 
       {/* ── Silence warning banner ── */}
       <AnimatePresence>
@@ -1124,7 +1003,7 @@ const CallPage: React.FC = () => {
           >
             <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-950 border border-red-500/50 text-red-400 text-xs font-medium shadow-sm">
               <span>😢</span>
-              <span>We're having trouble hearing you — check your mic is connected and unmuted.</span>
+              <span>{t("call.silence_warning")}</span>
               <button onClick={() => { silenceWarnShownRef.current = false; setShowSilenceWarning(false); }} className="ml-1 hover:text-red-300 transition-colors">
                 <X className="h-3 w-3" />
               </button>
@@ -1140,7 +1019,7 @@ const CallPage: React.FC = () => {
           className="flex items-center gap-1.5 text-foreground/30 hover:text-foreground/70 text-xs transition-colors"
         >
           <span className="text-base leading-none">←</span>
-          <span>Back</span>
+          <span>{t("call.back")}</span>
         </button>
 
         <div className="flex items-center gap-3">
@@ -1150,6 +1029,7 @@ const CallPage: React.FC = () => {
               {fmt(callDuration)}
             </span>
           )}
+          <LangToggle />
           <ThemeToggle />
         </div>
 
@@ -1214,7 +1094,7 @@ const CallPage: React.FC = () => {
 
         {/* Agent name + state badge */}
         <div className="flex flex-col items-center gap-2">
-          <h1 className="text-foreground/90 font-semibold text-xl tracking-tight">Bimlo Copilot</h1>
+          <h1 className="text-foreground/90 font-semibold text-xl tracking-tight">{t("call.title")}</h1>
           <motion.div
             key={callState}
             initial={{ opacity: 0, y: 4 }}
@@ -1239,7 +1119,7 @@ const CallPage: React.FC = () => {
                   ? "text-foreground/30 border-foreground/8 bg-foreground/5"
                   : "text-foreground/50 border-foreground/15 bg-foreground/5"
             }`}>
-              {STATE_LABEL[callState]}
+              {t("call.state_" + callState)}
             </span>
           </motion.div>
         </div>
@@ -1294,7 +1174,7 @@ const CallPage: React.FC = () => {
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8, transition: { duration: 0.2 } }}
                     transition={{ duration: 0.2 }}
-                    className="text-sm font-light text-blue-400/80 text-center leading-relaxed px-2"
+                    className={`text-sm font-light text-center leading-relaxed px-2 ${isDark ? "text-blue-400/80" : "text-blue-700"}`}
                   >
                     <AnimatePresence mode="popLayout">
                       {subtitleWords.map((word, i) => (
@@ -1352,7 +1232,7 @@ const CallPage: React.FC = () => {
                 }`}
               >
                 {muted ? <MicOff className="h-4 w-4 mb-0.5" /> : <Mic className="h-4 w-4 mb-0.5" />}
-                {muted ? "Unmute" : "Mute"}
+                {muted ? t("call.unmute") : t("call.mute")}
               </motion.button>
             )}
           </AnimatePresence>
@@ -1407,7 +1287,7 @@ const CallPage: React.FC = () => {
                 }`}
               >
                 {speakerOff ? <VolumeX className="h-4 w-4 mb-0.5" /> : <Volume2 className="h-4 w-4 mb-0.5" />}
-                {speakerOff ? "Muted" : "Speaker"}
+                {speakerOff ? t("call.speaker_off") : t("call.speaker_on")}
               </motion.button>
             )}
           </AnimatePresence>
@@ -1415,10 +1295,10 @@ const CallPage: React.FC = () => {
 
         <p className="text-foreground/55 text-[13px] text-center mt-4 tracking-wide">
           {callState === "idle" || callState === "ended"
-            ? "Tap to start · speak naturally"
+            ? t("call.hint_start")
             : muted
-            ? "🎙️ Mic muted · tap to unmute"
-            : "Tap to end call"}
+            ? t("call.hint_muted")
+            : t("call.hint_end")}
         </p>
 
         {/* ── Voice picker — bottom of page, never overlaps orb ── */}
@@ -1427,7 +1307,7 @@ const CallPage: React.FC = () => {
             onClick={() => setShowVoicePicker(v => !v)}
             className="flex items-center gap-1.5 text-xs text-foreground/30 hover:text-foreground/60 transition-colors capitalize tracking-wide"
           >
-            <span>Voice · {selectedVoice}</span>
+            <span>{t("call.voice_picker_label")} · {selectedVoice}</span>
             <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showVoicePicker ? "rotate-180" : ""}`} />
           </button>
           <AnimatePresence>
@@ -1440,12 +1320,12 @@ const CallPage: React.FC = () => {
                 className="absolute bottom-8 bg-background/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl z-50 overflow-hidden w-48"
               >
                 {[
-                  { id: "hannah", label: "Hannah", hint: "Warm, natural" },
-                  { id: "diana",  label: "Diana",  hint: "Clear, professional" },
-                  { id: "autumn", label: "Autumn", hint: "Soft, calm" },
-                  { id: "austin", label: "Austin", hint: "Male, friendly" },
-                  { id: "daniel", label: "Daniel", hint: "Male, clear" },
-                  { id: "troy",   label: "Troy",   hint: "Male, deep" },
+                  { id: "hannah", label: "Hannah", hintKey: "call.voice_hannah" },
+                  { id: "diana",  label: "Diana",  hintKey: "call.voice_diana" },
+                  { id: "autumn", label: "Autumn", hintKey: "call.voice_autumn" },
+                  { id: "austin", label: "Austin", hintKey: "call.voice_austin" },
+                  { id: "daniel", label: "Daniel", hintKey: "call.voice_daniel" },
+                  { id: "troy",   label: "Troy",   hintKey: "call.voice_troy" },
                 ].map(v => (
                   <button
                     key={v.id}
@@ -1457,7 +1337,7 @@ const CallPage: React.FC = () => {
                     }`}
                   >
                     <span className="font-medium">{v.label}</span>
-                    <span className="ml-2 text-foreground/25">{v.hint}</span>
+                    <span className="ml-2 text-foreground/25">{t(v.hintKey)}</span>
                   </button>
                 ))}
               </motion.div>

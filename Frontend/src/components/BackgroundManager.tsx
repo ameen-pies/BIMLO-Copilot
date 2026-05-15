@@ -31,7 +31,7 @@ const BackgroundManager = () => {
       canvas.dispatchEvent(new MouseEvent('mousemove', {
         clientX: e.clientX,
         clientY: e.clientY,
-        bubbles: true,
+        bubbles: false,
       }));
     };
     window.addEventListener('mousemove', forwardMove);
@@ -54,6 +54,8 @@ const BackgroundManager = () => {
         willChange: 'opacity',
         opacity: opacity * 0.8,
         transition: 'opacity 0.8s ease-out',
+        maskImage: 'radial-gradient(ellipse 65% 55% at 50% 45%, transparent 0%, black 55%, black 100%)',
+        WebkitMaskImage: 'radial-gradient(ellipse 65% 55% at 50% 45%, transparent 0%, black 55%, black 100%)',
       }}
     >
       {/* Softens center behind hero text */}

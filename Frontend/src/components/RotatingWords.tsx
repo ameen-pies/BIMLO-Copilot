@@ -1,37 +1,38 @@
 import { useState, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-
-const words = [
-  "fiber networks",
-  "5G infrastructure",
-  "optical deployments",
-  "telecom projects",
-  "network planning",
-];
+import { useTranslation } from "react-i18next";
 
 const RotatingWords = () => {
+  const { t, i18n } = useTranslation();
+  const words = t("landing.rotating_words", { returnObjects: true }) as unknown as string[];
+
   const [index, setIndex] = useState(0);
   const [width, setWidth] = useState<number | "auto">("auto");
   const measureRefs = useRef<(HTMLSpanElement | null)[]>([]);
 
   useEffect(() => {
-    // Measure all words after mount and pick widest
+    setIndex(0);
+    setWidth("auto");
+  }, [i18n.language]);
+
+  useEffect(() => {
     const widths = measureRefs.current.map((el) => el?.offsetWidth ?? 0);
-    // Set initial width to current word's width
     if (widths[0]) setWidth(widths[0] + 8);
-  }, []);
+  }, [i18n.language]);
 
   useEffect(() => {
     const interval = setInterval(() => {
       setIndex((prev) => (prev + 1) % words.length);
     }, 2500);
     return () => clearInterval(interval);
-  }, []);
+  }, [words.length]);
 
   useEffect(() => {
     const el = measureRefs.current[index];
     if (el) setWidth(el.offsetWidth + 8); // +8px buffer prevents clipping
   }, [index]);
+
+  if (!words || words.length === 0) return null;
 
   return (
     <motion.span

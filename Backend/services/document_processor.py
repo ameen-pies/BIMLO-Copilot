@@ -613,36 +613,45 @@ class DocumentProcessor:
 
     def _create_chunks(self, text: str, metadata: Dict) -> List[Dict]:
         """
-        Split text into overlapping chunks, preferring sentence boundaries.
+        Split text into overlapping chunks, preferring structure boundaries.
+
+        Uses RecursiveCharacterTextSplitter with markdown-aware separators
+        so section headings, tables, and paragraphs are preserved as chunk
+        boundaries for better retrieval quality.
 
         [IMAGE ...] and [TABLE ...] blocks are treated as regular text so
         image descriptions and table content flow naturally into chunks
         alongside the surrounding body text.
         """
-        chunks: List[Dict] = []
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
-            return chunks
+            return []
 
-        start     = 0
-        chunk_id  = 0
-        while start < len(text):
-            end = start + self.chunk_size
-            if end < len(text):
-                # Prefer breaking at sentence boundary within a small lookahead window
-                boundary = text.rfind(".", end, min(end + 100, len(text)))
-                if boundary != -1:
-                    end = boundary + 1
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=[
+                "\n## ",       # headings markdown
+                "\n# ",
+                "\n\n",        # paragraphs
+                "\n[TABLE",    # extracted tables
+                "\n",
+                ". ",
+                " ",
+            ],
+        )
+        split_texts = splitter.split_text(text)
 
-            chunk_text = text[start:end].strip()
-            if chunk_text:
+        chunks: List[Dict] = []
+        for chunk_id, chunk_text in enumerate(split_texts):
+            ct = chunk_text.strip()
+            if ct:
                 chunks.append({
-                    "text":     chunk_text,
+                    "text":     ct,
                     "chunk_id": chunk_id,
                     "metadata": metadata.copy(),
                 })
-                chunk_id += 1
-
-            start = end - self.chunk_overlap if end < len(text) else len(text)
 
         return chunks

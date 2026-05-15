@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, Link } from "react-router-dom";
 import {
   Shield, Users, Activity, Trash2, Edit3, Check, X,
@@ -613,6 +614,7 @@ const S = {
 // ─── News Pipeline Card ───────────────────────────────────────────────────────
 
 function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; onTrigger: () => Promise<void> }) {
+  const { t } = useTranslation();
   const [now, setNow] = useState(Date.now());
   const [triggering, setTriggering] = useState(false);
   const [triggered, setTriggered]   = useState<"success" | "error" | null>(null);
@@ -646,7 +648,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
   const msLeft = nextRun ? Math.max(0, nextRun - now) : null;
   const countdown = (() => {
     if (msLeft === null) return "—";
-    if (msLeft === 0) return "Running soon";
+    if (msLeft === 0) return t("admin.running_soon");
     const d = Math.floor(msLeft / 86400000);
     const h = Math.floor((msLeft % 86400000) / 3600000);
     const m = Math.floor((msLeft % 3600000) / 60000);
@@ -659,7 +661,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
   const totalArticles = np?.total_articles ?? (np?.total_items) ?? 0;
   const totalPages = np?.total_pages ?? 0;
   const statusColor = isRunning ? "#f59e0b" : np?.available ? "#22c55e" : "#6b7280";
-  const statusLabel = isRunning ? "Running" : np?.available ? (np?.status === "ok" ? "Ready" : np?.status ?? "Ready") : "Unavailable";
+  const statusLabel = isRunning ? t("admin.running") : np?.available ? (np?.status === "ok" ? t("admin.ready") : np?.status ?? t("admin.ready")) : t("admin.unavailable");
 
   return (
     <div style={{ ...S.card, padding: "18px 20px" }}>
@@ -668,7 +670,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
           <div style={{ width: 28, height: 28, borderRadius: 7, background: "#f59e0b15", border: "1px solid #f59e0b25", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Clock size={13} color="#f59e0b" />
           </div>
-          <span style={{ fontSize: 12, fontWeight: 700, color: "hsl(var(--foreground))", textTransform: "uppercase", letterSpacing: "0.06em" }}>News Pipeline</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "hsl(var(--foreground))", textTransform: "uppercase", letterSpacing: "0.06em" }}>{t("admin.news_pipeline")}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, animation: isRunning ? "pulse 1s infinite" : "none" }} />
@@ -679,8 +681,8 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
       {/* Stats row */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
         {[
-          { label: "Articles Cached", value: totalArticles.toLocaleString(), color: "#3b82f6" },
-          { label: "Pages",           value: totalPages.toString(),           color: "#a855f7" },
+          { label: t("admin.articles_cached"), value: totalArticles.toLocaleString(), color: "#3b82f6" },
+          { label: t("admin.pages"),           value: totalPages.toString(),           color: "#a855f7" },
         ].map(s => (
           <div key={s.label} style={{ background: "hsl(var(--muted)/0.3)", borderRadius: 8, padding: "10px 12px", border: "1px solid hsl(var(--border))" }}>
             <div style={{ fontSize: 18, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value || "—"}</div>
@@ -692,11 +694,11 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
       {/* Timeline */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
-          <span style={{ color: "hsl(var(--muted-foreground))" }}>Last run</span>
-          <span style={{ color: "hsl(var(--foreground))", fontWeight: 600 }}>{lastRun ? timeAgo(np?.last_run_at!) : "Never"}</span>
+          <span style={{ color: "hsl(var(--muted-foreground))" }}>{t("admin.last_run")}</span>
+          <span style={{ color: "hsl(var(--foreground))", fontWeight: 600 }}>{lastRun ? timeAgo(np?.last_run_at!) : t("admin.never")}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
-          <span style={{ color: "hsl(var(--muted-foreground))" }}>Next run in</span>
+          <span style={{ color: "hsl(var(--muted-foreground))" }}>{t("admin.next_run_in")}</span>
           <span style={{ color: msLeft !== null && msLeft < 3600000 ? "#f59e0b" : "hsl(var(--foreground))", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{countdown}</span>
         </div>
         {/* Progress bar */}
@@ -748,22 +750,22 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
         {triggering ? (
           <>
             <RefreshCw size={11} style={{ animation: "spin 0.7s linear infinite" }} />
-            Triggering…
+            {t("admin.triggering")}
           </>
         ) : triggered === "success" ? (
           <>
             <CheckCircle2 size={11} />
-            Pipeline triggered!
+            {t("admin.pipeline_triggered")}
           </>
         ) : triggered === "error" ? (
           <>
             <XCircle size={11} />
-            Trigger failed
+            {t("admin.trigger_failed")}
           </>
         ) : (
           <>
             <RefreshCw size={11} />
-            Trigger Manual Refresh
+            {t("admin.trigger_manual")}
           </>
         )}
       </button>
@@ -772,6 +774,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
 }
 
 export default function AdminPage() {
+  const { t } = useTranslation();
   const { currentUser, logout, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
@@ -1053,7 +1056,7 @@ export default function AdminPage() {
       <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
           <RefreshCw size={24} style={{ animation: "spin 0.8s linear infinite", color: "hsl(var(--muted-foreground))" }} />
-          <span style={{ fontSize: 13, color: "hsl(var(--muted-foreground))" }}>Loading…</span>
+          <span style={{ fontSize: 13, color: "hsl(var(--muted-foreground))" }}>{t("admin.loading")}</span>
         </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
@@ -1069,13 +1072,13 @@ export default function AdminPage() {
       <div style={S.header}>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <Link to="/" style={{ display: "flex", alignItems: "center", gap: 6, color: "hsl(var(--muted-foreground))", textDecoration: "none", fontSize: 13 }}>
-            <ArrowLeft size={14} /> Home
+            <ArrowLeft size={14} /> {t("admin.home")}
           </Link>
           <div style={{ width: 1, height: 18, background: "hsl(var(--border))" }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* Platform logo */}
             <img src="/favicon.svg" alt="Bimlo" style={{ width: 26, height: 26, borderRadius: 6 }} />
-            <span style={{ fontSize: 15, fontWeight: 800, color: "hsl(var(--foreground))" }}>Admin Dashboard</span>
+            <span style={{ fontSize: 15, fontWeight: 800, color: "hsl(var(--foreground))" }}>{t("admin.title")}</span>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1090,7 +1093,7 @@ export default function AdminPage() {
               <Circle size={6} fill="#22c55e" color="#22c55e" />
               <span style={{ color: "#22c55e", fontWeight: 700 }}>{onlineCount}</span>
             </div>
-            <span style={{ color: "hsl(var(--muted-foreground))" }}>online</span>
+            <span style={{ color: "hsl(var(--muted-foreground))" }}>{t("admin.online")}</span>
           </div>
 
           {/* Current admin avatar */}
@@ -1115,7 +1118,7 @@ export default function AdminPage() {
           )}
 
           {/* Dark mode toggle */}
-          <button onClick={toggleDark} title="Toggle theme" style={{ ...S.btn("ghost"), padding: "6px 8px" }}>
+          <button onClick={toggleDark} title={t("admin.toggle_theme")} style={{ ...S.btn("ghost"), padding: "6px 8px" }}>
             {dark ? <Sun size={14} /> : <Moon size={14} />}
           </button>
 
@@ -1123,7 +1126,7 @@ export default function AdminPage() {
             <RefreshCw size={13} />
           </button>
           <button onClick={logout} style={S.btn("ghost")}>
-            <LogOut size={13} /> Logout
+            <LogOut size={13} /> {t("admin.logout")}
           </button>
         </div>
       </div>
@@ -1132,11 +1135,11 @@ export default function AdminPage() {
 
         {/* ── KPIs ── */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 24 }}>
-          <KpiCard icon={Users}       label="Total Users"  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" sparkData={[2,3,3,4,5,5,6,7,7,stats?.total_users ?? 7]} />
-          <KpiCard icon={Wifi}        label="Active (1h)"  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" sparkData={[1,0,2,1,3,2,stats?.active_1h ?? 2]} />
-          <KpiCard icon={Activity}    label="Active (24h)" value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" sparkData={[1,2,1,3,2,4,stats?.active_24h ?? 2]} />
-          <KpiCard icon={TrendingUp}  label="New (7d)"     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats?.new_users_7d ? 12 : undefined} sparkData={activityBars.counts} />
-          <KpiCard icon={MessageSquare} label="Conversations" value={stats?.total_conversations ?? "—"} sub="all sessions" accent="#f59e0b" sparkData={convSparkData} />
+          <KpiCard icon={Users}       label={t("admin.kpi_total_users")}  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" sparkData={[2,3,3,4,5,5,6,7,7,stats?.total_users ?? 7]} />
+          <KpiCard icon={Wifi}        label={t("admin.kpi_active_1h")}  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" sparkData={[1,0,2,1,3,2,stats?.active_1h ?? 2]} />
+          <KpiCard icon={Activity}    label={t("admin.kpi_active_24h")} value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" sparkData={[1,2,1,3,2,4,stats?.active_24h ?? 2]} />
+          <KpiCard icon={TrendingUp}  label={t("admin.kpi_new_7d")}     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats?.new_users_7d ? 12 : undefined} sparkData={activityBars.counts} />
+          <KpiCard icon={MessageSquare} label={t("admin.kpi_conversations")} value={stats?.total_conversations ?? "—"} sub="all sessions" accent="#f59e0b" sparkData={convSparkData} />
         </div>
 
         {/* ── Activity + Top Users row ── */}
@@ -1145,10 +1148,10 @@ export default function AdminPage() {
           <div style={{ ...S.card, padding: "18px 20px", display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexShrink: 0 }}>
               <div>
-                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>Signups — last 7 days</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>{t("admin.signups_7d")}</div>
                 <div style={{ fontSize: 22, fontWeight: 800, color: "hsl(var(--foreground))" }}>
                   {activityBars.counts.reduce((a, b) => a + b, 0)}
-                  <span style={{ fontSize: 12, fontWeight: 500, color: "hsl(var(--muted-foreground))", marginLeft: 6 }}>new users</span>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: "hsl(var(--muted-foreground))", marginLeft: 6 }}>{t("admin.new_users")}</span>
                 </div>
               </div>
               <BarChart3 size={18} color="#a855f7" />
@@ -1158,8 +1161,7 @@ export default function AdminPage() {
 
           {/* News Pipeline Status */}
           <NewsPipelineCard health={health} onTrigger={async () => {
-            const { token } = JSON.parse(localStorage.getItem("bimlo_auth") || "{}");
-            const res = await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(token || "") });
+            const res = await fetch(`${API}/api/news/trigger`, { method: "POST", headers: authHeaders(currentUser?.token || ""), credentials: "include" });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             // Reload health quickly so the Running state is reflected immediately,
             // then the isPipelineRunning effect takes over and polls every 5s.
@@ -1170,12 +1172,12 @@ export default function AdminPage() {
 
         {/* ── Tabs ── */}
         <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
-          {(["users", "health", "logs", "settings"] as const).map(t => (
-            <button key={t} onClick={() => setTab(t)} style={S.tab(tab === t)}>
-              {t === "users"   && <><Users size={13} /> Users</>}
-              {t === "health"  && <><Server size={13} /> System Health</>}
-              {t === "logs"    && <><Terminal size={13} /> Live Logs</>}
-              {t === "settings"&& <><Shield size={13} /> My Account</>}
+          {(["users", "health", "logs", "settings"] as const).map(tabKey => (
+            <button key={tabKey} onClick={() => setTab(tabKey)} style={S.tab(tab === tabKey)}>
+              {tabKey === "users"   && <><Users size={13} /> {t("admin.tab_users")}</>}
+              {tabKey === "health"  && <><Server size={13} /> {t("admin.tab_health")}</>}
+              {tabKey === "logs"    && <><Terminal size={13} /> {t("admin.tab_logs")}</>}
+              {tabKey === "settings"&& <><Shield size={13} /> {t("admin.tab_settings")}</>}
             </button>
           ))}
         </div>
@@ -1186,22 +1188,22 @@ export default function AdminPage() {
             <div style={{ padding: "16px 20px", borderBottom: "1px solid hsl(var(--border))", display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
                 <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "hsl(var(--muted-foreground))" }} />
-                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users…" style={{ ...S.input, paddingLeft: 30 }} />
+                <input value={search} onChange={e => setSearch(e.target.value)} placeholder={t("admin.search_users")} style={{ ...S.input, paddingLeft: 30 }} />
               </div>
               <span style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", marginLeft: "auto" }}>
                 {filtered.length} user{filtered.length !== 1 ? "s" : ""}
               </span>
               <button onClick={() => { setEmailTarget(null); setEmailSubject(""); setEmailBody(""); setEmailResult(null); setEmailModal(true); }}
                 style={{ ...S.btn("ghost"), gap: 6, border: "1px solid hsl(var(--border))" }}>
-                <Mail size={12} /> Broadcast
+                <Mail size={12} /> {t("admin.broadcast_btn")}
               </button>
             </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid hsl(var(--border))" }}>
-                    {["User", "Email", "Role", "Status", "Conversations", "Documents", "Joined", "Last seen", "Actions"].map(h => (
-                      <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", letterSpacing: "0.05em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
+                    {[t("admin.col_user"), t("admin.col_email"), t("admin.col_role"), t("admin.col_status"), t("admin.col_conversations"), t("admin.col_documents"), t("admin.col_joined"), t("admin.col_last_seen"), t("admin.col_actions")].map((h, i) => (
+                      <th key={i} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", letterSpacing: "0.05em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -1211,7 +1213,7 @@ export default function AdminPage() {
                       <RefreshCw size={18} style={{ animation: "spin 0.8s linear infinite", margin: "0 auto" }} />
                     </td></tr>
                   ) : filtered.length === 0 ? (
-                    <tr><td colSpan={9} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))", fontSize: 13 }}>No users found</td></tr>
+                    <tr><td colSpan={9} style={{ padding: 40, textAlign: "center", color: "hsl(var(--muted-foreground))", fontSize: 13 }}>{t("admin.no_users_found")}</td></tr>
                   ) : filtered.map(u => {
                     const online = isOnline(u.last_seen);
                     const isMe   = u.user_id === currentUser?.user_id;
@@ -1706,22 +1708,22 @@ export default function AdminPage() {
                   </div>
                 )}
                 <div>
-                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>My Admin Credentials</h3>
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>{t("admin.my_credentials")}</h3>
                   <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>{currentUser.email}</div>
                 </div>
               </div>
               <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Username</label>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.username")}</label>
                   <input value={selfUsername} onChange={e => setSelfUsername(e.target.value)} style={S.input} />
                 </div>
                 <div>
-                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Email</label>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.email")}</label>
                   <input value={selfEmail} onChange={e => setSelfEmail(e.target.value)} type="email" style={S.input} />
                 </div>
                 <div>
                   <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>
-                    New Password <span style={{ fontWeight: 400 }}>(leave blank to keep)</span>
+                    {t("admin.new_password")} <span style={{ fontWeight: 400 }}>{t("admin.leave_blank")}</span>
                   </label>
                   <div style={{ position: "relative" }}>
                     <input value={selfPassword} onChange={e => setSelfPassword(e.target.value)} type={showPw ? "text" : "password"} placeholder="••••••••" style={{ ...S.input, paddingRight: 36 }} />
@@ -1732,7 +1734,7 @@ export default function AdminPage() {
                 </div>
                 <button onClick={saveSelf} disabled={selfSaving} style={{ ...S.btn("primary"), width: "fit-content", opacity: selfSaving ? 0.6 : 1 }}>
                   {selfSaving ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Check size={13} />}
-                  Save Changes
+                  {t("admin.save_changes")}
                 </button>
                 {selfMsg && (
                   <div style={{ fontSize: 12, color: selfMsg.includes("fail") ? "#ef4444" : "#22c55e", padding: "8px 12px", borderRadius: 8, background: selfMsg.includes("fail") ? "#ef444415" : "#22c55e15" }}>
@@ -1763,21 +1765,21 @@ export default function AdminPage() {
                     : editUser.username[0]?.toUpperCase()
                   }
                 </div>
-                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>Edit — {editUser.username}</h3>
+                <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>{t("admin.edit_user")} — {editUser.username}</h3>
               </div>
               <button onClick={() => setEditUser(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "hsl(var(--muted-foreground))", padding: 4 }}><X size={16} /></button>
             </div>
             <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Username</label>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.username")}</label>
                 <input value={editUsername} onChange={e => setEditUsername(e.target.value)} style={S.input} />
               </div>
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Email</label>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.email")}</label>
                 <input value={editEmail} onChange={e => setEditEmail(e.target.value)} type="email" style={S.input} />
               </div>
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>New Password <span style={{ fontWeight: 400 }}>(leave blank to keep)</span></label>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.new_password")} <span style={{ fontWeight: 400 }}>{t("admin.leave_blank")}</span></label>
                 <div style={{ position: "relative" }}>
                   <input value={editPassword} onChange={e => setEditPassword(e.target.value)} type={showPw ? "text" : "password"} placeholder="••••••••" style={{ ...S.input, paddingRight: 36 }} />
                   <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "hsl(var(--muted-foreground))", padding: 4 }}>
@@ -1786,7 +1788,7 @@ export default function AdminPage() {
                 </div>
               </div>
               <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>Role</label>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 6 }}>{t("admin.role")}</label>
                 <div style={{ display: "flex", gap: 8 }}>
                   {(["user", "admin"] as const).map(r => (
                     <button key={r} onClick={() => setEditRole(r)} style={{
@@ -1803,9 +1805,9 @@ export default function AdminPage() {
               </div>
               <div style={{ display: "flex", gap: 8, paddingTop: 4 }}>
                 <button onClick={saveEdit} disabled={editSaving} style={{ ...S.btn("primary"), flex: 1, justifyContent: "center", opacity: editSaving ? 0.6 : 1 }}>
-                  {editSaving ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Check size={13} />} Save
+                  {editSaving ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Check size={13} />} {t("admin.save")}
                 </button>
-                <button onClick={() => setEditUser(null)} style={{ ...S.btn("ghost"), flex: 1, justifyContent: "center" }}><X size={13} /> Cancel</button>
+                <button onClick={() => setEditUser(null)} style={{ ...S.btn("ghost"), flex: 1, justifyContent: "center" }}><X size={13} /> {t("admin.cancel")}</button>
               </div>
             </div>
           </div>
@@ -1821,16 +1823,16 @@ export default function AdminPage() {
               <div style={{ width: 48, height: 48, borderRadius: "50%", background: "#ef444422", border: "1px solid #ef444440", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <AlertCircle size={22} color="#ef4444" />
               </div>
-              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "hsl(var(--foreground))" }}>Delete User?</h3>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "hsl(var(--foreground))" }}>{t("admin.delete_user_confirm_title")}</h3>
               <p style={{ margin: 0, fontSize: 13, color: "hsl(var(--muted-foreground))" }}>
-                This will permanently delete the user and all their conversations, documents, and data. This cannot be undone.
+                {t("admin.delete_user_confirm_desc")}
               </p>
               <div style={{ display: "flex", gap: 10, width: "100%", marginTop: 4 }}>
                 <button onClick={confirmDelete} disabled={deleting}
                   style={{ ...S.btn("danger"), flex: 1, justifyContent: "center", opacity: deleting ? 0.6 : 1 }}>
-                  {deleting ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Trash2 size={13} />} Delete
+                  {deleting ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} /> : <Trash2 size={13} />} {t("admin.delete")}
                 </button>
-                <button onClick={() => setDeleteConfirm(null)} style={{ ...S.btn("ghost"), flex: 1, justifyContent: "center" }}>Cancel</button>
+                <button onClick={() => setDeleteConfirm(null)} style={{ ...S.btn("ghost"), flex: 1, justifyContent: "center" }}>{t("admin.cancel")}</button>
               </div>
             </div>
           </div>
@@ -1897,7 +1899,7 @@ export default function AdminPage() {
 
               {/* To chip */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>To</label>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>{t("admin.to")}</label>
                 <div style={{
                   display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
                   borderRadius: 9, border: "1px solid hsl(var(--border))",
@@ -1918,7 +1920,7 @@ export default function AdminPage() {
                       <div style={{ width: 22, height: 22, borderRadius: "50%", background: "linear-gradient(135deg,#3b82f6,#7c3aed)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, flexShrink: 0 }}>
                         <Users size={11} color="#fff" />
                       </div>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>All Users</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>{t("admin.all_users")}</span>
                       <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 99, background: "#3b82f618", border: "1px solid #3b82f630", color: "#3b82f6", fontWeight: 700 }}>{users.length}</span>
                     </div>
                   )}
@@ -1927,11 +1929,11 @@ export default function AdminPage() {
 
               {/* Subject */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>Subject</label>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>{t("admin.email_subject")}</label>
                 <input
                   value={emailSubject}
                   onChange={e => setEmailSubject(e.target.value)}
-                  placeholder="Enter subject…"
+                  placeholder={t("admin.email_subject_placeholder")}
                   style={{
                     ...S.input,
                     fontSize: 13, fontWeight: 500,
@@ -1945,11 +1947,11 @@ export default function AdminPage() {
 
               {/* Body */}
               <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>Message</label>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", display: "block", marginBottom: 7, letterSpacing: "0.05em", textTransform: "uppercase" }}>{t("admin.email_message")}</label>
                 <textarea
                   value={emailBody}
                   onChange={e => setEmailBody(e.target.value)}
-                  placeholder="Write your message here…"
+                  placeholder={t("admin.email_message_placeholder")}
                   rows={5}
                   style={{
                     ...S.input, resize: "vertical", lineHeight: 1.7, fontFamily: "inherit",
@@ -1982,10 +1984,10 @@ export default function AdminPage() {
                     ? <RefreshCw size={13} style={{ animation: "spin 0.8s linear infinite" }} />
                     : <Send size={13} />
                   }
-                  {emailSending ? "Sending…" : "Send Message"}
+                  {emailSending ? t("admin.sending") : t("admin.send_message")}
                 </button>
                 <button onClick={() => setEmailModal(false)} style={{ ...S.btn("ghost"), padding: "9px 14px", fontSize: 13 }}>
-                  <X size={13} /> Cancel
+                  <X size={13} /> {t("admin.cancel")}
                 </button>
                 {emailResult && (
                   <div style={{

@@ -40,6 +40,11 @@
 
 /* ── Global page scrollbar ──────────────────────────────────────────────── */
 
+html {
+  overflow-y: scroll;
+  overflow-x: clip;
+  scrollbar-gutter: stable;
+}
 html::-webkit-scrollbar { width: 6px; }
 html::-webkit-scrollbar-track { background: transparent; }
 html::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.15); border-radius: 999px; }

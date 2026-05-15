@@ -89,9 +89,15 @@ export interface HealthResponse {
 
 class APIClient {
   private baseURL: string;
+  private _token: string | null = null;
 
   constructor(baseURL: string = API_BASE_URL) {
     this.baseURL = baseURL;
+  }
+
+  /** Set or clear the auth token (called by AuthContext on login/logout). */
+  setToken(token: string | null) {
+    this._token = token;
   }
 
   /**
@@ -103,19 +109,14 @@ class APIClient {
   ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
 
-    // Attach auth token if available (stored by AuthContext)
-    let token: string | null = null;
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('bimlo_auth');
-        if (stored) token = JSON.parse(stored).token ?? null;
-      } catch { /* ignore parse errors */ }
-    }
-    const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+    const authHeaders: Record<string, string> = this._token
+      ? { Authorization: `Bearer ${this._token}` }
+      : {};
 
     try {
       const response = await fetch(url, {
         ...options,
+        credentials: 'include',
         headers: {
           ...authHeaders,
           ...options.headers,
@@ -281,24 +282,18 @@ class APIClient {
     pendingDocIds?: string[]
   ): Promise<ReadableStream<any>> {
     const url = `${this.baseURL}/query-stream`;
-    let token: string | null = null;
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('bimlo_auth');
-        if (stored) token = JSON.parse(stored).token ?? null;
-      } catch { /* ignore */ }
-    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    if (this._token) {
+      headers['Authorization'] = `Bearer ${this._token}`;
     }
 
     const response = await fetch(url, {
       method: 'POST',
       headers,
+      credentials: 'include',
       body: JSON.stringify({
         query,
         top_k: topK,
@@ -423,15 +418,8 @@ class APIClient {
    */
   async getImageDocument(documentId: string, sessionId: string): Promise<Blob> {
     const url = `${this.baseURL}/documents/${documentId}/image?session_id=${encodeURIComponent(sessionId)}`;
-    let token: string | null = null;
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('bimlo_auth');
-        if (stored) token = JSON.parse(stored).token ?? null;
-      } catch { /* ignore */ }
-    }
-    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-    const response = await fetch(url, { headers });
+    const headers: Record<string, string> = this._token ? { Authorization: `Bearer ${this._token}` } : {};
+    const response = await fetch(url, { headers, credentials: 'include' });
     if (!response.ok) throw new Error(`Image fetch failed: ${response.statusText}`);
     return response.blob();
   }

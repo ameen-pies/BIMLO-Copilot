@@ -2448,14 +2448,11 @@ Explain in {plan.target_language}:"""
             self._emit("image_node", "🖼️", "Describing image with vision AI…")
             print("🔍 image_node: attempting live vision call (placeholder or missing chunks)")
 
-            # Pull raw bytes from DOCUMENT_FILE_CACHE (imported lazily to avoid circular import)
+            # Pull raw bytes from DOCUMENT_FILE_CACHE
             # When multiple images are scoped, attempt a live call for each one.
             _live_chunks: list = []
             try:
-                # Import the cache from main module — it lives in the process globals
-                import sys as _sys
-                _main = _sys.modules.get("main") or _sys.modules.get("__main__")
-                _cache = getattr(_main, "DOCUMENT_FILE_CACHE", {})
+                from core.globals import DOCUMENT_FILE_CACHE as _cache
 
                 # Find image entries scoped to this session
                 all_image_entries = [

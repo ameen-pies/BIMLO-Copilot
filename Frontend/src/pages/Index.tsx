@@ -4,12 +4,14 @@ import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Ca
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
 import RotatingWords from "@/components/RotatingWords";
-import BackgroundManager from "@/components/BackgroundManager";
+import Logo from "@/components/Logo";
+import { ElegantShape } from "@/components/ui/shape-landing-hero";
 import CardSwap, { Card } from "@/components/CardSwap";
 import AuthModal, { AuthUser } from "@/components/AuthModal";
 import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
@@ -95,6 +97,7 @@ const TickerCard = ({ article, onLoginRequired, isLoggedIn }: { article: Article
 
 // ── Trending section ─────────────────────────────────────────────────────────
 const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () => void; isLoggedIn: boolean }) => {
+  const { t } = useTranslation();
   const [articles, setArticles] = useState<Article[]>([]);
   const [loading,  setLoading]  = useState(true);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -129,11 +132,11 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
         custom={0}
       >
         <h2 className="trending-title">
-          Trending on&nbsp;
-          <img src="/favicon.svg" alt="Bimlo" className="trending-logo" />
-          &nbsp;this week
+          {t("landing.trending_title_prefix")}
+          <Logo className="trending-logo" />
+          {t("landing.trending_title_suffix")}
         </h2>
-        <p className="trending-sub">Top stories shaping the telecom industry right now</p>
+        <p className="trending-sub">{t("landing.trending_sub")}</p>
       </motion.div>
 
       {/* ticker */}
@@ -144,7 +147,7 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
           ))}
         </div>
       ) : articles.length === 0 ? (
-        <p className="ticker-empty">Articles are being collected — check back in a few minutes.</p>
+        <p className="ticker-empty">{t("landing.trending_empty")}</p>
       ) : (
         <motion.div
           className="ticker-wrap"
@@ -179,7 +182,7 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
           className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-10 h-12 gap-2"
         >
           <TrendingUp className="h-4 w-4" />
-          Open full industry briefing
+          {t("landing.open_briefing")}
           <ArrowRight className="h-4 w-4" />
         </Button>
       </motion.div>
@@ -191,6 +194,7 @@ const TrendingSection = ({ onLoginRequired, isLoggedIn }: { onLoginRequired: () 
 const API_CONTACT = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 const ContactForm = () => {
+  const { t } = useTranslation();
   const [name,    setName]    = useState("");
   const [email,   setEmail]   = useState("");
   const [subject, setSubject] = useState("");
@@ -234,10 +238,10 @@ const ContactForm = () => {
         display: "flex", alignItems: "center", justifyContent: "center" }}>
         <CheckCircle size={26} color="#22c55e" />
       </div>
-      <h3 className="font-heading text-xl font-bold text-foreground">Message sent!</h3>
-      <p className="text-muted-foreground text-sm max-w-xs">Thanks for reaching out. We'll get back to you as soon as possible.</p>
+      <h3 className="font-heading text-xl font-bold text-foreground">{t("landing.form_success_title")}</h3>
+      <p className="text-muted-foreground text-sm max-w-xs">{t("landing.form_success_desc")}</p>
       <button onClick={() => { setSent(false); setName(""); setEmail(""); setSubject(""); setMessage(""); }}
-        className="text-sm text-primary hover:underline mt-2">Send another message</button>
+        className="text-sm text-primary hover:underline mt-2">{t("landing.form_send_another")}</button>
     </motion.div>
   );
 
@@ -250,27 +254,27 @@ const ContactForm = () => {
       }}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Name</label>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Your name" required style={inputStyle}
+          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("landing.form_name")}</label>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder={t("landing.form_name_placeholder")} required style={inputStyle}
             onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
             onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Email</label>
-          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" required style={inputStyle}
+          <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("landing.form_email")}</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder={t("landing.form_email_placeholder")} required style={inputStyle}
             onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
             onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Subject</label>
-        <input value={subject} onChange={e => setSubject(e.target.value)} placeholder="What's this about?" required style={inputStyle}
+        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("landing.form_subject")}</label>
+        <input value={subject} onChange={e => setSubject(e.target.value)} placeholder={t("landing.form_subject_placeholder")} required style={inputStyle}
           onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
           onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>Message</label>
-        <textarea value={message} onChange={e => setMessage(e.target.value)} placeholder="Tell us more…" required rows={5}
+        <label style={{ fontSize: 11, fontWeight: 700, color: "hsl(var(--muted-foreground))", textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("landing.form_message")}</label>
+        <textarea value={message} onChange={e => setMessage(e.target.value)} placeholder={t("landing.form_message_placeholder")} required rows={5}
           style={{ ...inputStyle, resize: "vertical", lineHeight: 1.7 }}
           onFocus={e => (e.currentTarget.style.borderColor = "hsl(var(--primary))")}
           onBlur={e  => (e.currentTarget.style.borderColor = "hsl(var(--border))")} />
@@ -291,8 +295,8 @@ const ContactForm = () => {
           boxShadow: "0 4px 14px hsl(var(--primary)/0.3)",
         }}>
         {sending
-          ? <><span style={{ width: 14, height: 14, border: "2px solid currentColor", borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite" }} /> Sending…</>
-          : <><Send size={14} /> Send message</>
+          ? <><span style={{ width: 14, height: 14, border: "2px solid currentColor", borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite" }} /> {t("landing.form_sending")}</>
+          : <><Send size={14} /> {t("landing.form_send")}</>
         }
       </button>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
@@ -302,6 +306,7 @@ const ContactForm = () => {
 
 // ── Main page ────────────────────────────────────────────────────────────────
 const Index = () => {
+  const { t } = useTranslation();
   const { isLoggedIn } = useAuth();
   const [showScrollArrow, setShowScrollArrow] = useState(true);
   const [isDark, setIsDark] = useState(() =>
@@ -361,7 +366,7 @@ const Index = () => {
           border-radius:999px; padding:0.25rem 0.75rem; width:fit-content;
         }
 
-        /* ── Ensure all page content sits above BackgroundManager ── */
+        /* ── Ensure all page content sits above geometric background ── */
         .content-above-bg {
           position: relative;
           z-index: 1;
@@ -553,7 +558,63 @@ const Index = () => {
           onSuccess={(user: AuthUser) => { setLoginModalOpen(false); /* handle authed user here */ }}
         />
 
-        <BackgroundManager />
+        {/* Geometric background layer */}
+        <div className="fixed inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
+          <div className={`absolute inset-0 ${isDark
+            ? 'bg-gradient-to-br from-blue-500/[0.06] via-transparent to-indigo-500/[0.06]'
+            : 'bg-gradient-to-br from-blue-500/[0.10] via-transparent to-indigo-500/[0.10]'} blur-3xl`} />
+          <div className={`absolute inset-0 ${isDark
+            ? 'bg-gradient-to-tr from-sky-500/[0.03] via-transparent to-blue-600/[0.03]'
+            : 'bg-gradient-to-tr from-sky-500/[0.07] via-transparent to-blue-600/[0.07]'} blur-3xl`} />
+          <div className="absolute inset-0 overflow-hidden">
+            <ElegantShape
+              isDark={isDark}
+              delay={0.3}
+              width={600}
+              height={140}
+              rotate={12}
+              gradient={isDark ? "from-blue-500/[0.12]" : "from-blue-500/[0.25]"}
+              className="left-[-10%] md:left-[-5%] top-[15%] md:top-[20%]"
+            />
+            <ElegantShape
+              isDark={isDark}
+              delay={0.5}
+              width={500}
+              height={120}
+              rotate={-15}
+              gradient={isDark ? "from-indigo-500/[0.12]" : "from-indigo-500/[0.25]"}
+              className="right-[-5%] md:right-[0%] top-[70%] md:top-[75%]"
+            />
+            <ElegantShape
+              isDark={isDark}
+              delay={0.4}
+              width={300}
+              height={80}
+              rotate={-8}
+              gradient={isDark ? "from-sky-500/[0.12]" : "from-sky-500/[0.25]"}
+              className="left-[5%] md:left-[10%] bottom-[5%] md:bottom-[10%]"
+            />
+            <ElegantShape
+              isDark={isDark}
+              delay={0.6}
+              width={200}
+              height={60}
+              rotate={20}
+              gradient={isDark ? "from-violet-500/[0.12]" : "from-violet-500/[0.25]"}
+              className="right-[15%] md:right-[20%] top-[10%] md:top-[15%]"
+            />
+            <ElegantShape
+              isDark={isDark}
+              delay={0.7}
+              width={150}
+              height={40}
+              rotate={-25}
+              gradient={isDark ? "from-cyan-400/[0.12]" : "from-cyan-500/[0.25]"}
+              className="left-[20%] md:left-[25%] top-[5%] md:top-[10%]"
+            />
+          </div>
+          <div className="absolute inset-0 bg-gradient-to-t from-background via-transparent to-background/80 pointer-events-none" />
+        </div>
         <Navbar />
 
         {/* Hero */}
@@ -562,23 +623,30 @@ const Index = () => {
           <div className="absolute bottom-0 right-1/4 w-[400px] h-[400px] rounded-full bg-primary/8 blur-3xl pointer-events-none" />
           <div className="container mx-auto relative z-10 flex flex-col items-center text-center">
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}>
-              <span className="inline-block mb-6 px-4 py-1.5 rounded-full bg-accent text-accent-foreground text-sm font-medium border border-primary/10">
-                AI-Powered Telecom Assistant
-              </span>
+              <motion.span
+                animate={{ y: [0, 4, 0] }}
+                transition={{ y: { duration: 3.5, repeat: Infinity, ease: "easeInOut" } }}
+                className="inline-flex items-center gap-2 mb-6 px-5 py-2 rounded-full text-sm font-medium relative overflow-hidden
+                bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-transparent
+                backdrop-blur-[3px] border-2 border-white/20 dark:border-white/10
+                shadow-[0_8px_32px_0_rgba(59,130,246,0.15)]
+                after:absolute after:inset-0 after:rounded-full after:bg-[radial-gradient(circle_at_50%_50%,rgba(59,130,246,0.12),transparent_70%)]
+                text-foreground/80">
+                <span className="relative z-10">{t("landing.badge")}</span>
+              </motion.span>
             </motion.div>
             <motion.h1
-              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-normal max-w-4xl -mb-4 flex flex-col items-center"
+              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-tight max-w-4xl flex flex-col items-center"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
-              <span>Your intelligent partner</span>
-              <motion.span className="flex items-center justify-center gap-3 py-2 overflow-visible" layout transition={{ duration: 0.3, ease: "easeInOut" }}>
-                for <RotatingWords />
+              <span>{t("landing.hero_title_1")}</span>
+              <motion.span className="flex items-center justify-center gap-3 overflow-visible flex-nowrap" layout transition={{ duration: 0.3, ease: "easeInOut" }}>
+                {t("landing.hero_title_2")} <RotatingWords />
               </motion.span>
             </motion.h1>
             <motion.p className="text-lg text-muted-foreground max-w-2xl mb-10"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.3 }}>
-              Bimlo Copilot helps telecom professionals analyze documents, plan networks,
-              and make data-driven decisions — powered by specialized AI.
+              {t("landing.hero_desc")}
             </motion.p>
             <motion.div
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.45 }}
@@ -586,7 +654,7 @@ const Index = () => {
             >
               <Link to="/chat">
                 <Button size="lg" className="bg-hero-gradient text-primary-foreground shadow-blue hover:opacity-90 transition-opacity font-heading font-semibold text-base px-8 h-12 gap-2">
-                  Start a conversation <ArrowRight className="h-4 w-4" />
+                  {t("landing.start_conversation")} <ArrowRight className="h-4 w-4" />
                 </Button>
               </Link>
               <motion.div
@@ -623,28 +691,28 @@ const Index = () => {
               <div className="flex-1">
                 <motion.h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-4"
                   initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={0}>
-                  Built for telecom professionals
+                  {t("landing.features_title")}
                 </motion.h2>
                 <motion.p className="text-foreground/75 max-w-xl mb-8"
                   initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={1}>
-                  Everything you need to accelerate your telecom projects — from document analysis to network planning and real-time decision support.
+                  {t("landing.features_desc")}
                 </motion.p>
                 <div className="flex flex-col gap-3">
-                  {[
-                    { icon: MessageSquare, title: "Intelligent Conversations" },
-                    { icon: FileText,      title: "Document Analysis" },
-                    { icon: Network,       title: "Network Expertise" },
-                    { icon: Zap,           title: "Instant Answers" },
-                    { icon: Newspaper,     title: "Industry News Briefings" },
-                  ].map((f, i) => (
-                    <motion.div key={f.title} className="flex items-center gap-3"
+                  {([
+                    { icon: MessageSquare, key: "intelligent_conversations" },
+                    { icon: FileText,      key: "document_analysis" },
+                    { icon: Network,       key: "network_expertise" },
+                    { icon: Zap,           key: "instant_answers" },
+                    { icon: Newspaper,     key: "industry_news" },
+                  ] as const).map((f, i) => (
+                    <motion.div key={f.key} className="flex items-center gap-3"
                       initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={i + 2}>
                       <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                         <f.icon className="h-4 w-4 text-primary" />
                       </div>
                       <span className="text-sm font-medium text-foreground/80 whitespace-nowrap"
                         style={{ textShadow: "0 0 12px hsl(var(--primary)/0.6), 0 0 24px hsl(var(--primary)/0.3)" }}>
-                        {f.title}
+                        {t(`landing.feature_${f.key}`)}
                       </span>
                     </motion.div>
                   ))}
@@ -658,33 +726,33 @@ const Index = () => {
                 <CardSwap width={480} height={320} cardDistance={60} verticalDistance={70} delay={4000} easing="elastic">
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><MessageSquare size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> Intelligent Chat</span>
-                    <h3>Intelligent Conversations</h3>
-                    <p>Chat naturally about telecom infrastructure with context-aware AI that understands your projects.</p>
+                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_chat")}</span>
+                    <h3>{t("landing.card_chat_title")}</h3>
+                    <p>{t("landing.card_chat_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><FileText size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> Doc Analysis</span>
-                    <h3>Document Analysis</h3>
-                    <p>Upload PDFs, specs, and reports for instant AI-powered insights and citations.</p>
+                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_doc")}</span>
+                    <h3>{t("landing.card_doc_title")}</h3>
+                    <p>{t("landing.card_doc_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><Network size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> Deep Expertise</span>
-                    <h3>Network Expertise</h3>
-                    <p>Deep knowledge of fiber, 5G, and optical network deployments built right in.</p>
+                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_expertise")}</span>
+                    <h3>{t("landing.card_network_title")}</h3>
+                    <p>{t("landing.card_network_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><Zap size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> Instant Answers</span>
-                    <h3>Instant Answers</h3>
-                    <p>Get fast, accurate technical guidance for complex telecom decisions powered by specialized AI.</p>
+                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_answers")}</span>
+                    <h3>{t("landing.card_instant_title")}</h3>
+                    <p>{t("landing.card_instant_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><Newspaper size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> Daily Briefing</span>
-                    <h3>Industry News</h3>
-                    <p>AI-curated telecom news with expert impact analysis, delivered fresh every morning.</p>
+                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_briefing")}</span>
+                    <h3>{t("landing.card_news_title")}</h3>
+                    <p>{t("landing.card_news_desc")}</p>
                   </Card>
                 </CardSwap>
               </motion.div>
@@ -698,19 +766,19 @@ const Index = () => {
           <div className="container mx-auto text-center">
             <motion.h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-6"
               initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={0}>
-              How it works
+              {t("landing.how_title")}
             </motion.h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto pt-4 pb-8">
               {[
-                { step: "01", title: "Upload Documents", desc: "Add your technical PDFs, specs, and reports." },
-                { step: "02", title: "Ask Questions",    desc: "Chat naturally about your telecom projects." },
-                { step: "03", title: "Get Insights",     desc: "Receive accurate, context-aware answers instantly." },
+                { step: "01", titleKey: "step_1_title", descKey: "step_1_desc" },
+                { step: "02", titleKey: "step_2_title", descKey: "step_2_desc" },
+                { step: "03", titleKey: "step_3_title", descKey: "step_3_desc" },
               ].map((item, i) => (
                 <motion.div key={item.step} className="text-center"
                   initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={i + 1}>
                   <span className="text-5xl font-heading font-bold text-gradient-blue">{item.step}</span>
-                  <h3 className="font-heading font-semibold text-foreground mt-3 mb-1.5">{item.title}</h3>
-                  <p className="text-sm text-muted-foreground">{item.desc}</p>
+                  <h3 className="font-heading font-semibold text-foreground mt-3 mb-1.5">{t(`landing.${item.titleKey}`)}</h3>
+                  <p className="text-sm text-muted-foreground">{t(`landing.${item.descKey}`)}</p>
                 </motion.div>
               ))}
             </div>
@@ -723,8 +791,8 @@ const Index = () => {
           <div className="container mx-auto max-w-2xl">
             <motion.div className="text-center mb-12"
               initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeUp} custom={0}>
-              <h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-3">Get in touch</h2>
-              <p className="text-muted-foreground">Have a question or want to learn more? We'd love to hear from you.</p>
+              <h2 className="font-heading text-3xl sm:text-4xl font-bold text-foreground mb-3">{t("landing.contact_title")}</h2>
+              <p className="text-muted-foreground">{t("landing.contact_desc")}</p>
             </motion.div>
             <ContactForm />
           </div>
@@ -734,7 +802,7 @@ const Index = () => {
         <footer className="content-above-bg py-12 px-6 border-t border-border">
           <div className="container mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
             <span className="font-heading font-semibold text-foreground">Bimlo Copilot</span>
-            <span className="text-sm text-muted-foreground">© 2026 Bimlo. All rights reserved.</span>
+            <span className="text-sm text-muted-foreground">{t("landing.footer_copyright")}</span>
           </div>
         </footer>
       </div>

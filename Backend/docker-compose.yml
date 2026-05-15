@@ -24,39 +24,31 @@ services:
       start_period: 120s
 
   # Backend API
-  api:
+  #
+  # Secrets management:
+  #   Development: uses .env file (gitignored, not committed)
+  #   Production:  use Doppler to inject secrets at runtime
+  #     doppler setup --project bimlo-copilot --config prd
+  #     docker compose --profile doppler up -d
+  #
+  api: &api
     build: .
     ports:
       - "8000:8000"
+    env_file: .env
     environment:
+      # Overrides — these must differ from .env or are path-specific
       - CHROMA_HOST=chroma
       - NEO4J_URI=bolt://neo4j:7687
       - WIKI_USER_AGENT=BimloRAG/1.0
       - HF_HOME=/root/.cache/huggingface
       - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface/sentence_transformers
-      # TRANSFORMERS_CACHE removed — deprecated since transformers v5.
-      # HF_HOME above already covers the same path and is the correct var.
-      - VISION_MODEL=@cf/meta/llama-3.2-11b-vision-instruct
       - HF_HUB_DISABLE_PROGRESS_BARS=1
       - LOGO_PATH=/app/assets/favicon.png
       - LOGO_SVG_PATH=/app/assets/favicon.svg
       - NEWS_CACHE_DIR=/data/news_cache
-      - NEWSDATA_API_KEY=${NEWSDATA_API_KEY}
-      # Cloudflare Workers AI — primary
-      - CF_API_KEY=${CF_API_KEY}
-      - CF_API_URL=${CF_API_URL}
-      # Cloudflare Workers AI — backup
-      - CF_BACKUP_URL=${CF_BACKUP_URL}
-      - CF_BACKUP_API_KEY=${CF_BACKUP_API_KEY}
-      # Cloudflare Workers AI — backup2 (third worker)
-      - CF_BACKUP2_URL=${CF_BACKUP2_URL}
-      - CF_BACKUP2_API_KEY=${CF_BACKUP2_API_KEY}
-      # News worker
-      - CF_NEWS_URL=${CF_NEWS_URL}
-      - CF_NEWS_API_KEY=${CF_NEWS_API_KEY}
-      # Other LLM providers
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - DATA_DIR=/data
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://frontend
     volumes:
       - hf_cache:/root/.cache/huggingface
       - news_cache:/data/news_cache
@@ -67,6 +59,21 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started
+
+  # Doppler-powered backend (production):
+  #   Injects secrets at runtime instead of using .env file.
+  #   Requires: doppler setup --project bimlo-copilot --config prd
+  api-doppler:
+    <<: *api
+    profiles: ["doppler"]
+    env_file: []  # no .env — secrets come from Doppler
+    environment:
+      - CHROMA_HOST=chroma
+      - NEO4J_URI=bolt://neo4j:7687
+      - DATA_DIR=/data
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://frontend}
+    command: >
+      sh -c "doppler run -- python main.py"
 
   # Frontend
   frontend:
