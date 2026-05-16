@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit, Mail, Send, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
-import Letter3DSwap from "@/components/fancy/text/letter-3d-swap";
+import TypewriterText from "@/components/fancy/text/typewriter-text";
 import Logo from "@/components/Logo";
 import { ElegantShape } from "@/components/ui/shape-landing-hero";
 import CardSwap, { Card } from "@/components/CardSwap";
@@ -346,24 +346,26 @@ const Index = () => {
         .animate-fade-in { animation: liquidFadeIn 1.2s ease-out 0.3s both; }
 
         .swap-card {
-          background: linear-gradient(135deg,hsl(var(--card)) 0%,hsl(var(--secondary)) 100%);
-          border:1px solid hsl(var(--border)) !important;
-          border-radius:20px !important; padding:2rem;
-          display:flex; flex-direction:column; gap:1rem;
-          box-shadow:0 8px 32px rgba(0,0,0,0.25);
+          background: hsl(var(--card));
+          border:1px solid hsl(var(--border));
+          border-radius:16px; padding:1.75rem 2rem;
+          display:flex; flex-direction:column; gap:0.6rem;
+          box-shadow:0 4px 24px rgba(0,0,0,0.08);
         }
         .swap-card-icon {
-          width:48px; height:48px; border-radius:12px;
-          background:hsl(var(--accent));
-          display:flex; align-items:center; justify-content:center; margin-bottom:0.5rem;
+          width:40px; height:40px; border-radius:10px;
+          background:hsl(var(--primary)/0.08);
+          border:1px solid hsl(var(--primary)/0.12);
+          display:flex; align-items:center; justify-content:center; margin-bottom:0.25rem;
         }
-        .swap-card h3 { font-size:1.1rem; font-weight:700; color:hsl(var(--foreground)); margin:0; }
-        .swap-card p  { font-size:0.875rem; color:hsl(var(--muted-foreground)); line-height:1.6; margin:0; }
+        .swap-card h3 { font-size:1.05rem; font-weight:700; color:hsl(var(--foreground)); margin:0; }
+        .swap-card p  { font-size:0.82rem; color:hsl(var(--muted-foreground)); line-height:1.65; margin:0; }
         .swap-card .tag {
-          display:inline-flex; align-items:center; gap:0.4rem;
-          font-size:0.75rem; font-weight:600; color:hsl(var(--primary));
-          background:hsl(var(--primary)/0.1); border:1px solid hsl(var(--primary)/0.2);
-          border-radius:999px; padding:0.25rem 0.75rem; width:fit-content;
+          display:inline-flex; align-items:center; gap:0.35rem;
+          font-size:0.7rem; font-weight:600; color:hsl(var(--muted-foreground));
+          background:hsl(var(--muted)/0.5); border:1px solid hsl(var(--border));
+          border-radius:6px; padding:0.2rem 0.6rem; width:fit-content;
+          text-transform:uppercase; letter-spacing:0.04em;
         }
 
         /* ── Ensure all page content sits above geometric background ── */
@@ -640,22 +642,16 @@ const Index = () => {
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
               <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
-              <Letter3DSwap
+              <TypewriterText
                 key={i18n.language}
                 texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
-                as="span"
-                mainClassName="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4"
-                frontFaceClassName="text-foreground"
-                secondFaceClassName="text-foreground"
-                rotateDirection="top"
-                staggerDuration={0.03}
-                staggerFrom="first"
-                transition={{ type: "spring", damping: 25, stiffness: 160 }}
-                auto
-                rotationInterval={4000}
+                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4 pb-2 inline-block"
+                speed={100}
+                deleteSpeed={50}
+                pauseDuration={2000}
               />
             </motion.h1>
-            <motion.p className="text-lg text-muted-foreground max-w-2xl mb-10"
+            <motion.p className="text-lg text-muted-foreground max-w-2xl mb-10 mt-6"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.3 }}>
               {t("landing.hero_desc")}
             </motion.p>
@@ -721,8 +717,7 @@ const Index = () => {
                       <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                         <f.icon className="h-4 w-4 text-primary" />
                       </div>
-                      <span className="text-sm font-medium text-foreground/80 whitespace-nowrap"
-                        style={{ textShadow: "0 0 12px hsl(var(--primary)/0.6), 0 0 24px hsl(var(--primary)/0.3)" }}>
+                      <span className="text-sm font-medium text-foreground/80 whitespace-nowrap">
                         {t(`landing.feature_${f.key}`)}
                       </span>
                     </motion.div>
@@ -736,32 +731,32 @@ const Index = () => {
                 style={{ height: 500, position: "relative", marginTop: "-60px" }}>
                 <CardSwap width={480} height={320} cardDistance={60} verticalDistance={70} delay={4000} easing="elastic">
                   <Card customClass="swap-card">
-                    <div className="swap-card-icon"><MessageSquare size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_chat")}</span>
+                    <div className="swap-card-icon"><MessageSquare size={18} color="hsl(var(--primary))" /></div>
+                    <span className="tag">{t("landing.card_tag_chat")}</span>
                     <h3>{t("landing.card_chat_title")}</h3>
                     <p>{t("landing.card_chat_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
-                    <div className="swap-card-icon"><FileText size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_doc")}</span>
+                    <div className="swap-card-icon"><FileText size={18} color="hsl(var(--primary))" /></div>
+                    <span className="tag">{t("landing.card_tag_doc")}</span>
                     <h3>{t("landing.card_doc_title")}</h3>
                     <p>{t("landing.card_doc_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
-                    <div className="swap-card-icon"><Network size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_expertise")}</span>
+                    <div className="swap-card-icon"><Network size={18} color="hsl(var(--primary))" /></div>
+                    <span className="tag">{t("landing.card_tag_expertise")}</span>
                     <h3>{t("landing.card_network_title")}</h3>
                     <p>{t("landing.card_network_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
-                    <div className="swap-card-icon"><Zap size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_answers")}</span>
+                    <div className="swap-card-icon"><Zap size={18} color="hsl(var(--primary))" /></div>
+                    <span className="tag">{t("landing.card_tag_answers")}</span>
                     <h3>{t("landing.card_instant_title")}</h3>
                     <p>{t("landing.card_instant_desc")}</p>
                   </Card>
                   <Card customClass="swap-card">
-                    <div className="swap-card-icon"><Newspaper size={22} color="hsl(var(--accent-foreground))" /></div>
-                    <span className="tag"><Zap size={11} /> {t("landing.card_tag_briefing")}</span>
+                    <div className="swap-card-icon"><Newspaper size={18} color="hsl(var(--primary))" /></div>
+                    <span className="tag">{t("landing.card_tag_briefing")}</span>
                     <h3>{t("landing.card_news_title")}</h3>
                     <p>{t("landing.card_news_desc")}</p>
                   </Card>

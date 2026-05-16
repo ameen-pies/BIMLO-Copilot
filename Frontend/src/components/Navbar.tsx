@@ -317,7 +317,8 @@ const Navbar = () => {
               <button
                 onClick={() => showAuthModal()}
                 style={{
-                  fontSize: 13, fontWeight: 600, padding: "6px 14px",
+                  fontSize: 13, fontWeight: 600, padding: "6px 14px", height: 36,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
                   borderRadius: 8, border: "1px solid rgba(96,165,250,0.35)",
                   background: "rgba(96,165,250,0.08)", color: "#60a5fa",
                   cursor: "pointer", transition: "background 0.15s",

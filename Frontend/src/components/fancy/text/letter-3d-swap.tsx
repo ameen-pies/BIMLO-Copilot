@@ -1,11 +1,6 @@
 "use client"
 
 import React, { ElementType, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import {
-  AnimationOptions,
-  useAnimate,
-  ValueAnimationTransition,
-} from "motion/react"
 
 import { cn } from "@/lib/utils"
 
@@ -46,12 +41,11 @@ interface Letter3DSwapProps {
   mainClassName?: string
   frontFaceClassName?: string
   secondFaceClassName?: string
-  staggerDuration?: number
-  staggerFrom?: "first" | "last" | "center" | number | "random"
-  transition?: ValueAnimationTransition | AnimationOptions
   rotateDirection?: "top" | "right" | "bottom" | "left"
   auto?: boolean
   rotationInterval?: number
+  /** Duration of the flip-up/flip-down transition in ms */
+  flipDuration?: number
 }
 
 const Letter3DSwap = ({
@@ -61,35 +55,21 @@ const Letter3DSwap = ({
   mainClassName,
   frontFaceClassName,
   secondFaceClassName,
-  staggerDuration = 0.05,
-  staggerFrom = "first",
-  transition = { type: "spring", damping: 30, stiffness: 300 },
   rotateDirection = "top",
   auto = false,
   rotationInterval = 3000,
+  flipDuration = 500,
   ...props
 }: Letter3DSwapProps) => {
   const [isAnimating, setIsAnimating] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
-  const [scope, animate] = useAnimate()
-  const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [rotateAngle, setRotateAngle] = useState(0)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const rotationTransform = (() => {
-    switch (rotateDirection) {
-      case "top":
-        return "rotateX(90deg)"
-      case "right":
-        return "rotateY(90deg)"
-      case "bottom":
-        return "rotateX(-90deg)"
-      case "left":
-        return "rotateY(-90deg)"
-      default:
-        return "rotateX(90deg)"
-    }
-  })()
+  const rotationAxis = rotateDirection === "top" || rotateDirection === "bottom" ? "X" : "Y"
+  const rotationSign = rotateDirection === "bottom" || rotateDirection === "left" ? "-" : ""
 
-  // Determine current text to display
   const currentText = useMemo(() => {
     if (texts && texts.length > 0) {
       return texts[currentIndex % texts.length]
@@ -109,85 +89,51 @@ const Letter3DSwap = ({
     }))
   }, [currentText])
 
-  const getStaggerDelay = useCallback(
-    (index: number, totalChars: number) => {
-      const total = totalChars
-      if (staggerFrom === "first") return index * staggerDuration
-      if (staggerFrom === "last") return (total - 1 - index) * staggerDuration
-      if (staggerFrom === "center") {
-        const center = Math.floor(total / 2)
-        return Math.abs(center - index) * staggerDuration
-      }
-      if (staggerFrom === "random") {
-        const randomIndex = Math.floor(Math.random() * total)
-        return Math.abs(randomIndex - index) * staggerDuration
-      }
-      return Math.abs(staggerFrom - index) * staggerDuration
-    },
-    [staggerFrom, staggerDuration]
-  )
-
-  const triggerAnimation = useCallback(async () => {
+  const triggerAnimation = useCallback(() => {
     if (isAnimating) return
     setIsAnimating(true)
 
-    const totalChars = characters.reduce(
-      (sum: number, word: WordObject) => sum + word.characters.length,
-      0
-    )
+    // Phase 1: flip up
+    setRotateAngle(90)
 
-    const delays = Array.from({ length: totalChars }, (_, i) =>
-      getStaggerDelay(i, totalChars)
-    )
-
-    await animate(
-      ".letter-3d-swap-char-box-item",
-      { transform: rotationTransform },
-      {
-        ...transition,
-        delay: (i: number) => delays[i],
+    // Phase 2: swap text while edge-on (invisible)
+    timerRef.current = setTimeout(() => {
+      if (texts && texts.length > 0) {
+        setCurrentIndex((prev) => (prev + 1) % texts.length)
       }
-    )
+      // Phase 3: flip back to reveal new text
+      setRotateAngle(0)
+    }, flipDuration + 30)
 
-    // Advance to next text while rotated (hidden)
-    if (texts && texts.length > 0) {
-      setCurrentIndex((prev) => (prev + 1) % texts.length)
-    }
-
-    // Brief pause at peak rotation so text swap is invisible
-    await new Promise((r) => setTimeout(r, 120))
-
-    // Reset all boxes
-    await animate(
-      ".letter-3d-swap-char-box-item",
-      { transform: "rotateX(0deg) rotateY(0deg)" },
-      { duration: 0 }
-    )
-
-    setIsAnimating(false)
-  }, [isAnimating, characters, transition, getStaggerDelay, rotationTransform, animate, texts])
+    // Phase 4: done
+    timerRef.current = setTimeout(() => {
+      setIsAnimating(false)
+    }, (flipDuration + 30) * 2)
+  }, [isAnimating, texts, flipDuration])
 
   // Auto-cycling
   useEffect(() => {
     if (!auto || !texts || texts.length <= 1) return
-    autoTimerRef.current = setInterval(() => {
+    // Initial animation after mount
+    const initTimeout = setTimeout(() => triggerAnimation(), 600)
+    intervalRef.current = setInterval(() => {
       triggerAnimation()
     }, rotationInterval)
     return () => {
-      if (autoTimerRef.current) clearInterval(autoTimerRef.current)
+      clearTimeout(initTimeout)
+      if (intervalRef.current) clearInterval(intervalRef.current)
     }
   }, [auto, texts, rotationInterval, triggerAnimation])
 
-  // Trigger initial animation on mount for auto mode
+  // Cleanup on unmount
   useEffect(() => {
-    if (auto && texts && texts.length > 0) {
-      const timeout = setTimeout(() => triggerAnimation(), 600)
-      return () => clearTimeout(timeout)
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleHoverStart = useCallback(() => {
-    if (auto) return // auto mode manages its own animation
+    if (auto) return
     triggerAnimation()
   }, [auto, triggerAnimation])
 
@@ -197,39 +143,50 @@ const Letter3DSwap = ({
     <ElementTag
       className={cn("flex flex-wrap relative", mainClassName)}
       onMouseEnter={handleHoverStart}
-      ref={scope}
+      style={{
+        perspective: "600px",
+      }}
       {...props}
     >
       <span className="sr-only">{currentText}</span>
+      <span
+        style={{
+          display: "inline-flex",
+          flexWrap: "wrap",
+          transform: `rotate${rotationAxis}(${rotationSign}${rotateAngle}deg)`,
+          transformStyle: "preserve-3d",
+          transition: `transform ${flipDuration}ms cubic-bezier(0.4, 0, 0.2, 1)`,
+        }}
+      >
+        {characters.map(
+          (wordObj: WordObject, wordIndex: number, array: WordObject[]) => {
+            const previousCharsCount = array
+              .slice(0, wordIndex)
+              .reduce(
+                (sum: number, word: WordObject) => sum + word.characters.length,
+                0
+              )
 
-      {characters.map(
-        (wordObj: WordObject, wordIndex: number, array: WordObject[]) => {
-          const previousCharsCount = array
-            .slice(0, wordIndex)
-            .reduce(
-              (sum: number, word: WordObject) => sum + word.characters.length,
-              0
+            return (
+              <span key={wordIndex} className="inline-flex">
+                {wordObj.characters.map((char: string, charIndex: number) => {
+                  const totalIndex = previousCharsCount + charIndex
+                  return (
+                    <CharBox
+                      key={totalIndex}
+                      char={char}
+                      frontFaceClassName={frontFaceClassName}
+                      secondFaceClassName={secondFaceClassName}
+                      rotateDirection={rotateDirection}
+                    />
+                  )
+                })}
+                {wordObj.needsSpace && <span className="whitespace-pre"> </span>}
+              </span>
             )
-
-          return (
-            <span key={wordIndex} className="inline-flex">
-              {wordObj.characters.map((char: string, charIndex: number) => {
-                const totalIndex = previousCharsCount + charIndex
-                return (
-                  <CharBox
-                    key={`${currentIndex}-${totalIndex}`}
-                    char={char}
-                    frontFaceClassName={frontFaceClassName}
-                    secondFaceClassName={secondFaceClassName}
-                    rotateDirection={rotateDirection}
-                  />
-                )
-              })}
-              {wordObj.needsSpace && <span className="whitespace-pre"> </span>}
-            </span>
-          )
-        }
-      )}
+          }
+        )}
+      </span>
     </ElementTag>
   )
 }
@@ -276,7 +233,7 @@ const CharBox = ({
 
   return (
     <span
-      className="letter-3d-swap-char-box-item inline-block"
+      className="inline-block"
       style={{
         transform: containerTransform,
         transformStyle: "preserve-3d",

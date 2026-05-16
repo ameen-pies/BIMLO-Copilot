@@ -12,9 +12,9 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0f172a;
+  border-radius: 16px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
   transform-style: preserve-3d;
   will-change: transform;
   backface-visibility: hidden;
