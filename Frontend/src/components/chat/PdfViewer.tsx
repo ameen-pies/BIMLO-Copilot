@@ -190,7 +190,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, hi
           if (cancelled) return;
           await renderPage(i);
         }
-      } catch { if (!cancelled) setStatus("error"); }
+      } catch (e) { console.error("[PdfViewer] load error:", e); if (!cancelled) setStatus("error"); }
     })();
     return () => { cancelled = true; };
   }, [blobUrl, renderPage]);

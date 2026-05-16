@@ -39,7 +39,7 @@ const LangToggle = () => {
   const { t, i18n } = useTranslation();
 
   return (
-    <DropdownMenu>
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"

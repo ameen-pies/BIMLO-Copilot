@@ -124,23 +124,24 @@ class LLMJudge:
         self,
         user_query: str,
         retrieved_docs: Optional[List[Dict]] = None,
-        conversation_history: Optional[List[str]] = None
+        conversation_history: Optional[List[str]] = None,
+        detected_language: Optional[str] = None,
     ) -> ResponsePlan:
         """
         BEFORE generating a response, ask the judge: HOW should we respond?
-        
+
         This is where all decisions happen:
         - Language choice
         - Tone/formality
         - Structure
         - Content priorities
-        
+
         Returns a complete plan for the response generator to follow.
         """
         if not self.enabled:
             return self._fallback_plan(user_query)
-        
-        prompt = self._build_planning_prompt(user_query, retrieved_docs, conversation_history)
+
+        prompt = self._build_planning_prompt(user_query, retrieved_docs, conversation_history, detected_language=detected_language)
         
         try:
             # Pass conversation_history as worker history so LLM gets full context
@@ -189,10 +190,11 @@ class LLMJudge:
         self,
         user_query: str,
         retrieved_docs: Optional[List[Dict]],
-        conversation_history: Optional[List[str]]
+        conversation_history: Optional[List[str]],
+        detected_language: Optional[str] = None,
     ) -> str:
         """Build the prompt that asks the judge to plan the response."""
-        
+
         docs_section = ""
         if retrieved_docs:
             # Give the judge enough content to actually reason about what's in the docs
@@ -201,24 +203,36 @@ class LLMJudge:
                 for i, doc in enumerate(retrieved_docs[:4])
             ])
             docs_section = f"\n\nRETRIEVED DOCUMENT EXCERPTS:\n{docs_formatted}"
-        
+
         history_section = ""
         if conversation_history and len(conversation_history) > 0:
             history_section = f"\n\nRECENT CONVERSATION:\n" + "\n".join(str(h)[:300] for h in conversation_history[-4:])
-        
+
+        # Pre-detected language hint — gives the judge a strong anchor
+        lang_hint = ""
+        if detected_language:
+            lang_hint = (
+                f"\n\n⚠️ LANGUAGE DETECTION: The user's query has been automatically detected as "
+                f"'{detected_language}'. You MUST set target_language to '{detected_language}' unless "
+                f"the user EXPLICITLY requests a different language in their query. "
+                f"The document language is IRRELEVANT — always match the user's query language."
+            )
+
         return f"""You are a response planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom, DeepTwin AI). Users are professionals in BTP/construction and telecom asking questions about their uploaded technical documents.
 
 QUERY: {user_query}
 {docs_section}
 {history_section}
+{lang_hint}
 
 Analyse the query and the document excerpts above, then output a JSON plan.
 
-LANGUAGE RULE (CRITICAL):
+LANGUAGE RULE (CRITICAL — HIGHEST PRIORITY):
 - Mirror the query language EXACTLY. If query is in French → "fr". Arabic → "ar". English → "en".
 - If user explicitly requests a different output language, use that instead.
 - The documents may be in a different language — IGNORE their language. The user's language is what matters.
 - Set target_language_confidence to 0.9+ when language is clear from query content.
+- NEVER let the document language influence target_language. Only the user's query matters.
 
 DIRECTNESS RULE:
 - Set approach to describe HOW to answer this specific question, not generic advice.

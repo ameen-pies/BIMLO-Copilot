@@ -46,7 +46,7 @@ const RotatingWords = () => {
         <span
           key={word}
           ref={(el) => { measureRefs.current[i] = el; }}
-          className="absolute opacity-0 pointer-events-none text-gradient-blue whitespace-nowrap font-heading text-5xl sm:text-6xl lg:text-7xl font-bold"
+          className="absolute opacity-0 pointer-events-none text-gradient-blue whitespace-nowrap font-heading text-4xl sm:text-5xl lg:text-6xl font-bold"
           style={{ lineHeight: 1.3 }}
           aria-hidden="true"
         >

@@ -839,15 +839,22 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
                 msgs=msgs_data,
             )
 
-    try:
-        driver = get_driver()
-        with driver.session(database=NEO4J_DATABASE) as session:
-            session.execute_write(_work)
-        print(f"âœ… save_conversation for user={user['user_id']} conv={req.conversation_id} messages={len(msgs_data)} session_id={req.session_id}")
-        return {"ok": True, "conversation_id": req.conversation_id}
-    except Exception as e:
-        print(f"âŒ save_conversation error: {e}")
-        raise HTTPException(503, f"Database error: {e}")
+    import time as _time
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            driver = get_driver()
+            with driver.session(database=NEO4J_DATABASE) as session:
+                session.execute_write(_work)
+            print(f"✅ save_conversation for user={user['user_id']} conv={req.conversation_id} messages={len(msgs_data)} session_id={req.session_id}")
+            return {"ok": True, "conversation_id": req.conversation_id}
+        except Exception as e:
+            err_str = str(e)
+            if "ConstraintValidationFailed" in err_str and attempt < max_retries - 1:
+                _time.sleep(0.1 * (attempt + 1))
+                continue
+            print(f"❌ save_conversation error: {e}")
+            raise HTTPException(503, f"Database error: {e}")
 
 
 @router.get("/conversations")

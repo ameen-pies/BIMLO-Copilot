@@ -636,13 +636,11 @@ const Index = () => {
               </motion.span>
             </motion.div>
             <motion.h1
-              className="font-heading text-5xl sm:text-6xl lg:text-7xl font-bold text-foreground leading-tight max-w-4xl flex flex-col items-center"
+              className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-foreground leading-tight max-w-5xl flex flex-col items-center"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
-              <span>{t("landing.hero_title_1")}</span>
-              <motion.span className="flex items-center justify-center gap-3 overflow-visible flex-nowrap" layout transition={{ duration: 0.3, ease: "easeInOut" }}>
-                {t("landing.hero_title_2")} <RotatingWords />
-              </motion.span>
+              <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
+              <RotatingWords />
             </motion.h1>
             <motion.p className="text-lg text-muted-foreground max-w-2xl mb-10"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.3 }}>

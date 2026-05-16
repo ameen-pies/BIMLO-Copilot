@@ -1711,7 +1711,26 @@ Reply with ONLY the rewritten search query. No explanation."""
             for m in history[-6:]
         ]
 
-        plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts)
+        # Detect user language BEFORE planning so we can cross-check the judge's output
+        user_language = _detect_script_language(query)
+
+        plan = self.judge.plan_response(query, retrieved_docs=chunks, conversation_history=history_texts, detected_language=user_language)
+
+        # ── Language override: trust script detection over judge when they disagree ──
+        # The judge sometimes lets document language leak into target_language.
+        # Script-based detection on the user's query is the ground truth.
+        if user_language and plan.target_language != user_language:
+            # Only override if the detected language is confident (non-English scripts are always confident)
+            # For Latin script (en/fr disambiguation), check if judge has low confidence
+            is_non_latin = user_language in ('ar', 'zh', 'ko', 'ru', 'he', 'th', 'hi')
+            judge_low_conf = plan.target_language_confidence < 0.8
+            if is_non_latin or judge_low_conf:
+                print(f"⚠️  Language override: judge said '{plan.target_language}' but query is '{user_language}' — using '{user_language}'")
+                plan = ResponsePlan(**{
+                    **plan.to_dict(),
+                    "target_language": user_language,
+                    "target_language_confidence": 0.95,
+                })
 
         print(f"{plan.target_language}/{plan.target_tone}/{plan.response_style} | key_points={len(plan.key_points_to_include)}")
 
