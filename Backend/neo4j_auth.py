@@ -1,5 +1,5 @@
-"""
-neo4j_auth.py — User authentication & session persistence via Neo4j
+﻿"""
+neo4j_auth.py â€” User authentication & session persistence via Neo4j
 
 Graph schema:
   (:User {id, email, username, password_hash, created_at, last_seen})
@@ -42,7 +42,7 @@ from core.config import settings
 import logging
 logger = logging.getLogger("auth")
 # Suppress Neo4j notification spam (INFO/WARNING about missing props/relations
-# on empty databases — harmless, just noisy during first-run)
+# on empty databases â€” harmless, just noisy during first-run)
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 
 try:
@@ -50,48 +50,48 @@ try:
     _NEO4J_AVAILABLE = True
 except ImportError:
     _NEO4J_AVAILABLE = False
-    print("⚠️  neo4j driver not installed — run: pip install neo4j")
+    print("âš ï¸  neo4j driver not installed â€” run: pip install neo4j")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG  — set these in your .env file
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# CONFIG  â€” set these in your .env file
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 #
 #  LOCAL Neo4j Desktop / Community Edition:
-#    NEO4J_URI      = bolt://127.0.0.1:7687     ← use bolt://, NOT neo4j://
-#    NEO4J_DATABASE = neo4j                      ← Community only has ONE db
+#    NEO4J_URI      = bolt://127.0.0.1:7687     â† use bolt://, NOT neo4j://
+#    NEO4J_DATABASE = neo4j                      â† Community only has ONE db
 #
 #  Neo4j AuraDB (cloud free tier):
 #    NEO4J_URI      = neo4j+s://<your-id>.databases.neo4j.io
-#    NEO4J_DATABASE = neo4j                      ← AuraDB free also uses "neo4j"
+#    NEO4J_DATABASE = neo4j                      â† AuraDB free also uses "neo4j"
 #
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 NEO4J_URI      = settings.neo4j_uri
 NEO4J_USER     = settings.neo4j_user
 NEO4J_PASSWORD = settings.neo4j_password
-# ⚠️  IMPORTANT: Community Edition ONLY supports the default "neo4j" database.
+# âš ï¸  IMPORTANT: Community Edition ONLY supports the default "neo4j" database.
 # Named databases (like "users") require Enterprise or AuraDB Pro.
 # On Community, keep this as "neo4j" and use labels to separate data.
 NEO4J_DATABASE = settings.neo4j_database
 
-print(f"🔍 NEO4J DEBUG — URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
+print(f"ðŸ” NEO4J DEBUG â€” URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
 
 # Token TTL
 TOKEN_TTL_HOURS = 72
 ACCESS_TOKEN_TTL_MINUTES = 15
 REFRESH_TOKEN_TTL_DAYS = 7
 
-# ── In-memory cache (fast path) ───────────────────────────────────────────────
+# â”€â”€ In-memory cache (fast path) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Tokens are ALSO persisted to Neo4j as (:Token) nodes so they survive restarts.
 # On a cache miss we hit Neo4j once, then warm the cache.
 # Bounded LRU: prevents unbounded memory growth from stale tokens.
 _active_tokens: Dict[str, Dict] = LRUCache(maxsize=5000)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NEO4J DRIVER SINGLETON
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _driver = None
 
@@ -99,11 +99,11 @@ def get_driver():
     global _driver
     if _driver is None:
         if not _NEO4J_AVAILABLE:
-            raise RuntimeError("neo4j package not installed — run: pip install neo4j")
+            raise RuntimeError("neo4j package not installed â€” run: pip install neo4j")
         _driver = GraphDatabase.driver(
             NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD),
-            # Connection pool settings — keeps things snappy
+            # Connection pool settings â€” keeps things snappy
             max_connection_lifetime=3600,
             max_connection_pool_size=50,
         )
@@ -125,7 +125,7 @@ def _run(cypher: str, params: dict = None, database: str = NEO4J_DATABASE):
     except Exception as e:
         # Surface the real Neo4j error so you can debug it
         err_msg = str(e)
-        print(f"❌ Neo4j query error: {err_msg}")
+        print(f"âŒ Neo4j query error: {err_msg}")
         print(f"   Query: {cypher[:120]}")
         raise HTTPException(503, f"Database error: {err_msg}")
 
@@ -146,13 +146,13 @@ def _setup_constraints():
         try:
             _run(c)
         except HTTPException:
-            pass  # constraint may already exist — safe to ignore
-    print("✅ Neo4j: constraints ready")
+            pass  # constraint may already exist â€” safe to ignore
+    print("âœ… Neo4j: constraints ready")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _hash_password(password: str) -> str:
     """Hash a password with bcrypt (work factor 12)."""
@@ -205,7 +205,7 @@ def _issue_token(user_id: str, username: str, email: str, role: str = "user",
              "now": datetime.utcnow().isoformat()},
         )
     except Exception as e:
-        print(f"⚠️  Token persist failed (auth still works this session): {e}")
+        print(f"âš ï¸  Token persist failed (auth still works this session): {e}")
     return token
 
 
@@ -232,7 +232,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
     """
     now = time.time()
 
-    # ── Fast path: in-memory cache ────────────────────────────────────────
+    # â”€â”€ Fast path: in-memory cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     payload = _active_tokens.get(token)
     if payload:
         if now > payload["expires_at"]:
@@ -244,7 +244,7 @@ def _resolve_token(token: str) -> Optional[Dict]:
             return None
         return payload
 
-    # ── Cold path: Neo4j lookup (server just restarted) ───────────────────
+    # â”€â”€ Cold path: Neo4j lookup (server just restarted) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try:
         rows = _run(
             """
@@ -272,13 +272,13 @@ def _resolve_token(token: str) -> Optional[Dict]:
         _active_tokens[token] = payload
         return payload
     except Exception as e:
-        print(f"⚠️  Token Neo4j lookup failed: {e}")
+        print(f"âš ï¸  Token Neo4j lookup failed: {e}")
         return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DEPENDENCY: optional auth (doesn't raise — returns None for guests)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# DEPENDENCY: optional auth (doesn't raise â€” returns None for guests)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def optional_user(
     authorization: Optional[str] = Header(default=None),
@@ -287,7 +287,7 @@ def optional_user(
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
-    elif bimlo_token:
+    elif isinstance(bimlo_token, str) and bimlo_token:
         token = bimlo_token
     if not token:
         return None
@@ -306,9 +306,9 @@ def require_user(
     return user
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # PYDANTIC MODELS
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class SignupRequest(BaseModel):
     email:    str
@@ -352,9 +352,9 @@ class SaveDocumentRequest(BaseModel):
     chunk_count: int = 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ROUTER
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -410,7 +410,7 @@ def signup(request: Request, req: SignupRequest, response: Response):
         samesite="strict",
         max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
     )
-    print(f"✅ auth: new user '{username}' ({email})")
+    print(f"âœ… auth: new user '{username}' ({email})")
     return AuthResponse(token=access_token, user_id=user_id, username=username, email=email, role="user")
 
 
@@ -430,7 +430,7 @@ def login(request: Request, req: LoginRequest, response: Response):
     if not _verify_password(req.password, row["ph"]):
         raise HTTPException(401, "Invalid email or password")
 
-    # ── Migration: if password is still stored as SHA-256, re-hash with bcrypt ──
+    # â”€â”€ Migration: if password is still stored as SHA-256, re-hash with bcrypt â”€â”€
     stored_hash = row["ph"]
     if ":" in stored_hash and len(stored_hash.split(":")[0]) == 32:
         new_hash = _hash_password(req.password)
@@ -455,7 +455,7 @@ def login(request: Request, req: LoginRequest, response: Response):
         samesite="strict",
         max_age=REFRESH_TOKEN_TTL_DAYS * 86400,
     )
-    print(f"✅ auth: login '{row['username']}' (role={role})")
+    print(f"âœ… auth: login '{row['username']}' (role={role})")
     return AuthResponse(token=access_token, user_id=row["id"], username=row["username"], email=email, role=role)
 
 
@@ -469,7 +469,7 @@ def logout(
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
-    elif bimlo_token:
+    elif isinstance(bimlo_token, str) and bimlo_token:
         token = bimlo_token
     if token:
         _revoke_token(token)
@@ -515,7 +515,7 @@ def delete_account(
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
-    elif bimlo_token:
+    elif isinstance(bimlo_token, str) and bimlo_token:
         token = bimlo_token
     if token:
         _revoke_token(token)
@@ -531,7 +531,7 @@ def delete_account(
         """,
         {"user_id": user_id},
     )
-    print(f"🗑️  auth: deleted account user_id={user_id}")
+    print(f"ðŸ—‘ï¸  auth: deleted account user_id={user_id}")
     return {"ok": True}
 
 
@@ -580,10 +580,10 @@ def google_token_auth(req: GoogleTokenRequest, response: Response):
     if rows:
         user_id  = rows[0]["id"]
         username = rows[0]["username"]
-        role     = rows[0].get("role") or "user"   # ← preserve existing role (e.g. "admin")
+        role     = rows[0].get("role") or "user"   # â† preserve existing role (e.g. "admin")
         _run("MATCH (u:User {id: $id}) SET u.last_seen = $now, u.picture = $picture, u.display_name = $display_name",
              {"id": user_id, "now": now, "picture": req.picture, "display_name": req.name})
-        print(f"✅ auth/google-token: existing user '{username}' ({email}) role={role}")
+        print(f"âœ… auth/google-token: existing user '{username}' ({email}) role={role}")
     else:
         user_id = str(uuid.uuid4())
         role    = "user"
@@ -610,7 +610,7 @@ def google_token_auth(req: GoogleTokenRequest, response: Response):
             {"id": user_id, "email": email, "username": username,
              "picture": req.picture, "display_name": req.name, "now": now},
         )
-        print(f"✅ auth/google-token: new user '{username}' ({email})")
+        print(f"âœ… auth/google-token: new user '{username}' ({email})")
 
     access_token, refresh_token = _issue_token_pair(user_id, username, email, role=role)
     response.set_cookie(
@@ -653,9 +653,9 @@ def heartbeat(user: Dict = Depends(require_user)):
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # PUBLIC CONTACT FORM
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ContactRequest(BaseModel):
     name:    str
@@ -666,7 +666,7 @@ class ContactRequest(BaseModel):
 @router.post("/contact")
 def contact(req: ContactRequest):
     """
-    Public contact form — no auth required.
+    Public contact form â€” no auth required.
     Forwards the message to BIMLO's inbox via SMTP.
     Uses the same SMTP env vars as the admin email sender.
     """
@@ -747,19 +747,19 @@ def contact(req: ContactRequest):
                 server.starttls(context=ctx)
                 server.login(smtp_user, smtp_pass)
                 server.sendmail(smtp_from, bimlo_inbox, msg.as_string())
-            print(f"📧 contact: message from {req.email} delivered to {bimlo_inbox}")
+            print(f"ðŸ“§ contact: message from {req.email} delivered to {bimlo_inbox}")
         else:
-            print(f"📧 [SMTP not configured] Contact from {req.email}: {req.subject}")
+            print(f"ðŸ“§ [SMTP not configured] Contact from {req.email}: {req.subject}")
     except Exception as e:
-        print(f"⚠️  contact: failed to send: {e}")
+        print(f"âš ï¸  contact: failed to send: {e}")
         raise HTTPException(500, "Failed to send message. Please try again later.")
 
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # CONVERSATION PERSISTENCE
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/conversations/save")
 def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require_user)):
@@ -834,10 +834,10 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
         driver = get_driver()
         with driver.session(database=NEO4J_DATABASE) as session:
             session.execute_write(_work)
-        print(f"✅ save_conversation for user={user['user_id']} conv={req.conversation_id} messages={len(msgs_data)} session_id={req.session_id}")
+        print(f"âœ… save_conversation for user={user['user_id']} conv={req.conversation_id} messages={len(msgs_data)} session_id={req.session_id}")
         return {"ok": True, "conversation_id": req.conversation_id}
     except Exception as e:
-        print(f"❌ save_conversation error: {e}")
+        print(f"âŒ save_conversation error: {e}")
         raise HTTPException(503, f"Database error: {e}")
 
 
@@ -881,7 +881,7 @@ def get_conversation(conversation_id: str, user: Dict = Depends(require_user)):
         """,
         {"conv_id": conversation_id},
     )
-    print(f"🔄 get_conversation for user={user['user_id']} conv={conversation_id} found_messages={len(messages)}")
+    print(f"ðŸ”„ get_conversation for user={user['user_id']} conv={conversation_id} found_messages={len(messages)}")
 
     enriched = []
     for m in messages:
@@ -910,9 +910,9 @@ def delete_conversation(conversation_id: str, user: Dict = Depends(require_user)
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # DOCUMENT ASSOCIATION
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/documents/save")
 def save_document(req: SaveDocumentRequest, user: Dict = Depends(require_user)):
@@ -957,9 +957,9 @@ def list_documents(user: Dict = Depends(require_user)):
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NEWS CHAT CONVERSATION PERSISTENCE
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/news-conversations/save")
 def save_news_conversation(req: SaveNewsChatRequest, user: Dict = Depends(require_user)):
@@ -1032,7 +1032,7 @@ def save_news_conversation(req: SaveNewsChatRequest, user: Dict = Depends(requir
             session.execute_write(_work)
         return {"ok": True, "conversation_id": req.conversation_id}
     except Exception as e:
-        print(f"❌ save_news_conversation error: {e}")
+        print(f"âŒ save_news_conversation error: {e}")
         raise HTTPException(503, f"Database error: {e}")
 
 
@@ -1102,7 +1102,7 @@ def delete_news_conversation(conversation_id: str, user: Dict = Depends(require_
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # REPORT PERSISTENCE
 #
 # Graph additions:
@@ -1112,7 +1112,7 @@ def delete_news_conversation(conversation_id: str, user: Dict = Depends(require_
 #
 # Reports are scoped to a Conversation so they always belong to the chat
 # that triggered them. Users can list, load, and delete their reports.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/conversations/{conversation_id}/reports")
 def list_reports_for_conversation(
@@ -1168,7 +1168,7 @@ def list_all_reports(user: Dict = Depends(require_user)):
 
 @router.get("/reports/{report_id}")
 def get_report(report_id: str, user: Dict = Depends(require_user)):
-    """Return a single report — only if it belongs to a conversation owned by the user."""
+    """Return a single report â€” only if it belongs to a conversation owned by the user."""
     rows = _run(
         """
         MATCH (u:User {id: $user_id})-[:HAS_CONVERSATION]->(c:Conversation)
@@ -1206,16 +1206,16 @@ def delete_report(report_id: str, user: Dict = Depends(require_user)):
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STARTUP HOOK — call from main.py ONCE
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# STARTUP HOOK â€” call from main.py ONCE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def init_neo4j():
     """Call this once at app startup to verify connection and create constraints.
     Retries up to 15 times with 10s delay to handle slow Neo4j startup in Docker.
     """
     if not _NEO4J_AVAILABLE:
-        print("⚠️  neo4j driver missing — run: pip install neo4j")
+        print("âš ï¸  neo4j driver missing â€” run: pip install neo4j")
         print("    Auth endpoints will return 503 until the package is installed.")
         return
 
@@ -1237,32 +1237,32 @@ def init_neo4j():
                 )
                 n = result[0]["n"] if result else 0
                 if n:
-                    print(f"🧹 Neo4j: purged {n} expired token(s)")
+                    print(f"ðŸ§¹ Neo4j: purged {n} expired token(s)")
             except Exception as e:
-                print(f"⚠️  Token cleanup failed (non-fatal): {e}")
-            print(f"✅ Neo4j connected — {NEO4J_URI} / db:{NEO4J_DATABASE}")
+                print(f"âš ï¸  Token cleanup failed (non-fatal): {e}")
+            print(f"âœ… Neo4j connected â€” {NEO4J_URI} / db:{NEO4J_DATABASE}")
             _seed_admin()
-            return  # success — exit retry loop
+            return  # success â€” exit retry loop
         except Exception as e:
             if attempt < max_retries:
-                print(f"⏳ Neo4j not ready (attempt {attempt}/{max_retries}) — retrying in {retry_delay}s... ({e})")
+                print(f"â³ Neo4j not ready (attempt {attempt}/{max_retries}) â€” retrying in {retry_delay}s... ({e})")
                 time.sleep(retry_delay)
             else:
-                print(f"❌ Neo4j connection FAILED after {max_retries} attempts: {e}")
-                print("─" * 60)
+                print(f"âŒ Neo4j connection FAILED after {max_retries} attempts: {e}")
+                print("â”€" * 60)
                 print("  Checklist:")
                 print("  1. Is Neo4j running? (neo4j start  or  check Desktop)")
                 print(f"  2. Is the URI correct? Current: {NEO4J_URI}")
-                print(f"     • Local:  bolt://127.0.0.1:7687")
-                print(f"     • AuraDB: neo4j+s://<id>.databases.neo4j.io")
+                print(f"     â€¢ Local:  bolt://127.0.0.1:7687")
+                print(f"     â€¢ AuraDB: neo4j+s://<id>.databases.neo4j.io")
                 print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
                 print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
-                print("─" * 60)
+                print("â”€" * 60)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ADMIN: seed default admin account + helper
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _seed_admin() -> None:
     """Create the default admin account (admin / admin) if it doesn't exist."""
@@ -1288,14 +1288,14 @@ def _seed_admin() -> None:
                 """,
                 {"id": admin_id, "ph": pw_hash, "now": now},
             )
-            print("✅ admin account seeded (email: admin@bimlo.local, password: admin)")
+            print("âœ… admin account seeded (email: admin@bimlo.local, password: admin)")
         else:
             # Ensure existing admin has role=admin
             _run(
                 "MATCH (u:User {email: 'admin@bimlo.local'}) SET u.role = 'admin'",
             )
     except Exception as e:
-        print(f"⚠️  Admin seed failed (non-fatal): {e}")
+        print(f"âš ï¸  Admin seed failed (non-fatal): {e}")
 
 
 def require_admin(
@@ -1310,9 +1310,9 @@ def require_admin(
     return user
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # ADMIN ENDPOINTS
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class AdminUpdateUserRequest(BaseModel):
     username:  Optional[str] = None
@@ -1431,7 +1431,7 @@ def admin_update_user(
         "MATCH (u:User {id: $id}) RETURN u.username AS username, u.email AS email, coalesce(u.role, 'user') AS role",
         {"id": user_id},
     )
-    print(f"✏️  admin: updated user {user_id}")
+    print(f"âœï¸  admin: updated user {user_id}")
     return updated[0] if updated else {"ok": True}
 
 
@@ -1463,7 +1463,7 @@ def admin_delete_user(user_id: str, admin: Dict = Depends(require_admin)):
         """,
         {"id": user_id},
     )
-    print(f"🗑️  admin: deleted user {user_id}")
+    print(f"ðŸ—‘ï¸  admin: deleted user {user_id}")
     return {"ok": True, "deleted_user_id": user_id}
 
 
@@ -1551,13 +1551,13 @@ def admin_send_email(req: AdminSendEmailRequest, admin: Dict = Depends(require_a
                     server.login(smtp_user, smtp_pass)
                     server.sendmail(smtp_from, to_email, msg.as_string())
                 sent.append(to_email)
-                print(f"📧 admin: sent email to {to_email}")
+                print(f"ðŸ“§ admin: sent email to {to_email}")
             else:
-                # SMTP not configured — log instead
-                print(f"📧 [SMTP not configured] Would send to {to_email}: {req.subject}")
+                # SMTP not configured â€” log instead
+                print(f"ðŸ“§ [SMTP not configured] Would send to {to_email}: {req.subject}")
                 sent.append(to_email)  # treat as sent for UI purposes
         except Exception as e:
-            print(f"⚠️  admin: email to {to_email} failed: {e}")
+            print(f"âš ï¸  admin: email to {to_email} failed: {e}")
             failed.append(to_email)
 
     return {"sent": sent, "failed": failed}
@@ -1572,9 +1572,9 @@ def admin_logs(admin: Dict = Depends(require_admin), limit: int = 200):
     return {"logs": list(_log_buffer)[-limit:]}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # IN-MEMORY LOG BUFFER (captured from stdout for admin panel)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import sys
 import threading
@@ -1657,7 +1657,7 @@ async def admin_logs_stream(admin: Dict = Depends(require_admin)):
 @router.get("/admin/pipeline-logs")
 def admin_pipeline_logs(
     limit: int = 300,
-    event: str = None,          # optional filter: routing|judge|retrieval|…
+    event: str = None,          # optional filter: routing|judge|retrieval|â€¦
     user: dict = Depends(require_admin),
 ):
     """
@@ -1665,12 +1665,12 @@ def admin_pipeline_logs(
     observability.py's JSONL file.
  
     Query params:
-      limit  — max entries to return (default 300, max 2000)
-      event  — filter by event type (routing, judge, retrieval, ingestion,
+      limit  â€” max entries to return (default 300, max 2000)
+      event  â€” filter by event type (routing, judge, retrieval, ingestion,
                 query_end, alert, latency)
  
     Response:
-      { "entries": [ {...}, … ], "total": N, "log_file": "…" }
+      { "entries": [ {...}, â€¦ ], "total": N, "log_file": "â€¦" }
     """
     try:
         from observability import obs
@@ -1682,7 +1682,7 @@ def admin_pipeline_logs(
             "log_file": str(obs.LOG_FILE) if hasattr(obs, "LOG_FILE") else "unknown",
         }
     except ImportError:
-        raise HTTPException(503, "observability module not available — ensure observability.py is in the Python path")
+        raise HTTPException(503, "observability module not available â€” ensure observability.py is in the Python path")
     except Exception as e:
         raise HTTPException(500, f"Failed to read pipeline logs: {e}")
  
@@ -1694,7 +1694,7 @@ def admin_pipeline_logs_stats(user: dict = Depends(require_admin)):
  
     Response:
       {
-        "event_counts":    { "routing": N, "judge": N, … },
+        "event_counts":    { "routing": N, "judge": N, â€¦ },
         "judge_pass":      N,
         "judge_fail":      N,
         "judge_pass_rate": 0.xx | null,

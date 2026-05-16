@@ -179,22 +179,60 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
         if _cached.get("pipeline_submitted"):
             _waited = 0
             _poll_interval = 0.25
-            _max_wait      = 8.0
+            _max_wait      = 30.0
+            _found = False
             while _waited < _max_wait:
                 try:
                     _check = vector_store.list_documents(user_id=user_id, session_id=session_id)
                     if any(d["document_id"] == _pending_id for d in _check):
                         print(f"\u2705 Doc {_pending_id} indexed by pipeline after {_waited:.1f}s wait")
+                        _found = True
                         break
                 except Exception:
                     pass
                 time.sleep(_poll_interval)
                 _waited += _poll_interval
-            else:
+            if not _found:
                 print(
                     f"\u26a0\ufe0f  Doc {_pending_id} ('{_cached['filename']}') still not in Chroma after "
-                    f"{_max_wait}s — pipeline may have failed; skipping to avoid duplicate indexing."
+                    f"{_max_wait}s — checking one more time before falling back to direct index."
                 )
+                try:
+                    _check = vector_store.list_documents(user_id=user_id, session_id=session_id)
+                    if any(d["document_id"] == _pending_id for d in _check):
+                        print(f"\u2705 Doc {_pending_id} found on final check")
+                        continue
+                except Exception:
+                    pass
+                print(f"\u23f3 Pipeline timed out — indexing '{_cached['filename']}' directly")
+                _ext = _cached.get('doc_type', '.txt')
+                _is_image = _cached.get('is_image', False)
+                if _is_image:
+                    _chunks = doc_processor.process_image_bytes(_cached['bytes'], _cached['filename'])
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=_ext, delete=False) as _tmp:
+                        _tmp.write(_cached['bytes'])
+                        _tmp_path = _tmp.name
+                    try:
+                        _chunks = doc_processor.process_document(_tmp_path)
+                    finally:
+                        os.unlink(_tmp_path)
+                for _idx, _chunk in enumerate(_chunks):
+                    if "metadata" not in _chunk:
+                        _chunk["metadata"] = {}
+                    _chunk["metadata"]["chunk_index"] = _idx
+                    _chunk["metadata"]["document_id"] = _pending_id
+                    if _is_image:
+                        _chunk["metadata"]["doc_type"]   = "image"
+                        _chunk["metadata"]["has_images"] = True
+                vector_store.add_document(
+                    _cached['filename'],
+                    _chunks,
+                    session_id=session_id,
+                    user_id=user_id,
+                    doc_id=_pending_id,
+                )
+                print(f"\u2705 Directly indexed '{_cached['filename']}' ({len(_chunks)} chunks) after pipeline timeout")
             continue
 
         print(f"\u23f3 Committing pending doc '{_cached['filename']}' ({_pending_id})…")
