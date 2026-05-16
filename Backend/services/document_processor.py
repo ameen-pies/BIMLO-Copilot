@@ -528,6 +528,28 @@ class DocumentProcessor:
                     raw = (resp.json().get("response") or "").strip()
                     raw = re.sub(r"\s+", " ", raw).strip().strip('"').strip("'")
                     if raw:
+                        # Detect error/refusal messages from text-only LLMs that
+                        # cannot actually process images.  These are NOT valid
+                        # descriptions — reject them so callers fall back to the
+                        # clean placeholder instead of storing the error as-is.
+                        _lower = raw.lower()
+                        if any(p in _lower for p in (
+                            "does not support image",
+                            "cannot read image",
+                            "cannot process image",
+                            "can't process image",
+                            "can't read image",
+                            "do not have the ability",
+                            "don't have the ability",
+                            "cannot see images",
+                            "can't see images",
+                            "unable to process images",
+                            "as a text-based",
+                            "as a language model",
+                            "sorry, but i",
+                        )):
+                            print(f"   ⚠️  Vision LLM ({label}) returned error/refusal: {raw[:100]}… — trying next")
+                            continue
                         print(f"   ✅ Vision LLM ({label}) → {len(raw)} chars")
                         return raw[:1000]
                     print(f"   ⚠️  Vision LLM ({label}) returned empty response — trying next")

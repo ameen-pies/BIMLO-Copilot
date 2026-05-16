@@ -1846,13 +1846,16 @@ Reply with ONLY the rewritten search query. No explanation."""
             approach_block += f"\n{fix_instruction}\n"
 
         # ── Visual content ─────────────────────────────────────────────────────
-        has_visual_chunks = "[IMAGE " in context or "[TABLE " in context
+        has_visual_chunks = "[IMAGE " in context or "[TABLE " in context or "[UPLOADED IMAGE:" in context
         visual_instruction = ""
         if has_visual_chunks:
             visual_instruction = (
-                "\n\nVISUAL CONTENT: Some sources contain [IMAGE on page N: <description>] and [TABLE on page N] blocks. "
-                "These are AI-generated descriptions of diagrams/tables in the document. Treat them as factual content — "
-                "reference them naturally (e.g. 'The wiring diagram on page 3 shows…'). Never reproduce the raw tag."
+                "\n\nVISUAL CONTENT: Some sources contain [IMAGE on page N: <description>], [TABLE on page N], "
+                "or [UPLOADED IMAGE: <filename>] blocks. "
+                "These are AI-generated descriptions of diagrams, tables, or user-uploaded images. "
+                "Treat them as factual content — "
+                "reference them naturally (e.g. 'The wiring diagram on page 3 shows…' or 'The uploaded image shows…'). "
+                "Never reproduce the raw tag."
             )
 
         voice_note = ""
