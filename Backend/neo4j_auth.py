@@ -1396,12 +1396,17 @@ def admin_stats(admin: Dict = Depends(require_admin)):
                count(CASE WHEN u.role = 'admin' THEN 1 END) AS admins,
                count(CASE WHEN datetime(u.last_seen) > datetime() - duration({hours: 1}) THEN 1 END) AS active_1h,
                count(CASE WHEN datetime(u.last_seen) > datetime() - duration({days: 1}) THEN 1 END) AS active_24h,
-               count(CASE WHEN datetime(u.created_at) > datetime() - duration({days: 7}) THEN 1 END) AS new_7d
+               count(CASE WHEN datetime(u.created_at) > datetime() - duration({days: 7}) THEN 1 END) AS new_7d,
+               count(CASE WHEN datetime(u.created_at) > datetime() - duration({days: 14})
+                         AND datetime(u.created_at) <= datetime() - duration({days: 7}) THEN 1 END) AS new_prev_7d
         """
     )
     convs = _run("MATCH (c:Conversation) RETURN count(c) AS total")
     docs  = _run("MATCH (d:Document) RETURN count(d) AS total")
     rpts  = _run("MATCH (r:Report) RETURN count(r) AS total")
+    funnel_convs = _run("MATCH (u:User)-[:HAS_CONVERSATION]->(:Conversation) RETURN count(DISTINCT u) AS total")
+    funnel_docs  = _run("MATCH (u:User)-[:UPLOADED]->(:Document) RETURN count(DISTINCT u) AS total")
+    funnel_rpts  = _run("MATCH (u:User)-[:HAS_CONVERSATION]->(:Conversation)-[:HAS_REPORT]->(:Report) RETURN count(DISTINCT u) AS total")
     u = users[0] if users else {}
     return {
         "total_users":    u.get("total", 0),
@@ -1409,9 +1414,13 @@ def admin_stats(admin: Dict = Depends(require_admin)):
         "active_1h":      u.get("active_1h", 0),
         "active_24h":     u.get("active_24h", 0),
         "new_users_7d":   u.get("new_7d", 0),
+        "new_users_prev_7d": u.get("new_prev_7d", 0),
         "total_conversations": convs[0]["total"] if convs else 0,
         "total_documents":     docs[0]["total"] if docs else 0,
         "total_reports":       rpts[0]["total"] if rpts else 0,
+        "users_with_conversations": funnel_convs[0]["total"] if funnel_convs else 0,
+        "users_with_documents":     funnel_docs[0]["total"] if funnel_docs else 0,
+        "users_with_reports":       funnel_rpts[0]["total"] if funnel_rpts else 0,
     }
 
 

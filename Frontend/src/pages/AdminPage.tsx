@@ -28,14 +28,18 @@ interface AdminUser {
 }
 
 interface Stats {
-  total_users:         number;
-  admin_users:         number;
-  active_1h:           number;
-  active_24h:          number;
-  new_users_7d:        number;
-  total_conversations: number;
-  total_documents:     number;
-  total_reports:       number;
+  total_users:              number;
+  admin_users:              number;
+  active_1h:                number;
+  active_24h:               number;
+  new_users_7d:             number;
+  new_users_prev_7d:        number;
+  total_conversations:      number;
+  total_documents:          number;
+  total_reports:            number;
+  users_with_conversations: number;
+  users_with_documents:     number;
+  users_with_reports:       number;
 }
 
 interface LLMProviders {
@@ -258,6 +262,51 @@ function Sparkline({ data, color, height = 36 }: { data: number[]; color: string
         );
       })()}
     </svg>
+  );
+}
+
+// ─── Engagement Funnel ──────────────────────────────────────────────────────
+
+function EngagementFunnel({ stats }: { stats: Stats }) {
+  const stages = [
+    { label: "Total Users",          value: stats.total_users,              color: "#3b82f6" },
+    { label: "With Conversations",   value: stats.users_with_conversations, color: "#6366f1" },
+    { label: "With Documents",       value: stats.users_with_documents,     color: "#8b5cf6" },
+    { label: "With Reports",         value: stats.users_with_reports,       color: "#22c55e" },
+  ];
+  const maxVal = Math.max(stages[0].value, 1);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, justifyContent: "center" }}>
+      {stages.map((s, i) => {
+        const pct = (s.value / maxVal) * 100;
+        const convRate = i > 0 && stages[i - 1].value > 0
+          ? Math.round((s.value / stages[i - 1].value) * 100)
+          : null;
+        return (
+          <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 110, fontSize: 11, color: "hsl(var(--muted-foreground))", textAlign: "right", flexShrink: 0 }}>{s.label}</div>
+            <div style={{ flex: 1, height: 22, borderRadius: 4, background: "hsl(var(--muted)/0.25)", overflow: "hidden", position: "relative" }}>
+              <div style={{
+                height: "100%", borderRadius: 4, width: `${Math.max(pct, 2)}%`,
+                background: `linear-gradient(to right, ${s.color}, ${s.color}99)`,
+                transition: "width 0.6s cubic-bezier(0,0,.2,1)",
+              }} />
+              <span style={{
+                position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                fontSize: 11, fontWeight: 700, color: pct > 30 ? "#fff" : "hsl(var(--foreground))",
+              }}>{s.value}</span>
+            </div>
+            {convRate !== null && (
+              <span style={{ width: 38, fontSize: 10, fontWeight: 600, color: convRate >= 50 ? "#22c55e" : convRate >= 25 ? "#f59e0b" : "#ef4444", textAlign: "right" }}>
+                {convRate}%
+              </span>
+            )}
+            {convRate === null && <span style={{ width: 38 }} />}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1022,7 +1071,6 @@ export default function AdminPage() {
 
   // Build sparkline data from users (conversations per-user distribution)
   const convSparkData = users.slice(0, 12).map(u => u.conversation_count);
-  const docSparkData  = users.slice(0, 12).map(u => u.document_count);
 
   // Activity bar data: bucket users by signup recency (last 7 days)
   const activityBars = (() => {
@@ -1135,28 +1183,25 @@ export default function AdminPage() {
 
         {/* ── KPIs ── */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 24 }}>
-          <KpiCard icon={Users}       label={t("admin.kpi_total_users")}  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" sparkData={[2,3,3,4,5,5,6,7,7,stats?.total_users ?? 7]} />
-          <KpiCard icon={Wifi}        label={t("admin.kpi_active_1h")}  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" sparkData={[1,0,2,1,3,2,stats?.active_1h ?? 2]} />
-          <KpiCard icon={Activity}    label={t("admin.kpi_active_24h")} value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" sparkData={[1,2,1,3,2,4,stats?.active_24h ?? 2]} />
-          <KpiCard icon={TrendingUp}  label={t("admin.kpi_new_7d")}     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats?.new_users_7d ? 12 : undefined} sparkData={activityBars.counts} />
+          <KpiCard icon={Users}       label={t("admin.kpi_total_users")}  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" />
+          <KpiCard icon={Wifi}        label={t("admin.kpi_active_1h")}  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" />
+          <KpiCard icon={Activity}    label={t("admin.kpi_active_24h")} value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" />
+          <KpiCard icon={TrendingUp}  label={t("admin.kpi_new_7d")}     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats && (stats.new_users_7d || stats.new_users_prev_7d) ? Math.round(((stats.new_users_7d - stats.new_users_prev_7d) / Math.max(stats.new_users_prev_7d, 1)) * 100) : undefined} sparkData={activityBars.counts} />
           <KpiCard icon={MessageSquare} label={t("admin.kpi_conversations")} value={stats?.total_conversations ?? "—"} sub="all sessions" accent="#f59e0b" sparkData={convSparkData} />
         </div>
 
-        {/* ── Activity + Top Users row ── */}
+        {/* ── Engagement Funnel + News Pipeline row ── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
-          {/* Signups per day */}
+          {/* Engagement Funnel */}
           <div style={{ ...S.card, padding: "18px 20px", display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexShrink: 0 }}>
               <div>
-                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>{t("admin.signups_7d")}</div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: "hsl(var(--foreground))" }}>
-                  {activityBars.counts.reduce((a, b) => a + b, 0)}
-                  <span style={{ fontSize: 12, fontWeight: 500, color: "hsl(var(--muted-foreground))", marginLeft: 6 }}>{t("admin.new_users")}</span>
-                </div>
+                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>Engagement Funnel</div>
+                <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>User journey through the platform</div>
               </div>
-              <BarChart3 size={18} color="#a855f7" />
+              <TrendingUp size={18} color="#6366f1" />
             </div>
-            <MiniBarChart data={activityBars.counts} labels={activityBars.days} color="#a855f7" />
+            {stats ? <EngagementFunnel stats={stats} /> : <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))" }}>Loading...</div>}
           </div>
 
           {/* News Pipeline Status */}

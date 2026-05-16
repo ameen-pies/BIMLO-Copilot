@@ -646,16 +646,16 @@ const Index = () => {
                 as="span"
                 mainClassName="inline-flex font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4"
                 staggerFrom={"random"}
-                animatePresenceMode="wait"
+                animatePresenceMode="sync"
                 splitBy="characters"
-                initial={[{ filter: "blur(20px)", opacity: 0 }]}
+                initial={[{ filter: "blur(14px)", opacity: 0 }]}
                 animate={[{ filter: "blur(0px)", opacity: 1 }]}
-                exit={[{ filter: "blur(20px)", opacity: 0 }]}
+                exit={[{ filter: "blur(14px)", opacity: 0 }]}
                 loop
-                staggerDuration={0.01}
+                staggerDuration={0.04}
                 splitLevelClassName=""
                 elementLevelClassName="md:py-[4px]"
-                transition={{ ease: [0.909, 0.151, 0.153, 0.86], duration: 1 }}
+                transition={{ ease: [0.909, 0.151, 0.153, 0.86], duration: 0.5 }}
                 rotationInterval={4000}
               />
             </motion.h1>
