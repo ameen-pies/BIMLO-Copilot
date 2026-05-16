@@ -20,7 +20,7 @@ export const ThinkingTrace: React.FC<ThinkingTraceProps> = ({
   showDots = false,
   isLoading = false,
 }) => {
-  if (steps.length === 0) return null;
+  if (steps.length === 0 && !isLoading) return null;
 
   const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
 
