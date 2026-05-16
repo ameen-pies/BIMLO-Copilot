@@ -185,6 +185,64 @@ MIN_CHUNKS = 2
 RELEVANCE_THRESHOLD = 0.65
 
 
+def _detect_script_language(text: str) -> str:
+    """
+    Quick Unicode-script-based language detection.
+    Returns an ISO 639-1 code: 'ar', 'zh', 'ko', 'ru', 'he', 'th', 'hi', or 'en'.
+    Falls back to keyword heuristics for French vs English in the Latin range.
+    """
+    if not text:
+        return "en"
+    # Arabic
+    if any('\u0600' <= c <= '\u06FF' for c in text):
+        return 'ar'
+    # Cyrillic
+    if any('\u0400' <= c <= '\u04FF' for c in text):
+        return 'ru'
+    # CJK
+    if any('\u4E00' <= c <= '\u9FFF' for c in text):
+        return 'zh'
+    # Korean
+    if any('\uAC00' <= c <= '\uD7AF' for c in text):
+        return 'ko'
+    # Hebrew
+    if any('\u0590' <= c <= '\u05FF' for c in text):
+        return 'he'
+    # Thai
+    if any('\u0E00' <= c <= '\u0E7F' for c in text):
+        return 'th'
+    # Devanagari
+    if any('\u0900' <= c <= '\u097F' for c in text):
+        return 'hi'
+    # Latin script — disambiguate French vs English via common words
+    import re as _re
+    lower_words = set(_re.sub(r'[^a-zàâçéèêëîïôûùüÿ]', ' ', text.lower()).split())
+    # French signal words (high precision, whole-word match only)
+    french_signals = {'bonjour', 'salut', 'merci', 'svp', 's\'il', 'vous', 'je', 'suis',
+                      'nous', 'c\'est', 'dans', 'avec', 'cette', 'être', 'avoir',
+                      'faire', 'mais', 'donc', 'où', 'qu\'est-ce', 'comment', 'pourquoi',
+                      'quelle', 'quels', 'quelles', 'français', 'fichier', 'pourriez',
+                      'donner', 'peut', 'peux', 'mon', 'ton',
+                      'son', 'mes', 'tes', 'ses', 'nos', 'vos', 'leurs', 'aussi',
+                      'tres', 'assez', 'beaucoup', 'encore', 'enfin', 'ensuite',
+                      'depuis', 'pendant', 'parce', 'car', 'ni', 'or',
+                      'moi', 'toi', 'lui', 'elle', 'eux', 'elles',
+                      'ceci', 'cela', 'voici', 'il', 'on', 'ils'}
+    # Unambiguous French words that don't appear in English usage
+    strong_french = {'bonjour', 'salut', 'merci', 'svp', 'français', 'fichier',
+                     'quelle', 'quels', 'quelles', 'pourquoi', 'comment',
+                     'pourriez', 'parce', 'ensuite', 'beaucoup', 'je', 'mon', 'ton',
+                     'son', 'mes', 'tes', 'ses', 'nos', 'vos', 'moi', 'toi', 'lui',
+                     'elle', 'nous', 'leur', 'eux', 'elles', 'ceci', 'cela', 'voici',
+                     'voilà', 'il', 'elle', 'on', 'ils', 'elles'}
+    if lower_words & strong_french:
+        return 'fr'
+    # Weaker match — check if a threshold of French signals is present
+    if len(lower_words & french_signals) >= 2:
+        return 'fr'
+    return 'en'
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # OLLAMA (LOCAL) CLIENT
 # ────────────────────────────────────────────────────────────────────────────
@@ -1271,10 +1329,19 @@ Now generate for: "{q}" """
     def _generate_direct_answer(self, query: str, plan: ResponsePlan, history: Optional[List[Dict]] = None, no_docs: bool = False, route_log: Optional[List[Dict]] = None, session_has_docs: bool = True) -> str:
         """Generate a direct answer using conversation history as the primary context."""
 
+        user_lang = _detect_script_language(query)
+        target_lang = plan.target_language or user_lang
+        lang_rule = (
+            f"🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. "
+            f"The user asked in {user_lang.upper()}. Every single sentence must be in {target_lang.upper()}. "
+            f"This is the most important rule."
+        )
+
         if no_docs:
             system_content = (
                 f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
-                f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
+                f"Respond in {target_lang.upper()} using a {plan.target_tone} tone. "
+                f"{lang_rule} "
                 f"The user asked a question that would normally use uploaded documents, but there are no files uploaded in this chat session yet. "
                 f"Mention this clearly in your answer, and offer to help further once they upload a document. "
                 f"Keep the reply friendly and concise."
@@ -1313,7 +1380,8 @@ Now generate for: "{q}" """
             system_content = (
                 f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
                 f"You help professionals in construction, BTP, and telecom industries with technical questions and document analysis. "
-                f"Respond in {plan.target_language} using a {plan.target_tone} tone. "
+                f"Respond in {target_lang.upper()} using a {plan.target_tone} tone. "
+                f"{lang_rule} "
                 f"You are one single assistant — the conversation history and action log below "
                 f"are all yours. Use them freely to answer follow-up questions, recall what was "
                 f"said or done, and modify previous answers when asked."
@@ -1696,7 +1764,8 @@ Reply with ONLY the rewritten search query. No explanation."""
         # the fix instruction is already baked into plan.approach.
         # We pass an empty fix_instruction here so we don't double-inject it.
         voice_transcribed = state.get("voice_transcribed", False)
-        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", voice_transcribed=voice_transcribed)
+        user_language = _detect_script_language(query)
+        prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", voice_transcribed=voice_transcribed, user_language=user_language)
         
         # Build messages — prepend conversation history so the model can handle
         # modification requests ("make it shorter", "change X to Y") by seeing
@@ -1794,12 +1863,30 @@ Reply with ONLY the rewritten search query. No explanation."""
             "confidence": _confidence(chunks),
         }
     
-    def _build_synthesis_prompt(self, query: str, context: str, plan: ResponsePlan, fix_instruction: str = "", voice_transcribed: bool = False) -> str:
+    def _build_synthesis_prompt(self, query: str, context: str, plan: ResponsePlan, fix_instruction: str = "", voice_transcribed: bool = False, user_language: str = "") -> str:
         tone_map = {
             'casual': 'casual and friendly', 'conversational': 'conversational',
             'friendly': 'warm and friendly', 'professional': 'professional', 'technical': 'technical',
         }
         tone = tone_map.get(plan.target_tone, plan.target_tone)
+
+        # Detect the user's language from the query if not provided
+        if not user_language:
+            user_language = _detect_script_language(query)
+        # Use plan.target_language as the authoritative choice (judge may have overridden)
+        target_lang = plan.target_language or user_language
+
+        # ── Strong language mirroring instruction ──────────────────────────────
+        # This is the #1 issue: the model tends to answer in the document's language
+        # rather than the user's language. We need a very explicit, hard-to-ignore rule.
+        language_rule = (
+            f"\n🚨 LANGUAGE REQUIREMENT (CRITICAL): The user asked you in {user_language.upper()}. "
+            f"You MUST write your ENTIRE answer in {target_lang.upper()}. "
+            f"The documents below may be in a different language — IGNORE their language. "
+            f"Your response language is {target_lang.upper()}, period. "
+            f"Every single sentence you write must be in {target_lang.upper()}. "
+            f"This is the most important instruction."
+        )
 
         # ── Translate plan fields into concrete formatting instructions ─────────
         # response_style and max_response_length are meaningless unless we translate them
@@ -1867,7 +1954,8 @@ Reply with ONLY the rewritten search query. No explanation."""
 
         return f"""You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI digital twins). You help professionals in construction and telecom analyse technical documents.
 
-Language: {plan.target_language} | Tone: {tone}
+Language: {target_lang.upper()} | Tone: {tone}
+{language_rule}
 {style_instruction}
 {length_instruction}{approach_block}{key_points_block}{avoid_block}{visual_instruction}{voice_note}
 
@@ -1878,6 +1966,9 @@ CORE RULES:
 4. If the question asks for one specific fact (e.g. "who is the host company?", "what is the wind speed?"), state that fact immediately in the first sentence — then add context if useful.
 5. Never invent information. If something is not in the documents, say so clearly.
 6. NEVER add unsolicited advice, disclaimers, or generic background that wasn't asked for.
+
+LANGUAGE:
+7. 🚨 You MUST write your ENTIRE answer in {target_lang.upper()}. The documents below may be in a different language — do NOT follow their language. Follow the user's language.
 
 FORMATTING:
 - Simple/factual questions: answer in 1-3 sentences. No sections needed.
@@ -1893,7 +1984,7 @@ USER QUESTION: {query}
 DOCUMENTS:
 {context}
 
-Answer in {plan.target_language}:"""
+Remember: Answer in {target_lang.upper()}. The document language is irrelevant. Your ENTIRE answer must be in {target_lang.upper()}."""
 
 
     def _fallback_synthesis(self, chunks: List[Dict], plan: ResponsePlan) -> str:
@@ -2074,6 +2165,11 @@ Answer in {plan.target_language}:"""
         if plan and evaluation.how_to_fix:
             updates = {}
             fix = evaluation.how_to_fix
+
+            # Build correction directives
+            correction_parts = []
+            lang_correction = ""
+
             if not evaluation.tone_correct:
                 if any(w in fix for w in ("formal", "professional")):
                     updates["target_tone"] = "professional"
@@ -2081,6 +2177,14 @@ Answer in {plan.target_language}:"""
                     updates["target_tone"] = "conversational"
                 elif "technical" in fix:
                     updates["target_tone"] = "technical"
+
+            # ── Language correction ─────────────────────────────────────────
+            if not evaluation.language_correct:
+                correct_lang = _detect_script_language(state.get("query", ""))
+                updates["target_language"] = correct_lang
+                lang_correction = f"LANGUAGE ERROR: Your answer was in the wrong language. Rewrite the ENTIRE answer in {correct_lang.upper()}. Every sentence must be in {correct_lang.upper()}."
+                correction_parts.append(lang_correction)
+                print(f"🌐 Language correction: forcing {correct_lang.upper()} (was wrong language)")
 
             if any(w in fix for w in ("shorter", "concise", "brief", "too long")):
                 updates["max_response_length"] = "brief"
@@ -2094,8 +2198,10 @@ Answer in {plan.target_language}:"""
             elif any(w in fix for w in ("narrative", "prose", "paragraph")):
                 updates["response_style"] = "narrative"
 
+            # Combine all fix instructions into approach
             existing_approach = plan.approach or ""
-            updates["approach"] = f"{existing_approach}. CORRECTION REQUIRED: {evaluation.how_to_fix}"
+            correction_parts.append(f"CORRECTION REQUIRED: {evaluation.how_to_fix}")
+            updates["approach"] = f"{existing_approach}. {' '.join(correction_parts)}"
             updates["things_to_avoid"] = list(plan.things_to_avoid) + evaluation.specific_problems
 
             if updates:
@@ -2139,7 +2245,12 @@ Answer in {plan.target_language}:"""
         # Build a clean context for transform — no [Source N] headers bleeding into output
         clean_context = "\n\n".join(c["text"] for c in chunks)
 
-        prompt = f"""You are a document assistant. Complete the following task exactly as instructed:
+        user_lang = _detect_script_language(query)
+        target_lang = plan.target_language or user_lang
+
+        prompt = f"""You are a document assistant. Complete the following task exactly as instructed.
+
+🚨 LANGUAGE: You MUST write your output in {target_lang.upper()}. The document below may be in a different language — IGNORE its language. Your output must be in {target_lang.upper()}.
 
 TASK: {query}
 
@@ -2235,9 +2346,14 @@ DOCUMENT:
         if history:
             history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
+        user_lang = _detect_script_language(query)
+        target_lang = plan.target_language or user_lang
+
         prompt = f"""You are a knowledgeable assistant explaining a concept clearly and thoroughly.
 
-Language: {plan.target_language}. Tone: {plan.target_tone}.
+🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The source content below may be in a different language — IGNORE its language. Your answer must be in {target_lang.upper()}.
+
+Language: {target_lang.upper()} | Tone: {plan.target_tone}
 
 TASK: {query}
 
@@ -2266,7 +2382,7 @@ STYLE RULES:
 
 {context_section}
 
-Explain in {plan.target_language}:"""
+Remember: Answer in {target_lang.upper()}. Your ENTIRE answer must be in {target_lang.upper()}."""
 
         if self.llm.enabled:
             answer = self.llm.chat(
@@ -2544,9 +2660,14 @@ Explain in {plan.target_language}:"""
         plan = self.judge.plan_response(query, retrieved_docs=all_chunks, conversation_history=history_texts)
 
         # ── Synthesise answer from the stored visual description ──────────
+        user_lang = _detect_script_language(query)
+        target_lang = plan.target_language or user_lang
+
         prompt = f"""You are analysing images based on their stored visual descriptions.
 
-Language: {plan.target_language} | Tone: {plan.target_tone}
+🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The image descriptions below may be in a different language — IGNORE their language. Your answer must be in {target_lang.upper()}.
+
+Language: {target_lang.upper()} | Tone: {plan.target_tone}
 
 The following are AI-generated descriptions of one or more uploaded images:
 
@@ -2558,7 +2679,7 @@ Answer the user's question based ONLY on the image descriptions above.
 Be specific and reference what is visible in the image.
 If multiple images are present, address each one as relevant.
 Do NOT say you cannot see images — you have the visual descriptions.
-Answer in {plan.target_language}:"""
+Remember: Answer in {target_lang.upper()}. Your entire answer must be in {target_lang.upper()}."""
 
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
@@ -2712,11 +2833,13 @@ Answer in {plan.target_language}:"""
         
         context = _build_context(chunks)
         
-        # Use plan's language if available, otherwise default to 'en'
-        target_lang = plan.target_language if plan else 'en'
-        
-        # Build universal analytics prompt - LLM understands to respond in target language
-        prompt = f"""Analyze the documents and produce a structured JSON response in {target_lang}.
+        # Use plan's language if available, otherwise detect from query
+        user_lang = _detect_script_language(query)
+        target_lang = (plan.target_language if plan else None) or user_lang
+
+        prompt = f"""Analyze the documents and produce a structured JSON response.
+
+🚨 LANGUAGE: ALL text fields MUST be in {target_lang.upper()}. The documents below may be in a different language — IGNORE their language. ALL summary, findings, and recommendations MUST be written in {target_lang.upper()}.
 
 User Question: {query}
 
@@ -2724,7 +2847,7 @@ Documents:
 {context}
 
 Instructions:
-- Respond in {target_lang}
+- Respond in {target_lang.upper()}
 - Provide analytical insights based on the documents
 - Return ONLY a valid JSON object with this structure:
 
@@ -2736,7 +2859,7 @@ Instructions:
   "data_quality": "high|medium|low"
 }}
 
-Remember: ALL text fields must be in {target_lang}."""
+Remember: ALL text fields must be in {target_lang.upper()}."""
         
         analytics_data = None
         narrative = ""

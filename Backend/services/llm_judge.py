@@ -214,9 +214,11 @@ QUERY: {user_query}
 
 Analyse the query and the document excerpts above, then output a JSON plan.
 
-LANGUAGE RULE:
-- Mirror the query language exactly. If query is in French → "fr". Arabic → "ar". English → "en".
+LANGUAGE RULE (CRITICAL):
+- Mirror the query language EXACTLY. If query is in French → "fr". Arabic → "ar". English → "en".
 - If user explicitly requests a different output language, use that instead.
+- The documents may be in a different language — IGNORE their language. The user's language is what matters.
+- Set target_language_confidence to 0.9+ when language is clear from query content.
 
 DIRECTNESS RULE:
 - Set approach to describe HOW to answer this specific question, not generic advice.
@@ -276,13 +278,14 @@ RESPONSE:
 
 EVALUATE on these criteria:
 1. Does it DIRECTLY answer what was asked? (not a definition, not generic background — the actual answer)
-2. Is the language correct? ({plan.target_language})
+2. Is the language correct? ({plan.target_language}) — CRITICAL: If the response is in a different language than {plan.target_language}, this is AUTOMATICALLY a fail. Set language_correct=false regardless of content quality.
 3. Does it contain any claims NOT supported by the source documents? (hallucination)
 4. Is the length appropriate? (brief questions should get brief answers — not padded sections)
 5. Does it start with a direct answer rather than an introduction/preamble?
 6. Are important specific values/names/facts from the documents included if they were asked for?
 
 SCORING: Be strict. A response that answers a simple factual question with 3 sections and an introduction should score 0.4 or lower.
+LANGUAGE EVALUATION: If the user asked in English but the answer is in French (or vice versa), set language_correct=false, is_acceptable=false, and include "wrong language" in specific_problems with how_to_fix explicitly saying to rewrite in the correct language.
 
 Respond ONLY with this JSON:
 {{
