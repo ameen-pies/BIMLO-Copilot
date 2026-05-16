@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit, Mail, Send, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
-import RotatingWords from "@/components/RotatingWords";
+import TextRotate from "@/components/fancy/text/text-rotate";
 import Logo from "@/components/Logo";
 import { ElegantShape } from "@/components/ui/shape-landing-hero";
 import CardSwap, { Card } from "@/components/CardSwap";
@@ -640,7 +640,29 @@ const Index = () => {
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
               <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
-              <RotatingWords />
+              <TextRotate
+                texts={[
+                  "telecom & construction",
+                  "fiber, 5G & BIM",
+                  "infrastructure intelligence",
+                  "AI-powered engineering",
+                  "design, build & operate",
+                ]}
+                as="span"
+                mainClassName="inline-flex font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight"
+                staggerFrom={"random"}
+                animatePresenceMode="wait"
+                splitBy="characters"
+                initial={[{ x: "120%" }, { y: "120%" }, { x: "-120%" }, { y: "-120%" }]}
+                animate={[{ x: 0 }, { y: 0 }, { x: 0 }, { y: 0 }]}
+                exit={[{ x: "-120%" }, { y: "-120%" }, { x: "120%" }, { y: "120%" }]}
+                loop
+                staggerDuration={0.01}
+                splitLevelClassName="overflow-hidden"
+                elementLevelClassName="overflow-hidden"
+                transition={{ ease: [0.909, 0.151, 0.153, 0.86], duration: 1 }}
+                rotationInterval={4000}
+              />
             </motion.h1>
             <motion.p className="text-lg text-muted-foreground max-w-2xl mb-10"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.3 }}>
