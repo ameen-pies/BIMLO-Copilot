@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ArrowRight, Zap, FileText, MessageSquare, Network, Newspaper, Radio, Cable, Scale, HardHat, TrendingUp, Box, Layers, BrainCircuit, Mail, Send, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
-import TextRotate from "@/components/fancy/text/text-rotate";
+import Letter3DSwap from "@/components/fancy/text/letter-3d-swap";
 import Logo from "@/components/Logo";
 import { ElegantShape } from "@/components/ui/shape-landing-hero";
 import CardSwap, { Card } from "@/components/CardSwap";
@@ -640,22 +640,18 @@ const Index = () => {
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
               <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
-              <TextRotate
+              <Letter3DSwap
                 key={i18n.language}
                 texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
                 as="span"
-                mainClassName="inline-flex font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4"
-                staggerFrom={"random"}
-                animatePresenceMode="sync"
-                splitBy="characters"
-                initial={[{ filter: "blur(14px)", opacity: 0 }]}
-                animate={[{ filter: "blur(0px)", opacity: 1 }]}
-                exit={[{ filter: "blur(14px)", opacity: 0 }]}
-                loop
-                staggerDuration={0.04}
-                splitLevelClassName=""
-                elementLevelClassName="md:py-[4px]"
-                transition={{ ease: [0.909, 0.151, 0.153, 0.86], duration: 0.5 }}
+                mainClassName="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4"
+                frontFaceClassName="text-foreground"
+                secondFaceClassName="text-foreground"
+                rotateDirection="top"
+                staggerDuration={0.03}
+                staggerFrom="first"
+                transition={{ type: "spring", damping: 25, stiffness: 160 }}
+                auto
                 rotationInterval={4000}
               />
             </motion.h1>
