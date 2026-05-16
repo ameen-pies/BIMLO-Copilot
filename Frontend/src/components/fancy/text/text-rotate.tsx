@@ -231,10 +231,8 @@ const TextRotate = forwardRef<TextRotateRef, TextRotateProps>(
       return () => clearInterval(intervalId)
     }, [next, rotationInterval, auto])
 
-    const MotionComponent = useMemo(() => motion.create(as ?? "p"), [as])
-
     return (
-      <MotionComponent
+      <motion.span
         className={cn("flex flex-wrap whitespace-pre-wrap", mainClassName)}
         transition={transition}
         layout
@@ -307,7 +305,7 @@ const TextRotate = forwardRef<TextRotateRef, TextRotateProps>(
             })}
           </motion.span>
         </AnimatePresence>
-      </MotionComponent>
+      </motion.span>
     )
   }
 )

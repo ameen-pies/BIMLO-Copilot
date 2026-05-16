@@ -81,12 +81,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => {
         if (data.user_id) {
-          // Try to get a fresh access token
+          // Try to get a fresh access token and update currentUser state with it
           fetch(`${API_BASE_URL}/auth/refresh`, { method: "POST", credentials: "include" })
             .then(r => r.ok ? r.json() : null)
             .then(refresh => {
               if (refresh?.access_token) {
                 api.setToken(refresh.access_token);
+                setCurrentUserState(prev => prev ? { ...prev, token: refresh.access_token } : prev);
               }
             })
             .catch(() => {});
