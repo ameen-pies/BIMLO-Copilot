@@ -453,13 +453,15 @@ def _build_pinned_context(pinned: List[PinnedArticle]) -> str:
     Build a context block with full article text OR clearly labeled preview fallback.
 
     Content resolution order (best → worst):
-      1. full_content from pipeline cache (set by NewsData.io at fetch time — best)
-      2. Live scrape of the real publisher URL (fallback for RSS-sourced articles)
-      3. rawSummary cached preview (last resort — limited to 300 chars)
+      1. ChromaDB vector store chunks (semantically indexed full content — best)
+      2. full_content from pipeline cache (set by NewsData.io at fetch time)
+      3. Live scrape of the real publisher URL (fallback for RSS-sourced articles)
+      4. rawSummary cached preview (last resort — limited to 600 chars)
     """
     if not pinned:
         return ""
 
+    vs = getattr(g, "vector_store", None)
     blocks = ["═══ ARTICLES PINNED BY USER ═══\n"]
 
     for i, a in enumerate(pinned, 1):
@@ -470,26 +472,44 @@ def _build_pinned_context(pinned: List[PinnedArticle]) -> str:
 
         full = ""
 
-        # Step 1: Try pipeline cache (full_content from NewsData.io — no HTTP)
-        full = _get_cached_full_content(a.articleUrl or "")
-        if full:
-            block += f"Full article content (from pipeline cache):\n{full}\n"
-            logger.info(
-                f"[pinned] ✅ Article {i}/{len(pinned)}: "
-                f"'{a.title[:40]}' — pipeline cache hit ({len(full)} chars)"
-            )
-        else:
-            # Step 2: Live scrape (works for real publisher URLs; fails for Google redirects)
+        # Step 1: Try ChromaDB vector store (semantically indexed full content)
+        if vs and a.articleUrl:
+            try:
+                chunks = vs.get_news_chunks_by_url(a.articleUrl)
+                if chunks:
+                    # Skip first chunk (title-only), join the rest
+                    content_chunks = [c for c in chunks if not c.startswith("Title: ")]
+                    if content_chunks:
+                        full = "\n".join(content_chunks)
+                        logger.info(
+                            f"[pinned] ✅ Article {i}/{len(pinned)}: "
+                            f"'{a.title[:40]}' — vector store hit ({len(full)} chars, {len(content_chunks)} chunks)"
+                        )
+            except Exception as e:
+                logger.debug(f"[pinned] vector store lookup failed for '{a.title[:30]}': {e}")
+
+        # Step 2: Try pipeline cache (full_content from NewsData.io — no HTTP)
+        if not full:
+            full = _get_cached_full_content(a.articleUrl or "")
+            if full:
+                logger.info(
+                    f"[pinned] ✅ Article {i}/{len(pinned)}: "
+                    f"'{a.title[:40]}' — pipeline cache hit ({len(full)} chars)"
+                )
+
+        # Step 3: Live scrape (works for real publisher URLs; fails for Google redirects)
+        if not full:
             full = _fetch_article_text(a.articleUrl or "")
             if full:
-                block += f"Full article text (fetched live):\n{full}\n"
                 logger.info(
                     f"[pinned] ✅ Article {i}/{len(pinned)}: "
                     f"'{a.title[:40]}' — live fetch ({len(full)} chars)"
                 )
 
-        if not full:
-            # Step 3: Cached preview fallback
+        if full:
+            block += f"Full article content:\n{full}\n"
+        else:
+            # Step 4: Cached preview fallback
             logger.warning(
                 f"[pinned] ⚠️  Article {i}/{len(pinned)}: "
                 f"'{a.title[:40]}' — all fetches failed, using cached preview"

@@ -647,6 +647,7 @@ function NewsChatPanel({
     try {
       await fetch(`${API_BASE}/auth/news-conversations/save`, {
         method: "POST",
+        credentials: "include",
         headers: { ...getAuthHeader(), "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_id: convId,
@@ -673,6 +674,7 @@ function NewsChatPanel({
     setLoadingHistory(true);
     try {
       const res = await fetch(`${API_BASE}/auth/news-conversations`, {
+        credentials: "include",
         headers: getAuthHeader(),
       });
       if (res.ok) {
@@ -695,6 +697,7 @@ function NewsChatPanel({
   const openConversation = useCallback(async (conv: NewsConversation) => {
     try {
       const res = await fetch(`${API_BASE}/auth/news-conversations/${conv.id}`, {
+        credentials: "include",
         headers: getAuthHeader(),
       });
       if (!res.ok) return;
@@ -722,6 +725,7 @@ function NewsChatPanel({
     try {
       await fetch(`${API_BASE}/auth/news-conversations/${convId}`, {
         method: "DELETE",
+        credentials: "include",
         headers: getAuthHeader(),
       });
       setPastConvs(prev => prev.filter(c => c.id !== convId));

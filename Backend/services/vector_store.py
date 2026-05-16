@@ -474,6 +474,40 @@ class VectorStoreManager:
                 })
         return formatted
 
+    def get_news_chunks_by_url(self, article_url: str) -> list:
+        """
+        Retrieve all indexed chunks for a specific article URL.
+        Returns full semantic content from ChromaDB instead of short cache snippets.
+
+        Args:
+            article_url: The article URL to look up
+
+        Returns:
+            List of chunk text strings (ordered by chunk_index)
+        """
+        if not article_url:
+            return []
+        try:
+            collection = self._get_or_create_named_collection(self.NEWS_COLLECTION)
+            results = collection.get(
+                where={"article_url": article_url},
+            )
+            if not results or not results.get("documents"):
+                return []
+
+            # Sort by chunk_index to maintain article order
+            paired = list(zip(
+                results["metadatas"] or [],
+                results["documents"],
+            ))
+            paired.sort(key=lambda x: x[0].get("chunk_index", 0))
+            return [doc for _, doc in paired]
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"[vector] get_news_chunks_by_url failed: {e}"
+            )
+            return []
+
     def delete_collection(self, user_id: Optional[str] = None, session_id: Optional[str] = None):
         """
         Completely delete a user/session's collection.

@@ -306,7 +306,7 @@ const ContactForm = () => {
 
 // ── Main page ────────────────────────────────────────────────────────────────
 const Index = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { isLoggedIn } = useAuth();
   const [showScrollArrow, setShowScrollArrow] = useState(true);
   const [isDark, setIsDark] = useState(() =>
@@ -641,25 +641,20 @@ const Index = () => {
             >
               <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
               <TextRotate
-                texts={[
-                  "telecom & construction",
-                  "fiber, 5G & BIM",
-                  "infrastructure intelligence",
-                  "AI-powered engineering",
-                  "design, build & operate",
-                ]}
+                key={i18n.language}
+                texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
                 as="span"
-                mainClassName="inline-flex font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight"
+                mainClassName="inline-flex font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4"
                 staggerFrom={"random"}
                 animatePresenceMode="wait"
                 splitBy="characters"
-                initial={[{ x: "120%" }, { y: "120%" }, { x: "-120%" }, { y: "-120%" }]}
-                animate={[{ x: 0 }, { y: 0 }, { x: 0 }, { y: 0 }]}
-                exit={[{ x: "-120%" }, { y: "-120%" }, { x: "120%" }, { y: "120%" }]}
+                initial={[{ filter: "blur(20px)", opacity: 0 }]}
+                animate={[{ filter: "blur(0px)", opacity: 1 }]}
+                exit={[{ filter: "blur(20px)", opacity: 0 }]}
                 loop
                 staggerDuration={0.01}
-                splitLevelClassName="overflow-hidden"
-                elementLevelClassName="overflow-hidden"
+                splitLevelClassName=""
+                elementLevelClassName="md:py-[4px]"
                 transition={{ ease: [0.909, 0.151, 0.153, 0.86], duration: 1 }}
                 rotationInterval={4000}
               />
