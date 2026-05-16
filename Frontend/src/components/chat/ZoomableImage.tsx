@@ -1,4 +1,5 @@
 import React from "react";
+import { ZoomIn, ZoomOut } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 interface ZoomableImageProps {
