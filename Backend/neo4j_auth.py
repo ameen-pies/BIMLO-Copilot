@@ -786,11 +786,11 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
         })
 
     def _work(tx):
-        # Upsert conversation + link to user
+        # Upsert conversation node first (separate from relationship to avoid
+        # concurrent MERGE race with uniqueness constraints)
         tx.run(
             """
-            MATCH (u:User {id: $user_id})
-            MERGE (u)-[:HAS_CONVERSATION]->(c:Conversation {id: $conv_id})
+            MERGE (c:Conversation {id: $conv_id})
             SET   c.title      = $title,
                   c.preview    = $preview,
                   c.session_id = $session_id,
@@ -804,6 +804,15 @@ def save_conversation(req: SaveConversationRequest, user: Dict = Depends(require
             session_id=req.session_id or "",
             chat_type=req.chat_type,
             now=now,
+        )
+        # Link to user
+        tx.run(
+            """
+            MATCH (u:User {id: $user_id})
+            MATCH (c:Conversation {id: $conv_id})
+            MERGE (u)-[:HAS_CONVERSATION]->(c)
+            """,
+            conv_id=req.conversation_id,
             user_id=user["user_id"],
         )
         # Wipe old messages (full replace on every save)
@@ -989,8 +998,7 @@ def save_news_conversation(req: SaveNewsChatRequest, user: Dict = Depends(requir
     def _work(tx):
         tx.run(
             """
-            MATCH (u:User {id: $user_id})
-            MERGE (u)-[:HAS_NEWS_CONVERSATION]->(c:NewsConversation {id: $conv_id})
+            MERGE (c:NewsConversation {id: $conv_id})
             SET   c.title      = $title,
                   c.preview    = $preview,
                   c.session_id = $session_id,
@@ -1002,6 +1010,14 @@ def save_news_conversation(req: SaveNewsChatRequest, user: Dict = Depends(requir
             preview=req.preview or "",
             session_id=req.session_id or "",
             now=now,
+        )
+        tx.run(
+            """
+            MATCH (u:User {id: $user_id})
+            MATCH (c:NewsConversation {id: $conv_id})
+            MERGE (u)-[:HAS_NEWS_CONVERSATION]->(c)
+            """,
+            conv_id=req.conversation_id,
             user_id=user["user_id"],
         )
         tx.run(
