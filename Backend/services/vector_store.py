@@ -330,6 +330,150 @@ class VectorStoreManager:
             "table_chunks":    table_chunks,
         }
 
+    # ── News article indexing ──────────────────────────────────────────────
+    #
+    # A shared "news_index" collection stores article chunks from the
+    # news pipeline so that the news chat agent can perform semantic
+    # search across all articles, not just pinned cached previews.
+    NEWS_COLLECTION = "news_index"
+
+    def _get_or_create_named_collection(self, name: str):
+        """Get or create a collection by exact name (bypasses user/session isolation)."""
+        if name not in self._collection_cache:
+            self._collection_cache[name] = self.client.get_or_create_collection(
+                name=name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        return self._collection_cache[name]
+
+    def index_news_articles(self, articles: list) -> int:
+        """
+        Index news articles into a global news collection for semantic search.
+
+        Each article is split into ~500-char chunks and embedded. The entire
+        collection is replaced on each call (old articles are purged first) so
+        the index always reflects the latest pipeline run.
+
+        Args:
+            articles: List of article dicts with keys:
+                      id, title, source, category, article_url,
+                      full_content (or raw_summary as fallback)
+
+        Returns:
+            Number of chunks indexed.
+        """
+        collection = self._get_or_create_named_collection(self.NEWS_COLLECTION)
+        texts, embeddings, metadatas, ids = [], [], [], []
+
+        for article in articles:
+            content = article.get("full_content") or article.get("raw_summary") or ""
+            if not content or len(content.strip()) < 50:
+                continue
+
+            doc_id   = article.get("id", str(uuid.uuid4()))
+            title    = article.get("title", "")
+            source   = article.get("source", "")
+            category = article.get("category", "")
+            url      = article.get("article_url", "")
+
+            # Split into ~500-char paragraphs-based chunks
+            paragraphs = [p.strip() for p in content.split("\n") if p.strip()]
+            if not paragraphs:
+                paragraphs = [content]
+
+            raw_chunks = []
+            buf = []
+            buf_len = 0
+            for p in paragraphs:
+                if buf_len + len(p) > 500 and buf:
+                    raw_chunks.append(" ".join(buf))
+                    buf = []
+                    buf_len = 0
+                buf.append(p)
+                buf_len += len(p)
+            if buf:
+                raw_chunks.append(" ".join(buf))
+
+            if not raw_chunks:
+                raw_chunks = [content[:500]]
+
+            # Prepend title as first chunk for better title-based retrieval
+            all_chunks = [f"Title: {title}"] + raw_chunks
+
+            for i, chunk in enumerate(all_chunks):
+                if len(chunk.strip()) < 20:
+                    continue
+                chunk_id = f"{doc_id}_{i}"
+                texts.append(chunk)
+                embeddings.append(self.embedding_model.encode(chunk).tolist())
+                metadatas.append({
+                    "document_id": doc_id,
+                    "chunk_index": i,
+                    "title":       title,
+                    "source":      source,
+                    "category":    category,
+                    "article_url": url,
+                    "timestamp":   datetime.now().isoformat(),
+                })
+                ids.append(chunk_id)
+
+        if not texts:
+            return 0
+
+        # Replace entire collection so stale articles are removed
+        try:
+            existing = collection.get()
+            if existing.get("ids"):
+                collection.delete(ids=existing["ids"])
+        except Exception:
+            pass
+
+        collection.add(
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            ids=ids,
+        )
+
+        doc_count = len({m["document_id"] for m in metadatas})
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Indexed {len(texts)} chunks from {doc_count} news articles "
+            f"in collection '{self.NEWS_COLLECTION}'"
+        )
+        return len(texts)
+
+    def search_news(self, query: str, top_k: int = 10) -> list:
+        """
+        Semantic search across indexed news articles.
+
+        Args:
+            query: User's question or search text
+            top_k: Max number of chunks to return
+
+        Returns:
+            List of dicts with keys: text, metadata, distance, id
+        """
+        collection = self._get_or_create_named_collection(self.NEWS_COLLECTION)
+        query_embedding = self.embedding_model.encode(query).tolist()
+
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+        )
+
+        formatted: list = []
+        if results.get("documents") and results["documents"][0]:
+            for i in range(len(results["documents"][0])):
+                meta = results["metadatas"][0][i]
+                formatted.append({
+                    "text":      results["documents"][0][i],
+                    "metadata":  meta,
+                    "distance":  results["distances"][0][i] if "distances" in results else None,
+                    "id":        results["ids"][0][i],
+                })
+        return formatted
+
     def delete_collection(self, user_id: Optional[str] = None, session_id: Optional[str] = None):
         """
         Completely delete a user/session's collection.

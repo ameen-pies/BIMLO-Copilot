@@ -43,6 +43,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import List, Optional, TypedDict
 
+from core import globals as g
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
@@ -380,19 +382,20 @@ def _enrich_node(state: PipelineState) -> PipelineState:
         for idx, art in enumerate(raw):
             uid = f"art_{idx}_{hashlib.md5(art['url'].encode()).hexdigest()[:6]}"
             enriched.append({
-                "id":           uid,
-                "title":        art["title"],
-                "source":       art["source"],
-                "source_url":   art["source_url"],
-                "article_url":  art["url"],
-                "image_url":    art.get("image_url"),
-                "raw_summary":  art["raw_text"][:300],
-                "ai_impact":    "",
-                "category":     art["category"],
-                "published_at": art["published_at"],
-                "scraped_at":   datetime.utcnow().isoformat() + "Z",
-                "enriched":     False,
-                "score":        0.5,
+                "id":            uid,
+                "title":         art["title"],
+                "source":        art["source"],
+                "source_url":    art["source_url"],
+                "article_url":   art["url"],
+                "image_url":     art.get("image_url"),
+                "raw_summary":   art.get("raw_text", "")[:600],
+                "full_content":  art.get("full_content", art.get("raw_text", ""))[:16000],
+                "ai_impact":     "",
+                "category":      art["category"],
+                "published_at":  art["published_at"],
+                "scraped_at":    datetime.utcnow().isoformat() + "Z",
+                "enriched":      False,
+                "score":         0.5,
             })
         return {**state, "enriched": enriched}
 
@@ -756,10 +759,38 @@ def _execute(force: bool = False) -> None:
             _dedup_node, _paginate_node, _persist_node,
         ]:
             state = node_fn(state)
+        _index_articles_for_chat(state)
         return
 
-    graph.invoke(initial_state)
+    result_state = graph.invoke(initial_state)
     logger.info(f"✅ Pipeline complete — run_id={run_id}")
+
+    # ── Index articles into vector store for semantic chat ────────────────
+    _index_articles_for_chat(result_state)
+
+
+# ── Index into vector store for semantic chat ────────────────────────────────
+
+def _index_articles_for_chat(state: PipelineState) -> None:
+    """
+    Index all deduped articles into the news vector store collection so the
+    News Chat Agent can perform semantic retrieval across article content.
+    """
+    articles = state.get("deduped") or state.get("enriched") or []
+    if not articles:
+        logger.info("index: no articles to index")
+        return
+
+    vs = getattr(g, "vector_store", None)
+    if vs is None:
+        logger.warning("index: g.vector_store not available — skipping")
+        return
+
+    try:
+        count = vs.index_news_articles(articles)
+        logger.info(f"index: {count} chunks indexed for {len(articles)} articles")
+    except Exception as e:
+        logger.error(f"index: failed to index articles: {e}", exc_info=True)
 
 
 # ── Public: cache reads ────────────────────────────────────────────────────────

@@ -36,6 +36,8 @@ import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from core import globals as g
+
 logger = logging.getLogger("news_chat_agent")
 router = APIRouter()
 
@@ -657,6 +659,67 @@ def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str
         return f"⚠️ Could not reach news worker: {e}"
 
 
+# ── Vector store semantic search ──────────────────────────────────────────────
+
+def _search_news_vector_store(query: str, top_k: int = 8) -> str:
+    """
+    Search the indexed news articles in ChromaDB for semantically relevant chunks.
+
+    Returns a formatted context block or empty string if no results / unavailable.
+    """
+    vs = getattr(g, "vector_store", None)
+    if vs is None:
+        logger.debug("[vector] g.vector_store not available")
+        return ""
+
+    try:
+        results = vs.search_news(query, top_k=top_k)
+    except Exception as e:
+        logger.warning(f"[vector] search failed: {e}")
+        return ""
+
+    if not results:
+        logger.debug("[vector] no relevant news chunks found")
+        return ""
+
+    # Group by article URL so each article appears once with all its chunks
+    articles: Dict[str, dict] = {}
+    for r in results:
+        meta = r["metadata"]
+        url = meta.get("article_url", "") or meta.get("url", "")
+        if url not in articles:
+            articles[url] = {
+                "title":    meta.get("title", ""),
+                "source":   meta.get("source", ""),
+                "category": meta.get("category", ""),
+                "url":      url,
+                "chunks":   [],
+                "distance": r.get("distance", 1.0) or 1.0,
+            }
+        articles[url]["chunks"].append(r["text"])
+        articles[url]["distance"] = min(articles[url]["distance"], r.get("distance", 1.0) or 1.0)
+
+    blocks = [
+        "═══ ARTICLES RELEVANT TO YOUR QUESTION (from indexed library) ═══\n"
+    ]
+    for url, art in sorted(articles.items(), key=lambda x: x[1]["distance"])[:5]:
+        block = f'── "{art["title"]}" ──\n'
+        block += f'Source: {art["source"]} | Category: {art["category"]}\n'
+        if art["url"] and art["url"] != "#":
+            block += f"URL: {art['url']}\n"
+        seen: set = set()
+        deduped = []
+        for c in art["chunks"]:
+            if c not in seen:
+                deduped.append(c)
+                seen.add(c)
+        block += "\n".join(deduped) + "\n"
+        blocks.append(block)
+
+    logger.info(f"[vector] {len(articles)} relevant articles found for query")
+    return "\n".join(blocks)
+
+
 # ── Endpoint ───────────────────────────────────────────────────────────────────
 
 @router.post("/api/news/chat", response_model=NewsChatResponse)
@@ -664,13 +727,10 @@ async def news_chat(req: NewsChatRequest):
     """
     Standalone news intelligence endpoint — isolated from /query and the RAG engine.
     Calls CF_NEWS_URL (dedicated news worker) — never depletes main RAG quota.
-    Only sends pinned article content to the LLM — nothing else.
 
-    IMPROVED:
-      1. Logs detailed fetch info per article
-      2. Pinned articles now fetch live content, not just cached previews
-      3. Clear fallback messaging when preview is used
-      4. Circuit breaker prevents hammering slow/blocked publishers
+    Context sources (all used):
+      1. Semantically relevant articles from vector store (indexed full content)
+      2. User-pinned articles with full content / live fetch / preview fallback
     """
     sid     = req.session_id or str(uuid.uuid4())
     history = _get_history(sid)
@@ -685,12 +745,23 @@ async def news_chat(req: NewsChatRequest):
         today=datetime.utcnow().strftime("%B %d, %Y"),
     )
 
+    # 1. Semantically relevant articles from the indexed vector store
+    vector_block = _search_news_vector_store(req.query)
+
+    # 2. User-pinned articles (full content → live fetch → preview)
     pinned_block = _build_pinned_context(pinned)
 
-    user_msg = (
-        f"{pinned_block}\n\nMy question: {req.query}"
-        if pinned_block else req.query
-    )
+    # 3. Combine both sources
+    context_parts: list = []
+    if vector_block:
+        context_parts.append(vector_block)
+    if pinned_block:
+        context_parts.append(pinned_block)
+
+    if context_parts:
+        user_msg = "\n\n".join(context_parts) + f"\n\nMy question: {req.query}"
+    else:
+        user_msg = req.query
 
     answer = _call_llm(system_prompt, history, user_msg)
 

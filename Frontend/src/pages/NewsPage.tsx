@@ -597,7 +597,7 @@ function NewsChatPanel({
   const WELCOME: ChatMessage = {
     id: "welcome",
     role: "assistant",
-    content: t("news.welcome_message"),
+    content: t("news.chat_welcome"),
     timestamp: new Date(),
   };
 
