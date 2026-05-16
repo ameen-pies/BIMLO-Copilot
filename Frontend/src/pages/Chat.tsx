@@ -158,6 +158,7 @@ const Chat = () => {
           setReportsPanelOpen={setReportsPanelOpen}
           setActiveReport={setActiveReport}
           setReportEditMode={setReportEditMode}
+          previewedVersion={previewedVersion}
           setPreviewedVersion={setPreviewedVersion}
           reportsPanelOpen={reportsPanelOpen}
           isGeneratingReport={isGeneratingReport}

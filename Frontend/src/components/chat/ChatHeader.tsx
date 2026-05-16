@@ -46,6 +46,7 @@ interface ChatHeaderProps {
   setReportsPanelOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setActiveReport: React.Dispatch<React.SetStateAction<ReportRecord | null>>;
   setReportEditMode: React.Dispatch<React.SetStateAction<boolean>>;
+  previewedVersion: { version: number; content: string; charts: any[]; title: string } | null;
   setPreviewedVersion: React.Dispatch<React.SetStateAction<{ version: number; content: string; charts: any[]; title: string } | null>>;
   reportsPanelOpen: boolean;
   isGeneratingReport: boolean;
@@ -105,6 +106,7 @@ export function ChatHeader({
   setReportsPanelOpen,
   setActiveReport,
   setReportEditMode,
+  previewedVersion,
   setPreviewedVersion,
   reportsPanelOpen,
   isGeneratingReport,
