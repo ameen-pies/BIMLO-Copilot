@@ -32,7 +32,10 @@ async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; e
       body:    JSON.stringify(body),
     });
     const json = await res.json();
-    if (!res.ok) return { error: json.detail || "Something went wrong" };
+    if (!res.ok) {
+      if (res.status === 429) return { error: "Too many attempts. Please wait a minute and try again." };
+      return { error: json.detail || "Something went wrong" };
+    }
     // Note: error strings are not translated here — they come from the backend
     return { data: json as AuthUser };
   } catch {
