@@ -3024,10 +3024,17 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
             conversation_history=history_texts,
         )
 
+        # Detect if this query is a clarification follow-up (user picked a chart option)
+        was_clarification_response = (
+            state.get("force_route") == "graph"
+            and any(m.get("role") == "assistant" for m in history[-2:])
+        )
+
         result = self.graph_agent.build_chart(
             query=query,
             chunks=chunks,
             language=plan.target_language,
+            skip_clarification=was_clarification_response,
         )
 
         # ── Clarification needed: vague query or no file specified ──────────
