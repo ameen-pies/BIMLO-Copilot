@@ -76,7 +76,6 @@ interface ChatMessageListProps {
   setSuggestions: (v: string[]) => void;
   setShowNotifyBanner: (v: boolean) => void;
   serializeError: (err: unknown) => string;
-  createUniqueId: (prefix: string) => string;
 }
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
@@ -137,7 +136,6 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   setSuggestions,
   setShowNotifyBanner,
   serializeError,
-  createUniqueId: createUniqueIdProp,
 }) => {
   const { t } = useTranslation();
   return (
@@ -406,7 +404,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setThinkingExpanded(true);
                         const convId = activeConvIdRef.current;
                         const userMsg: Message = {
-                          id: createUniqueIdProp("msg-"),
+                          id: createUniqueId("msg-"),
                           role: "user",
                           content: hint,
                           timestamp: new Date(),
@@ -416,7 +414,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setSuggestions([]);
                         if (!notifyDismissed) setShowNotifyBanner(true);
                         // Add placeholder assistant message with loading indicator
-                        const placeholderId = createUniqueIdProp("msg-");
+                        const placeholderId = createUniqueId("msg-");
                         const placeholder: Message = {
                           id: placeholderId,
                           role: "assistant",
@@ -446,7 +444,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         } catch (error) {
                           setIsLoading(false);
                           const errMsg: Message = {
-                            id: createUniqueIdProp("msg-"),
+                            id: createUniqueId("msg-"),
                             role: "assistant",
                             content: `Sorry, I encountered an error: ${serializeError(error)}`,
                             timestamp: new Date(),
@@ -475,7 +473,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setThinkingExpanded(true);
                         const convId = activeConvIdRef.current;
                         const userMsg: Message = {
-                          id: createUniqueIdProp("msg-"),
+                          id: createUniqueId("msg-"),
                           role: "user",
                           content: hint,
                           timestamp: new Date(),
@@ -500,7 +498,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         } catch (error) {
                           setIsLoading(false);
                           const errMsg: Message = {
-                            id: createUniqueIdProp("msg-"),
+                            id: createUniqueId("msg-"),
                             role: "assistant",
                             content: `Sorry, I encountered an error: ${serializeError(error)}`,
                             timestamp: new Date(),
@@ -526,7 +524,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                           </button>
                           <button
                             onClick={() => {
-                              const replyId = createUniqueIdProp("msg-");
+                              const replyId = createUniqueId("msg-");
                               setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, navAction: null } : m));
                               setMessages(prev => [...prev, { id: replyId, role: "assistant", content: "No problem! Ask away — I'll do my best right here.", rawAnswer: "No problem! Ask away — I'll do my best right here.", timestamp: new Date() }]);
                               setTypingMessageId(replyId);
