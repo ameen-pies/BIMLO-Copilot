@@ -568,7 +568,7 @@ def _build_context(chunks: List[Dict]) -> str:
         chunk_text = c['text']
         # Use full text for smaller chunks; cap very large ones to avoid context overflow
         # 3000 chars ~ 750 tokens — safe for most LLMs with 5 chunks
-        display_text = chunk_text if len(chunk_text) <= 3000 else chunk_text[:3000]
+        display_text = chunk_text if len(chunk_text) <= 4000 else chunk_text[:4000]
         parts.append(
             f"[Source {i} | {m.get('filename')} | {m.get('doc_type')}{flag_str}]\n"
             f"{display_text}"
@@ -779,7 +779,7 @@ class RAGEngine:
     #  PUBLIC API                                                         #
     # ------------------------------------------------------------------ #
 
-    def query(self, user_query: str, top_k: int = 5, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None, attached_doc_filenames: Optional[List[str]] = None, cancel_event=None) -> Dict[str, Any]:
+    def query(self, user_query: str, top_k: int = 8, conversation_history: Optional[List[Dict]] = None, prev_route: str = "", route_log: Optional[List[Dict]] = None, status_callback=None, force_route: Optional[str] = None, session_id: str = "", user_id: Optional[str] = None, voice_mode: bool = False, preferred_provider: Optional[str] = None, attached_doc_filenames: Optional[List[str]] = None, cancel_event=None) -> Dict[str, Any]:
         """Main entry point. conversation_history, prev_route, route_log all managed by main.py.
 
         attached_doc_filenames: filenames of documents explicitly attached to THIS message
@@ -1799,7 +1799,7 @@ Reply with ONLY the rewritten search query. No explanation."""
             answer = self.llm.chat(
                 history_msgs + [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=2000,
+                max_tokens=2500,
             )
         else:
             answer = self._fallback_synthesis(chunks, plan)

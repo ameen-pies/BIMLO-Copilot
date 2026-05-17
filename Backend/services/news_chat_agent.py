@@ -562,7 +562,7 @@ implications for BTP/construction professionals and telecom engineers where rele
 def _call_news_worker(
     prompt:        str,
     system_prompt: str   = "",
-    max_tokens:    int   = 900,
+    max_tokens:    int   = 1500,
     temperature:   float = 0.4,
 ) -> str:
     """
@@ -681,7 +681,7 @@ def _call_llm(system_prompt: str, history: List[dict], user_message: str) -> str
 
 # ── Vector store semantic search ──────────────────────────────────────────────
 
-def _search_news_vector_store(query: str, top_k: int = 8) -> str:
+def _search_news_vector_store(query: str, top_k: int = 12) -> str:
     """
     Search the indexed news articles in ChromaDB for semantically relevant chunks.
 
@@ -722,7 +722,7 @@ def _search_news_vector_store(query: str, top_k: int = 8) -> str:
     blocks = [
         "═══ ARTICLES RELEVANT TO YOUR QUESTION (from indexed library) ═══\n"
     ]
-    for url, art in sorted(articles.items(), key=lambda x: x[1]["distance"])[:5]:
+    for url, art in sorted(articles.items(), key=lambda x: x[1]["distance"])[:7]:
         block = f'── "{art["title"]}" ──\n'
         block += f'Source: {art["source"]} | Category: {art["category"]}\n'
         if art["url"] and art["url"] != "#":

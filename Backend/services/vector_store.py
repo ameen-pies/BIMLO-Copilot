@@ -128,6 +128,12 @@ class VectorStoreManager:
             The document ID
         """
         doc_id = doc_id or str(uuid.uuid4())
+
+        # Guard: reject empty chunk lists — ChromaDB crashes on empty IDs
+        if not chunks:
+            print(f"⚠️  add_document skipped: no chunks for '{filename}' (doc_id={doc_id})")
+            return doc_id
+
         collection = self._get_collection(user_id, session_id)
 
         if doc_id:
@@ -385,7 +391,7 @@ class VectorStoreManager:
             buf = []
             buf_len = 0
             for p in paragraphs:
-                if buf_len + len(p) > 500 and buf:
+                if buf_len + len(p) > 800 and buf:
                     raw_chunks.append(" ".join(buf))
                     buf = []
                     buf_len = 0

@@ -124,6 +124,10 @@ export function useDocuments(options: {
         duplicateBannerTimeoutRef.current = window.setTimeout(() => setDuplicateBanner(null), 4500);
         continue;
       }
+      if (file.size === 0) {
+        toast({ title: t("chat.upload_empty_title") || "Empty file", description: t("chat.upload_empty_desc") || `"${file.name}" is empty or unreadable.`, variant: "destructive" });
+        continue;
+      }
       const placeholderId = `uploading-${Date.now()}-${file.name}`;
       setDocuments(prev => [...prev, {
         document_id: placeholderId,

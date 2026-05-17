@@ -217,6 +217,9 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
                         _chunks = doc_processor.process_document(_tmp_path)
                     finally:
                         os.unlink(_tmp_path)
+                if not _chunks:
+                    print(f"⚠️  Skipping '{_cached['filename']}': file is empty or unreadable (0 chunks)")
+                    continue
                 for _idx, _chunk in enumerate(_chunks):
                     if "metadata" not in _chunk:
                         _chunk["metadata"] = {}
