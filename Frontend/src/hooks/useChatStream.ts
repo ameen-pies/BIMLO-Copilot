@@ -639,41 +639,8 @@ export function useChatStream(options: {
     setTypingConvId(convId);
 
     try {
-      const CAD_DOC_TYPES = new Set(["ifc", "cad", "dxf", "dwg", "step", "stp"]);
-      const CAD_INTENT_KEYWORDS = [
-        /\b(ifc|dxf|dwg|step|stp|bim|3d model|3d file|building model|ifc file|cad file)\b/i,
-        /\b(wall|slab|beam|column|storey|floor|level|door|window|railing|roof|stair|footing|material|element)\b/i,
-        /\b(how many|count|total|list|breakdown|summary|analyze|analyse|show me|tell me about).{0,30}\b(element|component|building|structure|model|file)\b/i,
-      ];
-      const cadKeywordMatch = CAD_INTENT_KEYWORDS.some(re => re.test(trimmedInput));
-      const cadDocFilenames = documents
-        .filter((d: any) => CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase()))
-        .map((d: any) => d.filename?.replace(/\.[^.]+$/, "").toLowerCase())
-        .filter(Boolean);
-      const mentionsFilename = cadDocFilenames.some((fn: string) => fn && trimmedInput.toLowerCase().includes(fn));
-      const activeCadFileId: string | null = (() => {
-        const attachedCad = documents.find(
-          (d: any) =>
-            userMsg.attachedDocIds?.includes(d.document_id) &&
-            CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
-        );
-        // Only route to CAD if query has BIM/CAD signals — greetings, general
-        // questions, or queries about other attached docs must go through the
-        // normal backend pipeline so the intent classifier can decide.
-        if (attachedCad && (cadKeywordMatch || mentionsFilename)) return attachedCad.document_id;
-        const lastId = (window as any).__lastCadFileId as string | undefined;
-        if (lastId && (cadKeywordMatch || mentionsFilename)) {
-          const hasCachedDoc = documents.some(
-            (d: any) => d.document_id === lastId && CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
-          );
-          if (hasCachedDoc) return lastId;
-        }
-        return null;
-      })();
-
-      const assistantMsg = activeCadFileId
-        ? await runCadQuery(trimmedInput, activeCadFileId)
-        : await runStreamingQuery(trimmedInput, undefined, snapshotDocIds);
+      // All routes (including CAD/IFC) go through the backend intent classifier.
+      const assistantMsg = await runStreamingQuery(trimmedInput, undefined, snapshotDocIds);
       if (!assistantMsg) return;
       const updatedMessages: Message[] = [...originMessages, userMsg, assistantMsg];
       const rawTitle = trimmedInput.length > 50 ? trimmedInput.slice(0, 50) + "…" : trimmedInput;

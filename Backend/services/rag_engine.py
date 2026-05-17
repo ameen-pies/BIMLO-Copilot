@@ -124,7 +124,7 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image", "cad"]]
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -932,6 +932,7 @@ class RAGEngine:
         "analytics_node":  ("📊", "Running analytics…"),
         "define_node":     ("📖", "Looking up definition…"),
         "graph_node":      ("📈", "Building chart from documents…"),
+        "cad_node":        ("🏗️", "Analysing CAD/IFC model…"),
         "report_node":     ("📄", "Writing your report…"),
         "image_node":      ("🖼️", "Reading image description…"),
     }
