@@ -403,6 +403,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setThinkingSteps([]);
                         setThinkingExpanded(true);
                         const convId = activeConvIdRef.current;
+                        // Capture messages BEFORE modifications — this is the snapshot from the
+                        // last render, so it won't include userMsg or placeholder, but that's fine
+                        // because we build the final array manually below.
+                        const baseMessages = messages;
                         const userMsg: Message = {
                           id: createUniqueId("msg-"),
                           role: "user",
@@ -432,22 +436,17 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                             setIsLoading(false);
                             return;
                           }
-                          // Clear typing indicator BEFORE replacing message to prevent empty shell flash
                           setTypingMessageId(null);
-                          // Replace placeholder with actual response (strip isStreaming so it renders normally)
-                          // Also capture the final messages array directly from the updater so we
-                          // pass the CORRECT snapshot to persistence — messagesRef.current is stale
-                          // at this point because useEffect hasn't fired yet.
-                          let finalMsgs: Message[] = [];
-                          setMessages(prev => {
-                            finalMsgs = prev.map(m => m.id === placeholderId ? { ...assistantMsg, isStreaming: undefined } : m);
-                            return finalMsgs;
-                          });
+                          // Build the final messages array manually — don't rely on messagesRef.current
+                          // (stale) or setMessages updater (runs during render, not synchronously).
+                          // Same pattern as handleSend: [...origin, userMsg, assistantMsg]
+                          const finalMessages: Message[] = [...baseMessages, userMsg, { ...assistantMsg, isStreaming: undefined }];
+                          setMessages(finalMessages);
                           // Persist user + assistant messages so they survive a refresh
                           const preview = assistantMsg.content.replace(/\[.*?\]/g, "").slice(0, 80) + "…";
                           const currentTitle = conversations.find(c => c.id === convId)?.title ?? hint.slice(0, 50);
-                          updateConversationMessages(convId, finalMsgs, preview, currentTitle);
-                          saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, finalMsgs);
+                          updateConversationMessages(convId, finalMessages, preview, currentTitle);
+                          saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, finalMessages);
                           fetchSuggestions(hint, assistantMsg.content);
                           fireNotification();
                         } catch (error) {
@@ -476,11 +475,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                       }}
                       onSelect={async (hint) => {
                         if (isLoading) return;
-                        // Show loading indicator immediately — before the async query starts
                         setIsLoading(true);
                         setThinkingSteps([]);
                         setThinkingExpanded(true);
                         const convId = activeConvIdRef.current;
+                        const baseMessages = messages;
                         const userMsg: Message = {
                           id: createUniqueId("msg-"),
                           role: "user",
@@ -494,18 +493,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         try {
                           const assistantMsg = await runStreamingQuery(hint, "report");
                           if (!assistantMsg) return;
-                          // Capture final messages from updater — messagesRef.current is stale
-                          let finalMsgs: Message[] = [];
-                          setMessages(prev => {
-                            finalMsgs = [...prev, assistantMsg];
-                            return finalMsgs;
-                          });
+                          const finalMessages: Message[] = [...baseMessages, userMsg, assistantMsg];
+                          setMessages(finalMessages);
                           setTypingMessageId(assistantMsg.id);
-                          // Persist user + assistant messages so they survive a refresh
                           const preview = assistantMsg.content.replace(/\[.*?\]/g, "").slice(0, 80) + "…";
                           const currentTitle = conversations.find(c => c.id === convId)?.title ?? hint.slice(0, 50);
-                          updateConversationMessages(convId, finalMsgs, preview, currentTitle);
-                          saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, finalMsgs);
+                          updateConversationMessages(convId, finalMessages, preview, currentTitle);
+                          saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, finalMessages);
                           fetchSuggestions(hint, assistantMsg.content);
                           fireNotification();
                         } catch (error) {
