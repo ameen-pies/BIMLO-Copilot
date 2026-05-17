@@ -23,7 +23,9 @@ interface Props {
 const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
-async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; error?: string }> {
+const RATE_LIMIT_KEY = "bimlo_rate_limit_until";
+
+async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; error?: string; rateLimited?: boolean }> {
   try {
     const res = await fetch(`${BASE}${path}`, {
       method:  "POST",
@@ -33,7 +35,11 @@ async function apiPost(path: string, body: object): Promise<{ data?: AuthUser; e
     });
     const json = await res.json();
     if (!res.ok) {
-      if (res.status === 429) return { error: "Too many attempts. Please wait a minute and try again." };
+      if (res.status === 429) {
+        const expiresAt = Date.now() + 60_000; // 1 minute from now
+        localStorage.setItem(RATE_LIMIT_KEY, String(expiresAt));
+        return { error: "Too many attempts.", rateLimited: true };
+      }
       return { error: json.detail || "Something went wrong" };
     }
     // Note: error strings are not translated here — they come from the backend
@@ -105,6 +111,37 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
   const [showPw,   setShowPw]   = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState<string | null>(null);
+  const [rateLimitSecs, setRateLimitSecs] = useState(0);
+
+  // Restore rate limit countdown from localStorage on mount/open
+  useEffect(() => {
+    if (!open) return;
+    const stored = localStorage.getItem(RATE_LIMIT_KEY);
+    if (stored) {
+      const remaining = Math.ceil((Number(stored) - Date.now()) / 1000);
+      if (remaining > 0) {
+        setRateLimitSecs(remaining);
+      } else {
+        localStorage.removeItem(RATE_LIMIT_KEY);
+        setRateLimitSecs(0);
+      }
+    }
+  }, [open]);
+
+  // Countdown timer — persists across refreshes via localStorage
+  useEffect(() => {
+    if (rateLimitSecs <= 0) return;
+    const interval = setInterval(() => {
+      setRateLimitSecs(prev => {
+        if (prev <= 1) {
+          localStorage.removeItem(RATE_LIMIT_KEY);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [rateLimitSecs]);
 
   useEffect(() => {
     if (open) {
@@ -181,10 +218,15 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
     const body = tab === "login"
       ? { email: email.trim(), password }
       : { email: email.trim(), username: username.trim(), password };
-    const { data, error: err } = await apiPost(path, body);
+    const { data, error: err, rateLimited } = await apiPost(path, body);
     if (err) {
       setLoading(false);
-      setError(err);
+      if (rateLimited) {
+        setRateLimitSecs(60);
+        setError(null);
+      } else {
+        setError(err);
+      }
       return;
     }
     if (data) {
@@ -355,23 +397,32 @@ export default function AuthModal({ open, onClose, onSuccess }: Props) {
                     {error}
                   </motion.div>
                 )}
+                {rateLimitSecs > 0 && (
+                  <motion.div
+                    key="rate-limit"
+                    initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                    style={{ fontSize: 12, color: "#f59e0b", background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 8, padding: "8px 12px" }}
+                  >
+                    Too many attempts. Try again in {rateLimitSecs}s
+                  </motion.div>
+                )}
               </AnimatePresence>
 
               {/* Submit */}
               <button
                 onClick={handleSubmit}
-                disabled={loading}
+                disabled={loading || rateLimitSecs > 0}
                 style={{
                   width: "100%", padding: "11px", borderRadius: 10, border: "none",
-                  cursor: loading ? "not-allowed" : "pointer",
-                  background: loading ? "rgba(59,130,246,0.5)" : "#3b82f6",
+                  cursor: (loading || rateLimitSecs > 0) ? "not-allowed" : "pointer",
+                  background: (loading || rateLimitSecs > 0) ? "rgba(59,130,246,0.5)" : "#3b82f6",
                   color: "#fff", fontSize: 14, fontWeight: 600,
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
                   transition: "background 0.15s",
-                  boxShadow: loading ? "none" : "0 4px 14px rgba(59,130,246,0.35)",
+                  boxShadow: (loading || rateLimitSecs > 0) ? "none" : "0 4px 14px rgba(59,130,246,0.35)",
                 }}
-                onMouseEnter={e => { if (!loading) e.currentTarget.style.background = "#2563eb"; }}
-                onMouseLeave={e => { if (!loading) e.currentTarget.style.background = "#3b82f6"; }}
+                onMouseEnter={e => { if (!loading && rateLimitSecs <= 0) e.currentTarget.style.background = "#2563eb"; }}
+                onMouseLeave={e => { if (!loading && rateLimitSecs <= 0) e.currentTarget.style.background = "#3b82f6"; }}
               >
                 {loading
                   ? <Loader2 size={15} className="animate-spin" />
