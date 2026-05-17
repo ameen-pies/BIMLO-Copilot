@@ -303,7 +303,7 @@ class GraphAgent:
 
         # ── Stage 0b: check if query is vague and needs clarification ────────
         # Skipped when the user already answered a clarification (skip_clarification=True)
-        if not skip_clarification and self._is_vague_request(query):
+        if not skip_clarification and self._is_vague_request(query, chunks):
             groups = self._discover_metric_groups(query, chunks, language)
             if groups and len(groups) > 1:
                 # ── Validate each group: only show options that actually produce a chart ──
@@ -730,7 +730,7 @@ DOCUMENTS:
         r"^(alle?|jede[rs]?)\s+(daten|metriken|zahlen|statistiken)",
     ]
 
-    def _is_vague_request(self, query: str) -> bool:
+    def _is_vague_request(self, query: str, chunks: List[Dict] = None) -> bool:
         """
         Returns True when the query doesn't specify WHAT to chart.
 
@@ -857,6 +857,15 @@ DOCUMENTS:
                         "لي", "من", "في", "على", "هذا", "هذه",
                     }
                 ]
+                # Also exclude words that appear in document filenames
+                # (user typed "make me chart from report.pdf" — "report" is a filename, not a metric)
+                filename_words = set()
+                if chunks:
+                    for c in chunks:
+                        fn = c.get("metadata", {}).get("filename", "").lower()
+                        if fn:
+                            filename_words.update(fn.replace(".", " ").replace("-", " ").replace("_", " ").split())
+                meaningful_words = [w for w in meaningful_words if w not in filename_words]
                 if not meaningful_words:
                     return True
 
