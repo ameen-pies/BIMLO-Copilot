@@ -204,8 +204,14 @@ def commit_pending_docs(pending_doc_ids: List[str], session_id: str, user_id: Op
                         continue
                 except Exception:
                     pass
-                print(f"\u23f3 Pipeline timed out — indexing '{_cached['filename']}' directly")
                 _ext = _cached.get('doc_type', '.txt')
+                # Skip CAD/IFC files — they're handled by the CAD agent pipeline,
+                # not the standard document processor.
+                _cad_exts = {'.ifc', '.dxf', '.dwg', '.step', '.stp'}
+                if _ext.lower() in _cad_exts:
+                    print(f"⏭️  Skipping '{_cached['filename']}': CAD file handled by CAD agent")
+                    continue
+                print(f"\u23f3 Pipeline timed out — indexing '{_cached['filename']}' directly")
                 _is_image = _cached.get('is_image', False)
                 if _is_image:
                     _chunks = doc_processor.process_image_bytes(_cached['bytes'], _cached['filename'])

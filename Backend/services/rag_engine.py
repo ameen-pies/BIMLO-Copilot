@@ -1434,6 +1434,7 @@ Now generate for: "{q}" """
         iteration = state["retrieval_iterations"] + 1
 
         print(f"🔎 [retrieve_vector] #{iteration} (+{top_k} candidates) → ", end="")
+        print(f"[attached={state.get('attached_doc_filenames') or []}] ", end="")
 
         session_id = state.get("session_id", "")
         user_id = state.get("user_id")
