@@ -371,14 +371,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   </button>
                 )}
 
-                  {msg.role === "assistant" && msg.id === typingMessageId && !(msg as any).isStreaming && !msg.content && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
+                  {msg.role === "assistant" && msg.id === typingMessageId && !msg.content && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
                     /* ── Empty placeholder: show loading dots inline ── */
                     <span className="inline-flex items-center gap-1 text-muted-foreground/60 text-sm py-2">
                       <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
                       <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
                       <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
                     </span>
-                  ) : msg.role === "assistant" && msg.id === typingMessageId && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
+                  ) : msg.role === "assistant" && msg.id === typingMessageId && (msg.rawAnswer || msg.content) && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
                     <TypewriterText
                       text={msg.rawAnswer ?? msg.content}
                       speed={10}
