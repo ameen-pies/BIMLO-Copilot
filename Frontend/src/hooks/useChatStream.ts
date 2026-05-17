@@ -657,7 +657,10 @@ export function useChatStream(options: {
             userMsg.attachedDocIds?.includes(d.document_id) &&
             CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
         );
-        if (attachedCad) return attachedCad.document_id;
+        // Only route to CAD if query has BIM/CAD signals — greetings, general
+        // questions, or queries about other attached docs must go through the
+        // normal backend pipeline so the intent classifier can decide.
+        if (attachedCad && (cadKeywordMatch || mentionsFilename)) return attachedCad.document_id;
         const lastId = (window as any).__lastCadFileId as string | undefined;
         if (lastId && (cadKeywordMatch || mentionsFilename)) {
           const hasCachedDoc = documents.some(

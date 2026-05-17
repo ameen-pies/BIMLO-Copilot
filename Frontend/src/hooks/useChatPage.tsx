@@ -2296,13 +2296,17 @@ export function useChatPage() {
       const mentionsFilename = cadDocFilenames.some(fn => fn && trimmedInput.toLowerCase().includes(fn));
 
       const activeCadFileId: string | null = (() => {
-        // Priority 1: explicitly attached CAD doc
+        // Find attached CAD doc (if any)
         const attachedCad = documents.find(
           d =>
             userMsg.attachedDocIds?.includes(d.document_id) &&
             CAD_DOC_TYPES.has((d.doc_type ?? "").toLowerCase())
         );
-        if (attachedCad) return attachedCad.document_id;
+
+        // Only route to CAD if query has BIM/CAD signals — greetings, general
+        // questions, or queries about other attached docs must go through the
+        // normal backend pipeline so the intent classifier can decide.
+        if (attachedCad && (cadKeywordMatch || mentionsFilename)) return attachedCad.document_id;
 
         // Priority 2: BIM keyword or filename mention → route to last uploaded CAD file
         const lastId = (window as any).__lastCadFileId as string | undefined;

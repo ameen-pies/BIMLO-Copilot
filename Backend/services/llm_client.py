@@ -521,7 +521,12 @@ def _call_openrouter(
             resp = requests.post(_OPENROUTER_API_URL, headers=headers, json=payload, timeout=(10, 45))
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
-                return raw if isinstance(raw, str) else str(raw)
+                result = raw if isinstance(raw, str) else str(raw)
+                if result:
+                    print(f"✅ llm_client: OpenRouter responded ({len(result)} chars) — model={_OPENROUTER_MODEL}")
+                else:
+                    print(f"⚠️  llm_client: OpenRouter responded 200 but content empty")
+                return result
             elif resp.status_code == 429:
                 time.sleep(min(2 ** attempt, 2))
             else:
