@@ -850,6 +850,7 @@ DOCUMENTS:
                         "make", "create", "generate", "show", "draw",
                         "build", "give", "some", "any", "and", "or",
                         "my", "your", "our", "their", "its",
+                        "pls", "plz", "please", "thanks", "thank", "hey", "hi",
                         # French verbs/stop words
                         "montre", "crée", "génère", "fais", "trace", "moi",
                         "un", "une", "des", "les", "du", "de", "en",
