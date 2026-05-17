@@ -378,7 +378,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                       <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
                       <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
                     </span>
-                  ) : msg.role === "assistant" && msg.id === typingMessageId ? (
+                  ) : msg.role === "assistant" && msg.id === typingMessageId && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
                     <TypewriterText
                       text={msg.rawAnswer ?? msg.content}
                       speed={10}
@@ -430,8 +430,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                             setMessages(prev => prev.filter(m => m.id !== placeholderId));
                             return;
                           }
-                          // Replace placeholder with actual response
-                          setMessages(prev => prev.map(m => m.id === placeholderId ? assistantMsg : m));
+                          // Replace placeholder with actual response (strip isStreaming so it renders normally)
+                          setMessages(prev => prev.map(m => m.id === placeholderId ? { ...assistantMsg, isStreaming: undefined } : m));
                           setTypingMessageId(assistantMsg.id);
                           // Persist user + assistant messages so they survive a refresh
                           const snapshot = messagesRef.current;
