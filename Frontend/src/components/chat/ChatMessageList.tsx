@@ -372,12 +372,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                 )}
 
                   {msg.role === "assistant" && msg.id === typingMessageId && !msg.content && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
-                    /* ── Empty placeholder: show loading dots inline ── */
-                    <span className="inline-flex items-center gap-1 text-muted-foreground/60 text-sm py-2">
-                      <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
-                      <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
-                      <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
-                    </span>
+                    /* ── Empty placeholder: invisible until real content arrives ── */
+                    <span className="sr-only" />
                   ) : msg.role === "assistant" && msg.id === typingMessageId && (msg.rawAnswer || msg.content) && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
                     <TypewriterText
                       text={msg.rawAnswer ?? msg.content}
