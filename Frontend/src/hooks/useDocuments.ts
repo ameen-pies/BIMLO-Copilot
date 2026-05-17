@@ -181,7 +181,7 @@ export function useDocuments(options: {
         }
       } catch (err) {
         setDocuments(prev => prev.filter(d => d.document_id !== placeholderId));
-        toast({ title: "Upload failed", description: String(err), variant: "destructive" });
+        toast({ title: "Upload failed", description: String(err).replace(/^Error:?\s*/i, "") });
       }
     }
     setIsUploading(false);

@@ -67,3 +67,9 @@ docker-compose.override.yml
 *.tmp
 *.bak
 .cache/
+
+# Internal docs / planning
+.openclaude/
+STRESS_TEST.md
+CRASH_REPORT.md
+IMPLEMENTATION_PLAN.md

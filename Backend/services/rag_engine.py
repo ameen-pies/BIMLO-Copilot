@@ -1026,10 +1026,10 @@ Now generate for: "{q}" """
         return bool(ev and ev.is_set())
 
     def _chat(self, *args, **kwargs):
-        """Wrapper around self._chat() that checks cancel before each call."""
+        """Wrapper around self.llm.chat() that checks cancel before each call."""
         if self._is_cancelled():
             raise RuntimeError("query cancelled by user")
-        return self._chat(*args, **kwargs)
+        return self.llm.chat(*args, **kwargs)
 
     def _wrap(self, name: str, fn):
         """Status-aware node wrapper. Fires the status callback before running fn.
