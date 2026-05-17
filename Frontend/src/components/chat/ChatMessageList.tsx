@@ -413,21 +413,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setOpenSourceKey(null);
                         setSuggestions([]);
                         if (!notifyDismissed) setShowNotifyBanner(true);
-                        // Add placeholder assistant message with loading indicator
-                        const placeholderId = createUniqueId("msg-");
-                        const placeholder: Message = {
-                          id: placeholderId,
-                          role: "assistant",
-                          content: "",
-                          timestamp: new Date(),
-                          isStreaming: true,
-                        };
-                        setMessages(prev => [...prev, placeholder]);
-                        setTypingMessageId(placeholderId);
                         try {
                           const assistantMsg = await runStreamingQuery(hint, "graph");
                           if (!assistantMsg) {
-                            setMessages(prev => prev.filter(m => m.id !== placeholderId));
                             setTypingMessageId(null);
                             setIsLoading(false);
                             return;
