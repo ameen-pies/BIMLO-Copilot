@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     cf_news_url: str = ""
 
     nvidia_api_key: str = ""
+    openrouter_api_key: str = ""  # TEMP — testing only, remove after stress test
     elevenlabs_api_key: str = ""
     newsdata_api_key: str = ""
     firecrawl_api_key: str = ""

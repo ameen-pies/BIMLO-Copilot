@@ -48,6 +48,10 @@ _GROQ_MODEL_FAST     = "llama-3.1-8b-instant"
 _NVIDIA_API_URL      = "https://integrate.api.nvidia.com/v1/chat/completions"
 _NVIDIA_MODEL        = "minimaxai/minimax-m2.7"
 
+# ── OpenRouter (TEMP — testing only, remove after stress test) ──────────────
+_OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+_OPENROUTER_MODEL   = "meta-llama/llama-3.1-8b-instruct:free"
+
 # ---------------------------------------------------------------------------
 # Circuit breaker — per-provider trip state
 # ---------------------------------------------------------------------------
@@ -364,6 +368,13 @@ def call_llm(
     print(f"🧠 llm_client: call_llm preferred_provider={preferred_provider or 'auto'} max_tokens={max_tokens} task={task}")
     last_reason: str = "no providers tried"
 
+    # ── OpenRouter (TEMP — testing only, remove after stress test) ──────────
+    if preferred_provider not in ("cf_primary", "cf_backup", "cf_backup2", "groq", "nvidia"):
+        or_result = _call_openrouter(messages, max_tokens, temperature)
+        if or_result:
+            return or_result
+        print("⚠️  llm_client: OpenRouter failed — falling through to CF workers")
+
     # ── User-preferred provider (tried first) ─────────────────────────────────
     if preferred_provider == "cf_primary":
         if cf_primary_key:
@@ -482,6 +493,45 @@ def call_llm(
 
     # NVIDIA is NOT in the automatic fallback chain for non-nvidia requests.
     # It is opt-in only via preferred_provider to avoid burning free-tier quota silently.
+    return ""
+
+
+# ── OpenRouter (TEMP — testing only, remove after stress test) ──────────────
+
+def _call_openrouter(
+    messages: List[Dict],
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not or_key:
+        return ""
+    payload = {
+        "model":       _OPENROUTER_MODEL,
+        "messages":    messages,
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+    }
+    headers = {
+        "Authorization": f"Bearer {or_key}",
+        "Content-Type":  "application/json",
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.post(_OPENROUTER_API_URL, headers=headers, json=payload, timeout=(10, 45))
+            if resp.status_code == 200:
+                raw = resp.json()["choices"][0]["message"]["content"]
+                return raw if isinstance(raw, str) else str(raw)
+            elif resp.status_code == 429:
+                time.sleep(min(2 ** attempt, 2))
+            else:
+                print(f"⚠️  llm_client: OpenRouter {resp.status_code}: {resp.text[:120]}")
+                break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                print(f"⚠️  llm_client: OpenRouter request failed — {e}")
     return ""
 
 
