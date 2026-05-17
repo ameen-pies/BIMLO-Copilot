@@ -373,7 +373,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   </button>
                 )}
 
-                  {msg.role === "assistant" && msg.id === typingMessageId ? (
+                  {msg.role === "assistant" && msg.id === typingMessageId && !(msg as any).isStreaming && !msg.content ? (
+                    /* ── Empty placeholder: show loading dots inline ── */
+                    <span className="inline-flex items-center gap-1 text-muted-foreground/60 text-sm py-2">
+                      <span className="animate-bounce" style={{ animationDelay: "0ms" }}>.</span>
+                      <span className="animate-bounce" style={{ animationDelay: "150ms" }}>.</span>
+                      <span className="animate-bounce" style={{ animationDelay: "300ms" }}>.</span>
+                    </span>
+                  ) : msg.role === "assistant" && msg.id === typingMessageId ? (
                     <TypewriterText
                       text={msg.rawAnswer ?? msg.content}
                       speed={10}
@@ -408,10 +415,25 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         setOpenSourceKey(null);
                         setSuggestions([]);
                         if (!notifyDismissed) setShowNotifyBanner(true);
+                        // Add placeholder assistant message with loading indicator
+                        const placeholderId = createUniqueIdProp("msg-");
+                        const placeholder: Message = {
+                          id: placeholderId,
+                          role: "assistant",
+                          content: "",
+                          timestamp: new Date(),
+                          isStreaming: true,
+                        };
+                        setMessages(prev => [...prev, placeholder]);
+                        setTypingMessageId(placeholderId);
                         try {
                           const assistantMsg = await runStreamingQuery(hint, "graph");
-                          if (!assistantMsg) return;
-                          setMessages(prev => [...prev, assistantMsg]);
+                          if (!assistantMsg) {
+                            setMessages(prev => prev.filter(m => m.id !== placeholderId));
+                            return;
+                          }
+                          // Replace placeholder with actual response
+                          setMessages(prev => prev.map(m => m.id === placeholderId ? assistantMsg : m));
                           setTypingMessageId(assistantMsg.id);
                           // Persist user + assistant messages so they survive a refresh
                           const snapshot = messagesRef.current;
