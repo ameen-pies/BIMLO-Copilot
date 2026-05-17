@@ -50,7 +50,7 @@ _NVIDIA_MODEL        = "minimaxai/minimax-m2.7"
 
 # ── OpenRouter (TEMP — testing only, remove after stress test) ──────────────
 _OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-_OPENROUTER_MODEL   = "meta-llama/llama-3.1-8b-instruct:free"
+_OPENROUTER_MODEL   = "openai/gpt-oss-20b:free"
 
 # ---------------------------------------------------------------------------
 # Circuit breaker — per-provider trip state
