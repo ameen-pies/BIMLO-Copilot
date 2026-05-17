@@ -96,7 +96,7 @@ async def limit_upload_size(request, call_next):
     if request.url.path == "/upload":
         cl = request.headers.get("content-length")
         if cl and int(cl) > g.MAX_UPLOAD_SIZE:
-            return JSONResponse({"detail": "File too large"}, status_code=413)
+            return JSONResponse({"detail": f"File too large. Maximum size is {g.MAX_UPLOAD_SIZE // 1024 // 1024} MB."}, status_code=413)
     return await call_next(request)
 
 g.doc_processor = DocumentProcessor()
