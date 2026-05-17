@@ -386,7 +386,8 @@ def _node_llm_classify(state: ClassifierState) -> ClassifierState:
                 file_type_lines.append(
                     f"  - {f} → CAD/IFC/BIM file. Route to 'cad' ONLY if query explicitly asks "
                     "about building content (elements, storeys, materials, IFC classes). "
-                    "NEVER route to 'cad' just because this file exists — the query must be about its content."
+                    "NEVER route to 'cad' just because this file exists — the query must be about its content. "
+                    "Greetings, general questions, summaries, or queries about other attached files → NOT 'cad'."
                 )
             elif _is_image(f):
                 file_type_lines.append(
@@ -405,7 +406,8 @@ def _node_llm_classify(state: ClassifierState) -> ClassifierState:
                 "Identify which file the user is asking about based on their query content, "
                 "not on which file type was last uploaded. "
                 "A question about text, specifications, measurements, or any non-BIM topic "
-                "should route to 'rag' targeting the document/PDF, NOT to 'cad'."
+                "should route to 'rag' targeting the document/PDF, NOT to 'cad'. "
+                "If the query is vague, generic, or not clearly about the CAD file, default to 'rag'."
             )
 
         attached_hint = (
@@ -525,17 +527,6 @@ def _node_post_process(state: ClassifierState) -> ClassifierState:
         result.suggested_route = "rag"
         result.reasoning += " [override: cad route requires a CAD file in session]"
 
-    # 2b. cad route blocked when mixed types and query is not explicitly about BIM/IFC
-    _session_has_non_cad = any(not _is_cad(f) for f in attached_doc_filenames)
-    if result.suggested_route == "cad" and _session_has_non_cad:
-        _query_lower = (state.get("query") or "").lower()
-        _cad_keywords = {"ifc", "bim", "storey", "floor", "wall", "slab", "beam", "column",
-                         "element", "spatial", "class", "property", "quantity", "schedule",
-                         "revit", "architectural", "structural", "mep", "model"}
-        _query_explicit_cad = any(kw in _query_lower for kw in _cad_keywords)
-        if not _query_explicit_cad:
-            result.suggested_route = "rag"
-            result.reasoning += " [override: mixed types + query not about BIM/IFC → rag]"
 
     # 3. converse_meta must always be direct (never let LLM mis-route it)
     if result.primary_intent == "converse_meta" and result.suggested_route != "direct":
