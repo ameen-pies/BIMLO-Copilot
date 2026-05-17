@@ -476,6 +476,11 @@ def call_llm(
         else:
             print("⚠️  llm_client: CF_BACKUP2_URL/KEY not set — skipping backup2")
 
+    # OpenRouter — tried before Groq in the fallback chain
+    or_result = _call_openrouter(messages, max_tokens, temperature)
+    if or_result:
+        return or_result
+
     # Groq — skip if already tried as preferred OR if nvidia was preferred (keep nvidia opt-in only)
     if preferred_provider not in ("groq", "nvidia"):
         result = _call_groq(messages, max_tokens, temperature, last_reason)

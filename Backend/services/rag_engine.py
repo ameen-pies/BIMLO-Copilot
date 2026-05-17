@@ -1486,6 +1486,9 @@ Now generate for: "{q}" """
         # When multiple docs are attached and no specific file was targeted,
         # search each attached file individually and merge results.
         attached = state.get("attached_doc_filenames") or []
+        # Fallback: if frontend didn't send attached list, use all session docs
+        if not attached and not filter_dict:
+            attached = [d.get("filename") for d in all_docs if d.get("filename")]
         if len(attached) > 1 and filter_dict is None:
             all_chunks: List[Dict] = []
             per_file_k = max(fetch_k // len(attached), 5)

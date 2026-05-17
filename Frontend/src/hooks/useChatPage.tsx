@@ -2419,6 +2419,9 @@ export function useChatPage() {
 
     // ── AI ghost-text completion ─────────────────────────────────────────
     const trimmed = before.trim();
+    // Cancel any in-flight autocomplete before scheduling a new one
+    if (ghostAbortRef.current) ghostAbortRef.current.abort();
+    if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
     if (trimmed.length >= 4 && !isLoading) {
       ghostDebounceRef.current = setTimeout(async () => {
         // Create a fresh AbortController for this fetch
@@ -2432,7 +2435,7 @@ export function useChatPage() {
           setWordSuffix(suffix);
           ghostAbortRef.current = null;
         }
-      }, 280);
+      }, 500);
     }
   };
 
