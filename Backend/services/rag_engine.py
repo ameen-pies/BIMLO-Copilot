@@ -981,7 +981,7 @@ Example for "what is the budget?":
 Now generate for: "{q}" """
 
         try:
-            raw = self.llm.chat(
+            raw = self._chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=300,
@@ -1020,16 +1020,37 @@ Now generate for: "{q}" """
     #  GRAPH CONSTRUCTION                                                 #
     # ------------------------------------------------------------------ #
 
+    def _is_cancelled(self) -> bool:
+        """Check if the user has cancelled the current query."""
+        ev = getattr(self, "_cancel_event", None)
+        return bool(ev and ev.is_set())
+
+    def _chat(self, *args, **kwargs):
+        """Wrapper around self._chat() that checks cancel before each call."""
+        if self._is_cancelled():
+            raise RuntimeError("query cancelled by user")
+        return self._chat(*args, **kwargs)
+
     def _wrap(self, name: str, fn):
-        """Status-aware node wrapper. Fires the status callback before running fn."""
+        """Status-aware node wrapper. Fires the status callback before running fn.
+        Short-circuits if the user has cancelled the query."""
         default_icon, default_msg = self._DEFAULT_STATUS_MSGS.get(name, ("⚙️", f"{name}…"))
         def _wrapped(state):
+            if self._is_cancelled():
+                print(f"🛑 [{name}] cancelled — skipping")
+                return {**state, "answer": "", "raw_answer": "", "sources": [], "confidence": 0.0}
             cb = getattr(self, "_status_callback", None)
             if callable(cb):
                 msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
                 icon, msg = msgs.get(name, (default_icon, default_msg))
                 cb(name, icon, msg)
-            return fn(state)
+            try:
+                return fn(state)
+            except RuntimeError as e:
+                if "query cancelled" in str(e):
+                    print(f"🛑 [{name}] cancelled mid-execution")
+                    return {**state, "answer": "", "raw_answer": "", "sources": [], "confidence": 0.0}
+                raise
         _wrapped.__name__ = name
         return _wrapped
 
@@ -1400,7 +1421,7 @@ Now generate for: "{q}" """
         messages.append({"role": "user", "content": query})
 
         if self.llm.enabled:
-            return self.llm.chat(messages)
+            return self._chat(messages)
         else:
             return f"[Response in {plan.target_language} - LLM unavailable]"
 
@@ -1691,7 +1712,7 @@ Strategies:
 
 Reply with ONLY the rewritten search query. No explanation."""
         
-        rewritten = self.llm.chat(
+        rewritten = self._chat(
             [{"role": "user", "content": prompt}],
             temperature=0.4,
         ).strip().strip('"')
@@ -1826,7 +1847,7 @@ Reply with ONLY the rewritten search query. No explanation."""
 
         # Generate answer
         if self.llm.enabled:
-            answer = self.llm.chat(
+            answer = self._chat(
                 history_msgs + [{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=2500,
@@ -2189,7 +2210,7 @@ Remember: Answer in {target_lang.upper()}. The document language is irrelevant. 
         # Skip this extra LLM call in voice_mode — not worth the latency for a
         # spoken answer, and the reroute check is a full round-trip.
         if retry_count == 0 and self.llm.enabled and not state.get("voice_mode"):
-            reroute_check = self.llm.chat(
+            reroute_check = self._chat(
                 [{"role": "user", "content": (
                     f"A RAG system routed this query to document search: \"{state['query']}\"\n"
                     f"The judge rejected the answer with this feedback:\n"
@@ -2314,7 +2335,7 @@ DOCUMENT:
 {clean_context}"""
 
         if self.llm.enabled:
-            answer = self.llm.chat(
+            answer = self._chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=2000,
@@ -2434,7 +2455,7 @@ STYLE RULES:
 Remember: Answer in {target_lang.upper()}. Your ENTIRE answer must be in {target_lang.upper()}."""
 
         if self.llm.enabled:
-            answer = self.llm.chat(
+            answer = self._chat(
                 history_msgs + [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=1200,
@@ -2733,7 +2754,7 @@ Remember: Answer in {target_lang.upper()}. Your entire answer must be in {target
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
         if self.llm.enabled:
-            answer = self.llm.chat(
+            answer = self._chat(
                 history_msgs + [{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=1000,
@@ -2914,7 +2935,7 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
         narrative = ""
         
         if self.llm.enabled:
-            raw = self.llm.chat(
+            raw = self._chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=800,
