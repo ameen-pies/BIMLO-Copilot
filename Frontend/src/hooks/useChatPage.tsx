@@ -642,7 +642,11 @@ export function useChatPage() {
               updateConversationMessages(convId, updated, preview, title);
               // Persist voice reply to DB
               saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
-              setTypingMessageId(assistantMsg.id);
+              if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+                setTypingMessageId(null);
+              } else {
+                setTypingMessageId(assistantMsg.id);
+              }
               fetchSuggestions(transcript, assistantMsg.content);
               fireNotification();
             } catch (error) {
@@ -2293,7 +2297,11 @@ export function useChatPage() {
       // Persist to DB (non-blocking); keep the current conversation title if it was already set
       const currentTitle = activeConversation?.title ?? finalTitle ?? rawTitle;
       saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, updatedMessages);
-      setTypingMessageId(assistantMsg.id);
+      if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+        setTypingMessageId(null);
+      } else {
+        setTypingMessageId(assistantMsg.id);
+      }
       fetchSuggestions(trimmedInput, assistantMsg.content);
       fireNotification();
       if (activeConvIdRef.current !== convId) {
@@ -2614,7 +2622,11 @@ export function useChatPage() {
         existingConv?.preview ?? "",
         existingConv?.title
       );
-      setTypingMessageId(assistantMsg.id);
+      if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+        setTypingMessageId(null);
+      } else {
+        setTypingMessageId(assistantMsg.id);
+      }
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = { id: createUniqueId("msg-"), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };

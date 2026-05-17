@@ -652,7 +652,12 @@ export function useChatStream(options: {
       updateConversationMessages(convId, updatedMessages, preview, finalTitle);
       const currentTitle = activeConversation?.title ?? finalTitle ?? rawTitle;
       saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, updatedMessages);
-      setTypingMessageId(assistantMsg.id);
+      // Chart messages don't use TypewriterText — clear typingId immediately so action buttons show
+      if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+        setTypingMessageId(null);
+      } else {
+        setTypingMessageId(assistantMsg.id);
+      }
       fetchSuggestions(trimmedInput, assistantMsg.content, setSuggestions, setSuggestionsLoading);
       fireNotification();
       if (assistantMsg.reportId) {
@@ -880,7 +885,11 @@ export function useChatStream(options: {
         existingConv?.preview ?? "",
         existingConv?.title
       );
-      setTypingMessageId(assistantMsg.id);
+      if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+        setTypingMessageId(null);
+      } else {
+        setTypingMessageId(assistantMsg.id);
+      }
     } catch (error) {
       const msg = serializeError(error);
       const errorMsg: Message = { id: createUniqueId("msg-"), role: "assistant", content: `Sorry: ${msg}`, timestamp: new Date() };
@@ -1104,7 +1113,11 @@ export function useChatStream(options: {
               const preview = assistantMsg.content.replace(/\[.*?\]/g, "").replace(/#{1,3}\s/g, "").slice(0, 80) + "…";
               updateConversationMessages(convId, updated, preview, title);
               saveConversationToDB(convId, sessionIdRef.current ?? "", title, preview, updated);
-              setTypingMessageId(assistantMsg.id);
+              if (assistantMsg.analytics?.type === "chart_config" || assistantMsg.analytics?.type === "chart_error") {
+                setTypingMessageId(null);
+              } else {
+                setTypingMessageId(assistantMsg.id);
+              }
               fetchSuggestions(transcript, assistantMsg.content, setSuggestions, setSuggestionsLoading);
               fireNotification();
             } catch (error) {
