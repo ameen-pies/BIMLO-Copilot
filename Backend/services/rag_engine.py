@@ -1464,7 +1464,7 @@ Now generate for: "{q}" """
             if resolved:
                 filter_dict = {"filename": resolved}
                 print(f"[scope→{resolved}] ", end="")
-        
+
         if filter_dict is None:
             # Fallback: exact filename substring match in the raw query text
             for doc in all_docs:
@@ -1481,16 +1481,41 @@ Now generate for: "{q}" """
         except ImportError:
             fetch_k = top_k
 
-        try:
-            results = self.vs.search(
-                query,
-                top_k=fetch_k,
-                filter_dict=filter_dict,
-                user_id=user_id,
-                session_id=session_id,
-            )
-        except Exception:
-            results = self.vs.search(query, top_k=fetch_k, user_id=user_id, session_id=session_id)
+        # ── Multi-doc: search all attached files and merge ────────────────────
+        # When multiple docs are attached and no specific file was targeted,
+        # search each attached file individually and merge results.
+        attached = state.get("attached_doc_filenames") or []
+        if len(attached) > 1 and filter_dict is None:
+            all_chunks: List[Dict] = []
+            per_file_k = max(fetch_k // len(attached), 5)
+            for fname in attached:
+                try:
+                    hits = self.vs.search(
+                        query,
+                        top_k=per_file_k,
+                        filter_dict={"filename": fname},
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    all_chunks.extend(hits)
+                except Exception:
+                    pass
+            if all_chunks:
+                results = all_chunks
+                print(f"[multi-doc: {len(attached)} files → {len(results)} chunks] ", end="")
+            else:
+                results = self.vs.search(query, top_k=fetch_k, user_id=user_id, session_id=session_id)
+        else:
+            try:
+                results = self.vs.search(
+                    query,
+                    top_k=fetch_k,
+                    filter_dict=filter_dict,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            except Exception:
+                results = self.vs.search(query, top_k=fetch_k, user_id=user_id, session_id=session_id)
 
         print(f"{len(results)} vector chunks")
 

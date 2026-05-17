@@ -559,20 +559,15 @@ def _node_post_process(state: ClassifierState) -> ClassifierState:
             result.reasoning += f" [doc_scope filled from heuristic: {doc_scope_hint}]"
 
     # 6. Auto-fill doc_scope from attachment when LLM left it empty —
-    #    BUT only if there's exactly one attached file, or if all attachments
-    #    are the same type. With mixed types (PDF + IFC), leave doc_scope empty
-    #    so retrieval searches ALL docs — the LLM already saw all files in context.
+    #    Only when exactly one file attached. With multiple files (same or
+    #    mixed type), leave doc_scope empty so retrieve_vector searches all
+    #    attached docs via attached_doc_filenames.
     if attached_doc_filenames and not result.doc_scope:
         if result.suggested_route in ("rag", "iterative_rag", "cad", "transform", "analytics"):
-            _has_mixed_types = (
-                any(_is_cad(f) for f in attached_doc_filenames)
-                and any(not _is_cad(f) for f in attached_doc_filenames)
-            )
-            if not _has_mixed_types:
-                # All same type — safe to default to last attachment
-                result.doc_scope = attached_doc_filenames[-1]
-                result.reasoning += f" [doc_scope set from attachment: {attached_doc_filenames[-1]}]"
-            # else: mixed types — leave empty; retrieve_vector will search all docs
+            if len(attached_doc_filenames) == 1:
+                result.doc_scope = attached_doc_filenames[0]
+                result.reasoning += f" [doc_scope set from attachment: {attached_doc_filenames[0]}]"
+            # else: multiple files — leave empty; retrieve_vector handles multi-doc search
 
     # 7. Validate route is in known set
     if result.suggested_route not in _VALID_ROUTES:
