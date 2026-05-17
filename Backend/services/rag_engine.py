@@ -125,6 +125,7 @@ class AgentState(TypedDict):
 
     # routing
     route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image", "cad"]]
+    force_route: str
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -826,6 +827,7 @@ class RAGEngine:
             "prev_route": prev_route,
             "route_log": route_log or [],
             "route": initial_route,
+            "force_route": force_route or "",
             "retrieved_chunks": [],
             "prev_retrieved_chunks": [],
             "retrieval_iterations": 0,
