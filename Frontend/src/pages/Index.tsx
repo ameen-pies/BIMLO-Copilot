@@ -420,20 +420,14 @@ const Index = () => {
           from { transform: translateX(0); }
           to   { transform: translateX(-50%); }
         }
-        @keyframes slideRight {
-          from { transform: translateX(0); }
-          to   { transform: translateX(50%); }
-        }
         .ticker-track {
           display: flex;
+          flex-direction: row; /* always LTR order regardless of dir */
           gap: 18px;
           width: max-content;
           padding: 12px 0 20px;
           animation: slideLeft 40s linear infinite;
           will-change: transform;
-        }
-        [dir="rtl"] .ticker-track {
-          animation-name: slideRight;
         }
 
         /* card */
@@ -653,7 +647,7 @@ const Index = () => {
               <TypewriterText
                 key={i18n.language}
                 texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
-                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-4 pb-2 inline-block"
+                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-8 pb-2 inline-block"
                 speed={100}
                 deleteSpeed={50}
                 pauseDuration={2000}
@@ -733,10 +727,10 @@ const Index = () => {
                 </div>
               </div>
 
-              <motion.div className="flex-1 hidden lg:flex items-center justify-start"
+              <motion.div className="flex-1 hidden lg:flex items-center justify-start overflow-visible"
                 initial={{ opacity: 0, x: 40 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }}
                 transition={{ duration: 0.8, delay: 0.3 }}
-                style={{ height: 500, position: "relative", marginTop: "-60px", marginInlineStart: "-40px" }}>
+                style={{ height: 500, position: "relative", marginTop: "-60px", marginLeft: i18n.language === "ar" ? "-600px" : "-200px" }}>
                 <CardSwap width={480} height={320} cardDistance={60} verticalDistance={70} delay={4000} easing="elastic">
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><MessageSquare size={18} color="hsl(var(--primary))" /></div>

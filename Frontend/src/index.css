@@ -100,7 +100,7 @@
   h1, h2, h3, h4, h5, h6 {
     font-family: var(--font-heading);
   }
-  /* Arabic font override — Alexandria is the Montserrat counterpart for Arabic */
+  /* Arabic font override — Alexandria for everything */
   [dir="rtl"] {
     --font-heading: 'Alexandria', 'Montserrat', sans-serif;
     --font-body: 'Alexandria', 'Inter', sans-serif;
@@ -109,6 +109,9 @@
   [dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3, [dir="rtl"] h4, [dir="rtl"] h5, [dir="rtl"] h6 {
     font-family: var(--font-heading);
   }
+  /* Boost bold weight for Arabic — Alexandria's 700 is visually lighter */
+  [dir="rtl"] .font-bold { font-weight: 800; }
+  [dir="rtl"] .font-extrabold { font-weight: 900; }
 }
 
 @layer utilities {

@@ -78,7 +78,7 @@ export const ProfileBubble = ({
         style={{
           position: "absolute",
           top: "calc(100% + 10px)",
-          insetInlineStart: 0,
+          insetInlineEnd: 0,
           minWidth: 210,
           background: "hsl(var(--card))",
           border: "1px solid hsl(var(--border))",

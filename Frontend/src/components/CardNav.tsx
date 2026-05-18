@@ -71,8 +71,9 @@ const CardNav = ({
     return w;
   };
 
-  // Fixed expanded width — constant so no label change can affect it
-  const EXPANDED_WIDTH = 610;
+  // Fixed expanded width — wider for Arabic since labels are longer
+  const isRtl = typeof document !== "undefined" && document.documentElement.dir === "rtl";
+  const EXPANDED_WIDTH = isRtl ? 640 : 610;
   const getExpandedWidth = () => EXPANDED_WIDTH;
 
   const buildTimeline = (resetPositions = true) => {

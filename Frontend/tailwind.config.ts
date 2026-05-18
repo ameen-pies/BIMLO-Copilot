@@ -13,8 +13,8 @@ export default {
       },
     },
     fontFamily: {
-      heading: ['Montserrat', 'sans-serif'],
-      body: ['Inter', 'sans-serif'],
+      heading: ['var(--font-heading)', 'Montserrat', 'sans-serif'],
+      body: ['var(--font-body)', 'Inter', 'sans-serif'],
     },
     extend: {
       colors: {
