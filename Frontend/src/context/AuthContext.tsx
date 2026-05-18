@@ -21,6 +21,7 @@ import React, {
   useCallback,
   useRef,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import api from "@/services/api";
 import AuthModal from "@/components/AuthModal";
 
@@ -45,7 +46,7 @@ export type PendingAction = (() => void) | null;
 interface AuthContextValue {
   currentUser:      AuthUser | null;
   isLoggedIn:       boolean;
-  showAuthModal:    (onSuccess?: PendingAction) => void;
+  showAuthModal:    (onSuccess?: PendingAction, redirectPath?: string) => void;
   hideAuthModal:    () => void;
   logout:           () => void;
   setCurrentUser:   (u: AuthUser | null) => void;
@@ -71,9 +72,11 @@ export const useAuth = () => useContext(AuthContext);
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const navigate = useNavigate();
   const [currentUser, setCurrentUserState] = useState<AuthUser | null>(null);
   const [modalOpen, setModalOpen]           = useState(false);
   const pendingActionRef                    = useRef<PendingAction>(null);
+  const redirectPathRef                     = useRef<string | null>(null);
 
   // Rehydrate via /auth/me (HttpOnly cookie-based session)
   useEffect(() => {
@@ -108,8 +111,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUserState(u);
   }, []);
 
-  const showAuthModal = useCallback((onSuccess: PendingAction = null) => {
+  const showAuthModal = useCallback((onSuccess: PendingAction = null, redirectPath?: string) => {
     pendingActionRef.current = onSuccess;
+    redirectPathRef.current = redirectPath ?? null;
     setModalOpen(true);
   }, []);
 
@@ -122,12 +126,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     api.setToken(user.token);
     setCurrentUser(user);
     setModalOpen(false);
+    const redirect = redirectPathRef.current;
+    redirectPathRef.current = null;
     if (pendingActionRef.current) {
       const action = pendingActionRef.current;
       pendingActionRef.current = null;
       setTimeout(action, 150);
+    } else if (redirect) {
+      setTimeout(() => navigate(redirect), 150);
     }
-  }, [setCurrentUser]);
+  }, [setCurrentUser, navigate]);
 
   // ── Heartbeat: ping /auth/heartbeat every 60s while logged in ──────────────
   useEffect(() => {

@@ -409,11 +409,15 @@ export function useDocuments(options: {
   const removeDocument = async (documentId: string) => {
     setConfirmingDeleteId(null);
     revokePreviewUrl(documentId);
+    // Optimistic: remove from local state immediately
+    setDocuments(prev => prev.filter(d => d.document_id !== documentId));
+    setPendingDocIds(prev => prev.filter(id => id !== documentId));
     try {
       await api.deleteDocument(documentId, sessionIdRef.current ?? undefined);
       queryClient.invalidateQueries({ queryKey: queryKeys.documents(sessionIdRef.current ?? "") });
-      await loadDocuments(sessionIdRef.current);
     } catch (error) {
+      // Revert on failure by reloading
+      await loadDocuments(sessionIdRef.current);
       toast({
         title: "Delete failed",
         description: error instanceof Error ? error.message : "Unknown error",

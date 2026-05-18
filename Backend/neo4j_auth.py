@@ -1360,6 +1360,7 @@ def admin_list_users(admin: Dict = Depends(require_admin)):
         OPTIONAL MATCH (u)-[:UPLOADED]->(d:Document)
         RETURN u.id          AS user_id,
                u.username    AS username,
+               coalesce(u.display_name, u.username) AS display_name,
                u.email       AS email,
                coalesce(u.role, 'user') AS role,
                u.created_at  AS created_at,
@@ -1374,6 +1375,7 @@ def admin_list_users(admin: Dict = Depends(require_admin)):
         {
             "user_id":            r["user_id"],
             "username":           r["username"],
+            "display_name":       r.get("display_name") or r["username"],
             "email":              r["email"],
             "role":               r["role"],
             "created_at":         r["created_at"],

@@ -133,11 +133,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     <div
       ref={inputAreaRef}
       className={`transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messagesLength > 0 ? "relative z-10 border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm overflow-visible" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent overflow-visible"}`}
-      style={messagesLength === 0 ? { bottom: "50%", transform: "translateY(calc(50% + 60px))" } : {}}
-      onDragEnter={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current++; setIsChatDragOver(true); }}
-      onDragLeave={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current--; if (chatDragCounterRef.current === 0) setIsChatDragOver(false); }}
-      onDragOver={e => e.preventDefault()}
-      onDrop={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current = 0; setIsChatDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
+      style={messagesLength === 0 ? { top: "50%", transform: "translateY(calc(-50% + 60px))" } : {}}
     >
       <div className="max-w-3xl mx-auto">
 
@@ -302,25 +298,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           <div
             className="relative rounded-2xl bg-card shadow-md"
           >
-            {/* ── Type-bar drag overlay ── */}
-            <AnimatePresence>
-              {isChatDragOver && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
-                  className="absolute inset-0 z-20 rounded-2xl bg-primary/8 border-2 border-dashed border-primary/40 flex items-center justify-center pointer-events-none"
-                >
-                  <div className="flex items-center gap-2">
-                    <Plus className="h-4 w-4 text-primary" />
-                    <span className="text-xs font-medium text-primary">{t("chat.drop_files_here")}</span>
-                    <span className="text-[10px] text-primary/60">PDF · DOCX · TXT · PNG · JPG · IFC · DWG</span>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
             {/* Actual input row */}
             <div className="flex items-center gap-2 px-3 py-2.5">
 

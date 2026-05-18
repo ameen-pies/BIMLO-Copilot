@@ -35,9 +35,10 @@ export const ProfileBubble = ({
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const initial      = user.username[0].toUpperCase();
-  const hasPfp       = !!user.avatar_url;
-  const displayName  = user.display_name || user.username;
+  const nameStr    = user.display_name || user.username;
+  const initial    = [...nameStr][0]?.toUpperCase() ?? "?";
+  const hasPfp     = !!user.avatar_url;
+  const displayName = nameStr;
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -120,7 +121,7 @@ export const ProfileBubble = ({
               <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: "hsl(var(--foreground))", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {displayName}
               </p>
-              <p style={{ margin: "2px 0 0", fontSize: 11, color: "rgba(148,163,184,0.8)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <p style={{ margin: "2px 0 0", fontSize: 11, color: "rgba(148,163,184,0.8)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 160 }}>
                 {user.email}
               </p>
             </div>

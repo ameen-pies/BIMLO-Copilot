@@ -315,6 +315,7 @@ export function useChatStream(options: {
                 reportId: reportId ?? null,
                 reportTitle: event.report_title ?? null,
                 reportMeta: event.report_meta ?? null,
+                route: event.route ?? null,
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
@@ -419,6 +420,7 @@ export function useChatStream(options: {
                 reportId:    reportId ?? null,
                 reportTitle: event.report_title ?? null,
                 reportMeta:  event.report_meta ?? null,
+                route:       event.route ?? null,
                 timestamp:   new Date(),
               };
             } else if (event.type === "error") {

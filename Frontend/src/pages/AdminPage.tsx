@@ -963,6 +963,12 @@ export default function AdminPage() {
     return () => clearInterval(interval);
   }, [loadHealth, isPipelineRunning]);
 
+  // Auto-refresh stats every 60s to keep online count live
+  useEffect(() => {
+    const interval = setInterval(loadStats, 60_000);
+    return () => clearInterval(interval);
+  }, [loadStats]);
+
   // ── Live log SSE ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (tab !== "logs" || !currentUser?.token) return;
@@ -1282,17 +1288,17 @@ export default function AdminPage() {
                               {u.avatar_url
                                 ? <img src={u.avatar_url} alt="" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                     onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                                : u.username[0]?.toUpperCase()
+                                : [...(u.display_name || u.username)][0]?.toUpperCase()
                               }
                             </div>
-                            <div>
-                              <div style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>
-                                {u.username} {isMe && <span style={{ fontSize: 10, color: "#7c3aed", fontWeight: 700 }}>(you)</span>}
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 160 }}>
+                                {u.display_name || u.username} {isMe && <span style={{ fontSize: 10, color: "#7c3aed", fontWeight: 700 }}>(you)</span>}
                               </div>
                             </div>
                           </div>
                         </td>
-                        <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))" }}>{u.email}</td>
+                        <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", maxWidth: 200, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{u.email}</td>
                         <td style={{ padding: "12px 16px" }}>
                           <span style={{
                             fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999,

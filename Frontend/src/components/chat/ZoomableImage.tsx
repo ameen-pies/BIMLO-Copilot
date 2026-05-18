@@ -151,7 +151,8 @@ export const ZoomableImage: React.FC<ZoomableImageProps> = ({ src, alt, compact 
             <button
               title={t("chat.reset_zoom")}
               onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}
-            >{t("chat.reset_zoom")}</button>
+              className="rounded px-1.5 py-0.5 text-[10px] bg-muted/40 hover:bg-muted text-muted-foreground/60 hover:text-foreground transition-colors"
+            >1:1</button>
           )}
         </div>
       </div>

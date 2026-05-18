@@ -25,6 +25,7 @@ export interface Message {
   reportGenerating?: boolean;
   navAction?: { path: string; label: string; icon: string } | null;
   clarificationOptions?: string[];
+  route?: string;
 }
 
 export interface FactChip {

@@ -201,6 +201,19 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
               <div className={`group/msg relative ${msg.role === "user" ? "max-w-[80%] flex flex-col items-end gap-0.5" : "max-w-[80%] space-y-2"}`}>
 
+                {/* Route badge — shows which pipeline handled this query */}
+                {msg.role === "assistant" && msg.route && (() => {
+                  const routeLabels: Record<string, string> = {
+                    rag: "RAG", iterative_rag: "RAG", graph: "Graph", report: "Report",
+                    news: "News", transform: "Transform", define: "Define", direct: "Direct", cad: "CAD",
+                  };
+                  return (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-primary/10 text-primary/60 border border-primary/15 w-fit mb-1">
+                      {routeLabels[msg.route!] ?? msg.route}
+                    </span>
+                  );
+                })()}
+
                 {/* Persisted thinking steps — shown above the bubble for completed assistant messages */}
                 {msg.role === "assistant" && msg.thinkingSteps && msg.thinkingSteps.length > 0 && (() => {
                   const steps = msg.thinkingSteps;
@@ -600,7 +613,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         }}
                         rows={1}
                         style={{ maxHeight: "300px" }}
-                        className="w-full resize-none bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary-foreground/40 leading-relaxed overflow-y-auto scrollbar-thin"
+                        className="w-full resize-none bg-primary-foreground/10 text-foreground placeholder:text-muted-foreground/50 rounded-lg px-3 py-2 text-base focus:outline-none focus:ring-1 focus:ring-primary-foreground/40 leading-relaxed overflow-y-auto scrollbar-thin"
                       />
                       <div className="flex items-center gap-1.5 justify-end">
                         <button
