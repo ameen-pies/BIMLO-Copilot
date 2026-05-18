@@ -180,7 +180,7 @@ class LLMJudge:
         )
         
         try:
-            raw = self._call_llm(prompt, temperature=0.1, max_tokens=300, task="evaluate")
+            raw = self._call_llm(prompt, temperature=0.1, max_tokens=400, task="evaluate")
             return self._parse_evaluation(raw)
         except Exception as e:
             print(f"❌ Judge evaluation failed: {e}")
@@ -273,16 +273,16 @@ Respond ONLY with this JSON:
         retrieved_docs: Optional[List[Dict]]
     ) -> str:
         """Build the prompt that asks the judge to evaluate the response."""
-        
+
         docs_section = ""
         if retrieved_docs:
             docs_formatted = "\n\n".join([
-                f"Document {i+1} [{doc.get('metadata', {}).get('filename', 'unknown')}]:\n{doc.get('text', '')[:600]}"
-                for i, doc in enumerate(retrieved_docs[:3])
+                f"[{i+1}] {doc.get('metadata', {}).get('filename', 'unknown')}:\n{doc.get('text', '')[:800]}"
+                for i, doc in enumerate(retrieved_docs[:8])
             ])
-            docs_section = f"\n\nSOURCE DOCUMENTS (for hallucination check):\n{docs_formatted}"
-        
-        return f"""You are a response evaluator for Bimlo Copilot (BIM engineering, telecom, DeepTwin AI). Evaluate this RAG response strictly.
+            docs_section = f"\n\nALL SOURCE DOCUMENTS (same context the answer was generated from):\n{docs_formatted}"
+
+        return f"""You are a response evaluator for Bimlo Copilot. Your job is to verify quality, NOT to be maximally strict.
 
 QUERY: {user_query}
 PLAN: language={plan.target_language}, tone={plan.target_tone}, style={plan.response_style}, length={plan.max_response_length}
@@ -290,16 +290,17 @@ RESPONSE:
 {generated_response}
 {docs_section}
 
-EVALUATE on these criteria:
-1. Does it DIRECTLY answer what was asked? (not a definition, not generic background — the actual answer)
-2. Is the language correct? ({plan.target_language}) — CRITICAL: If the response is in a different language than {plan.target_language}, this is AUTOMATICALLY a fail. Set language_correct=false regardless of content quality.
-3. Does it contain any claims NOT supported by the source documents? (hallucination)
-4. Is the length appropriate? (brief questions should get brief answers — not padded sections)
-5. Does it start with a direct answer rather than an introduction/preamble?
-6. Are important specific values/names/facts from the documents included if they were asked for?
+CHECK these criteria:
+1. Does it answer what was asked? (direct answer, not generic background)
+2. Language: is the response in {plan.target_language}? If not, set language_correct=false.
+3. Hallucination: does the response contain claims that CONTRADICT or are COMPLETELY INVENTED beyond what the documents say?
+   - If a claim is plausible and could reasonably come from the documents even if you can't find the exact sentence, do NOT flag it.
+   - Only flag clear fabrications: specific numbers, names, dates, or facts that are provably wrong or completely absent.
+   - When in doubt, give the benefit of the doubt — the answer saw the same documents you see above.
+4. Length: is it reasonable for the question? (brief questions deserve brief answers)
+5. Sources: are key facts from the documents included?
 
-SCORING: Be strict. A response that answers a simple factual question with 3 sections and an introduction should score 0.4 or lower.
-LANGUAGE EVALUATION: If the user asked in English but the answer is in French (or vice versa), set language_correct=false, is_acceptable=false, and include "wrong language" in specific_problems with how_to_fix explicitly saying to rewrite in the correct language.
+SCORING: A response that answers the question correctly and in the right language should score 0.7+. Only score below 0.5 if there are clear, provable problems.
 
 Respond ONLY with this JSON:
 {{
@@ -307,7 +308,7 @@ Respond ONLY with this JSON:
   "language_correct": true|false,
   "tone_correct": true|false,
   "has_hallucination": true|false,
-  "hallucination_details": "specific claim not in documents, or null",
+  "hallucination_details": "specific fabricated claim, or null",
   "uses_sources_correctly": true|false,
   "overall_score": 0.0-1.0,
   "is_acceptable": true|false,
