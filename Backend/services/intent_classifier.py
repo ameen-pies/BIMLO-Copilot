@@ -89,6 +89,7 @@ class IntentAnalysis:
     clarification_options: List[str] = field(default_factory=list)  # 2-3 options when query is vague
     vagueness_score:     float = 0.0  # 0.0–1.0, how ambiguous the query is
     full_scope:          bool = False  # True = query needs ALL chunks, not just top_k
+    needs_summary:       bool = False  # True = explicit summary/analysis request (→ full_doc_node)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -186,6 +187,7 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
   "ambiguity_score": <0.0–1.0>,
   "vagueness_score": <0.0–1.0>,
   "full_scope": <true|false>,
+  "needs_summary": <true|false>,
   "suggested_route": "<one of: direct | rag | iterative_rag | transform | analytics | graph | report | define | cad>",
   "confidence": <0.0–1.0>,
   "doc_scope": "<exact filename from the uploaded docs list if the user clearly targets ONE specific document; positional hint like 'first' or 'second' if they reference position; empty string if they want ALL docs or the scope is unclear>",
@@ -255,6 +257,10 @@ FULL SCOPE DETECTION (independent of route):
     (b) "what does the whole document say", "go through the entire file", "read everything"
     (c) any query where the user explicitly wants comprehensive coverage of all content
     Set false when: targeted questions, factual lookups, specific sections, definitions, anything where top_k retrieval suffices.
+- needs_summary: true ONLY when the user explicitly wants a summary, overview, or comprehensive analysis of the entire document.
+    Set true when: "summarize this", "give me a summary", "overview of the document", "analyze all of it", "what does the whole document say"
+    Set false when: targeted questions that need full doc context ("what are all safety requirements?", "list every section about X")
+    The difference: full_scope=true means "I need all chunks". needs_summary=true means "I want a summary of everything".
 
 DOC SCOPE RULES (for the "doc_scope" field):
 - If the user names a specific file (partial or full name), set doc_scope to that filename exactly as it appears in UPLOADED DOCUMENTS.
@@ -1056,6 +1062,7 @@ def _make_heuristic(
         ambiguity_score   = 0.4,
         vagueness_score   = 0.0,
         full_scope        = False,
+        needs_summary     = False,
         suggested_route   = route,
         confidence        = confidence,
         reasoning         = f"Heuristic classification: matched '{route}' pattern in query.",
@@ -1126,6 +1133,7 @@ def _parse_llm_result(raw: str) -> IntentAnalysis:
         ambiguity_score   = float(data.get("ambiguity_score", 0.5)),
         vagueness_score   = float(data.get("vagueness_score", 0.0)),
         full_scope        = bool(data.get("full_scope", False)),
+        needs_summary     = bool(data.get("needs_summary", False)),
         suggested_route   = suggested,
         confidence        = float(data.get("confidence", 0.7)),
         reasoning         = str(data.get("reasoning", "")),

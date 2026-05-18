@@ -40,10 +40,13 @@ class DocumentProcessor:
     _DEFAULT_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
     _VISION_PROMPT = (
         "You are analysing a page image or embedded figure from a technical document. "
-        "Describe what you see in plain English: components, labels, connections, values, "
-        "layout, or any text visible in the image. Be specific and concise (2-5 sentences). "
-        "If it is a diagram, wiring schematic, rack layout, floor plan, or table, "
-        "describe the structure and key elements."
+        "Provide a thorough, structured description:\n"
+        "1. What type of visual is this? (diagram, chart, table, schematic, floor plan, photo, etc.)\n"
+        "2. What is the main subject or content?\n"
+        "3. Describe all visible text, labels, numbers, or annotations verbatim.\n"
+        "4. Describe the layout, structure, and key visual elements.\n"
+        "5. If it shows data (chart/table), describe the values and trends.\n"
+        "Be thorough — your description is the only way this image's content becomes searchable."
     )
 
     def __init__(self, chunk_size: int = 1500, chunk_overlap: int = 300):
@@ -328,7 +331,7 @@ class DocumentProcessor:
                 if not b64:
                     continue
 
-                desc = self._call_vision_llm(b64)
+                desc = self._call_vision_llm(b64, prompt=self._IMAGE_UPLOAD_PROMPT, max_tokens=600)
                 if desc:
                     tag = f"[IMAGE on page {page_num}, figure {img_idx + 1}: {desc}]"
                     descriptions.append(tag)
@@ -444,7 +447,7 @@ class DocumentProcessor:
                     if not b64:
                         continue
 
-                    desc = self._call_vision_llm(b64)
+                    desc = self._call_vision_llm(b64, prompt=self._IMAGE_UPLOAD_PROMPT, max_tokens=600)
                     if desc:
                         descriptions.append(f"[IMAGE in document: {desc}]")
                         print(f"   🖼️  Described DOCX image ({len(desc)} chars)")
