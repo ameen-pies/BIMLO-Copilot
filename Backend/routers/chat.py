@@ -315,6 +315,7 @@ async def query_stream(
                 "analytics":    result.get("analytics"),
                 "report_id":    result.get("report_id"),
                 "report_title": result.get("report_title"),
+                "clarification_options": result.get("clarification_options") or [],
             }
             q.put({"type": "result", "session_id": session_id, **safe_result})
         except Exception as e:

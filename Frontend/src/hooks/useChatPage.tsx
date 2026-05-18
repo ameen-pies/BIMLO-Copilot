@@ -1386,6 +1386,7 @@ export function useChatPage() {
             attachedDocIds:   m.attachedDocIds   ?? undefined,
             navAction:        m.navAction        ?? undefined,
             interrupted:      m.interrupted      ?? undefined,
+            clarificationOptions: m.clarificationOptions ?? undefined,
           })),
         }),
       });
@@ -1920,6 +1921,7 @@ export function useChatPage() {
                 reportId: reportId ?? null,
                 reportTitle: event.report_title ?? null,
                 reportMeta: event.report_meta ?? null,
+                clarificationOptions: event.clarification_options ?? undefined,
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {

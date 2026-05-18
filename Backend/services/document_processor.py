@@ -261,7 +261,7 @@ class DocumentProcessor:
                     # ── 1. Body text ──────────────────────────────────────
                     body = page.extract_text() or ""
                     if body.strip():
-                        full_text_parts.append(body)
+                        full_text_parts.append(f"[page {page_num}]\n{body}")
 
                     # ── 2. Tables ─────────────────────────────────────────
                     tables = page.extract_tables() or []

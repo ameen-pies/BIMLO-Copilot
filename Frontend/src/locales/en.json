@@ -141,7 +141,9 @@
         "Quiet evening, good thinking.",
         "Sunset productivity."
       ]
-    }
+    },
+    "clarify_placeholder": "Or type your own…",
+    "clarify_send": "Send"
   },
   "auth": {
     "login": "Login",

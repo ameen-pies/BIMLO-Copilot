@@ -463,7 +463,7 @@ const CallPage: React.FC = () => {
     // WebM init segments (header-only, no audio frames) are typically ~965 bytes.
     // Real speech is always well above 5 KB — reject anything smaller outright.
     if (blob.size < 5000) {
-      startListening();
+      startListeningRef.current?.();
       return;
     }
 
@@ -482,9 +482,9 @@ const CallPage: React.FC = () => {
       const { transcript } = (await txRes.json()) as { transcript: string };
       const rawText = transcript?.trim();
 
-      if (!rawText || rawText.length < 3) { startListening(); return; }
+      if (!rawText || rawText.length < 3) { startListeningRef.current?.(); return; }
       // Reject transcripts that are just punctuation/noise
-      if (/^[.،,;:!?…\s]+$/.test(rawText)) { startListening(); return; }
+      if (/^[.،,;:!?…\s]+$/.test(rawText)) { startListeningRef.current?.(); return; }
       if (stateRef.current === "ended") return;
 
       const text = rawText;
@@ -595,7 +595,7 @@ const CallPage: React.FC = () => {
       }
 
       ragAnswer = ragAnswer.trim();
-      if (!ragAnswer) { startListening(); return; }
+      if (!ragAnswer) { startListeningRef.current?.(); return; }
       if (stateRef.current === "ended") return;
 
       // ── 3. Drain remaining queue, then play the answer immediately ────
@@ -655,7 +655,7 @@ const CallPage: React.FC = () => {
         // Barge-in or endCall aborted TTS — startListening is called by handleBargeIn,
         // but if state isn't ended yet, restart to be safe.
         if (stateRef.current !== "ended" && stateRef.current !== "listening" && stateRef.current !== "detecting") {
-          startListening();
+          startListeningRef.current?.();
         }
         return;
       }
@@ -665,7 +665,7 @@ const CallPage: React.FC = () => {
       const st = stateRef.current;
       // Don't restart if already listening/detecting (continuation window did it)
       // or if the call ended
-      if (st !== "ended" && st !== "listening" && st !== "detecting") startListening();
+      if (st !== "ended" && st !== "listening" && st !== "detecting") startListeningRef.current?.();
     }
   }, [selectedVoice]);
 
@@ -1150,6 +1150,7 @@ const CallPage: React.FC = () => {
                 initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.3 }}
                 className="text-sm font-medium text-foreground/80 text-center leading-relaxed"
+                dir={/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(liveTranscript) ? "rtl" : "ltr"}
               >
                 {liveTranscript}
               </motion.p>
@@ -1174,6 +1175,7 @@ const CallPage: React.FC = () => {
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -8, transition: { duration: 0.2 } }}
                     transition={{ duration: 0.2 }}
+                    dir={/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(subtitleWords.join(" ")) ? "rtl" : "ltr"}
                     className={`text-sm font-light text-center leading-relaxed px-2 ${isDark ? "text-blue-400/80" : "text-blue-700"}`}
                   >
                     <AnimatePresence mode="popLayout">
@@ -1321,11 +1323,6 @@ const CallPage: React.FC = () => {
               >
                 {[
                   { id: "hannah", label: "Hannah", hintKey: "call.voice_hannah" },
-                  { id: "diana",  label: "Diana",  hintKey: "call.voice_diana" },
-                  { id: "autumn", label: "Autumn", hintKey: "call.voice_autumn" },
-                  { id: "austin", label: "Austin", hintKey: "call.voice_austin" },
-                  { id: "daniel", label: "Daniel", hintKey: "call.voice_daniel" },
-                  { id: "troy",   label: "Troy",   hintKey: "call.voice_troy" },
                 ].map(v => (
                   <button
                     key={v.id}

@@ -141,7 +141,9 @@
         "Soirée calme, bonnes réflexions.",
         "Productivité au coucher du soleil."
       ]
-    }
+    },
+    "clarify_placeholder": "Ou tapez votre propre réponse…",
+    "clarify_send": "Envoyer"
   },
   "auth": {
     "login": "Connexion",

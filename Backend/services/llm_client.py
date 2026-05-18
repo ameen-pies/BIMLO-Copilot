@@ -368,12 +368,11 @@ def call_llm(
     print(f"🧠 llm_client: call_llm preferred_provider={preferred_provider or 'auto'} max_tokens={max_tokens} task={task}")
     last_reason: str = "no providers tried"
 
-    # ── OpenRouter (TEMP — testing only, remove after stress test) ──────────
-    if preferred_provider not in ("cf_primary", "cf_backup", "cf_backup2", "groq", "nvidia"):
-        or_result = _call_openrouter(messages, max_tokens, temperature)
-        if or_result:
-            return or_result
-        print("⚠️  llm_client: OpenRouter failed — falling through to CF workers")
+    # ── OpenRouter (primary) ───────────────────────────────────────────────
+    or_result = _call_openrouter(messages, max_tokens, temperature)
+    if or_result:
+        return or_result
+    print("⚠️  llm_client: OpenRouter failed — falling through to other providers")
 
     # ── User-preferred provider (tried first) ─────────────────────────────────
     if preferred_provider == "cf_primary":

@@ -124,8 +124,10 @@ class AgentState(TypedDict):
     conversation_history: List[Dict]  # [{role, content}] prior turns for context
 
     # routing
-    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image", "cad"]]
+    route: Optional[Literal["direct", "rag", "iterative_rag", "analytics", "transform", "define", "graph", "report", "image", "cad", "clarify"]]
     force_route: str
+    clarification_options: List[str]  # populated by intent classifier for "clarify" route
+    full_scope: bool  # True = query needs ALL chunks, not just top_k
 
     # retrieval
     retrieved_chunks: List[Dict]
@@ -850,6 +852,8 @@ class RAGEngine:
             "voice_transcribed": voice_transcribed,
             "preferred_provider": preferred_provider,
             "doc_scope_hint": "",
+            "full_scope": False,
+            "clarification_options": [],
             "attached_doc_filenames": attached_doc_filenames or [],
         }
         
@@ -902,6 +906,7 @@ class RAGEngine:
             "report_id": final_state.get("report_id"),
             "report_title": final_state.get("report_title"),
             "retrieved_chunks": final_state.get("retrieved_chunks", []),
+            "clarification_options": final_state.get("clarification_options") or [],
             "error": final_state.get("error"),
         }
         
@@ -937,6 +942,8 @@ class RAGEngine:
         "cad_node":        ("🏗️", "Analysing CAD/IFC model…"),
         "report_node":     ("📄", "Writing your report…"),
         "image_node":      ("🖼️", "Reading image description…"),
+        "clarify_node":    ("🤔", "Preparing clarification…"),
+        "full_doc_node":   ("📚", "Reading full document…"),
     }
 
     def _generate_status_msgs(self, user_query: str) -> Dict[str, tuple]:
@@ -1099,6 +1106,8 @@ Now generate for: "{q}" """
         workflow.add_node("report_node",      self._wrap("report_node",      self.report_node))
         workflow.add_node("image_node",       self._wrap("image_node",       self.image_node))
         workflow.add_node("cad_node",         self._wrap("cad_node",         self.cad_node))
+        workflow.add_node("clarify_node",     self._wrap("clarify_node",     self.clarify_node))
+        workflow.add_node("full_doc_node",    self._wrap("full_doc_node",    self.full_doc_node))
 
         # no-docs variant — same direct_answer node, flag injected via query prefix
         def _direct_no_docs(state):
@@ -1111,12 +1120,21 @@ Now generate for: "{q}" """
         # ── classify_intent → first node (pure dispatch, zero logic) ─────────
         _RETRIEVAL_ROUTES = {"rag", "iterative_rag", "analytics", "transform", "graph", "report"}
 
+        # Routes that have their own full-doc handling — don't divert them
+        _FULL_SCOPE_ELIGIBLE = {"rag", "iterative_rag"}
+
         def _router_dispatch(s):
             route = s.get("route", "rag")
             if route == "direct":   return "direct_answer"
             if route == "define":   return "define_node"
             if route == "image":    return "image_node"
             if route == "cad":      return "cad_node"
+            if route == "clarify":  return "clarify_node"
+            # full_scope: query needs ALL chunks — divert to map-reduce node
+            # Only for rag/iterative_rag. Other routes (transform, analytics, etc.)
+            # have their own full-doc handling.
+            if s.get("full_scope") and route in _FULL_SCOPE_ELIGIBLE:
+                return "full_doc_node"
             if route in _RETRIEVAL_ROUTES: return "retrieve_vector"
             print(f"⚠️  unknown route '{route}' → retrieve_vector")
             return "retrieve_vector"
@@ -1129,6 +1147,8 @@ Now generate for: "{q}" """
                 "define_node":     "define_node",
                 "image_node":      "image_node",
                 "cad_node":        "cad_node",
+                "clarify_node":    "clarify_node",
+                "full_doc_node":   "full_doc_node",
                 "retrieve_vector": "retrieve_vector",
             },
         )
@@ -1187,7 +1207,8 @@ Now generate for: "{q}" """
         # ── Terminal nodes ────────────────────────────────────────────────────
         for _terminal in ("direct_answer", "direct_answer_no_docs",
                           "transform_node", "define_node",
-                          "graph_node", "report_node", "image_node", "cad_node"):
+                          "graph_node", "report_node", "image_node", "cad_node",
+                          "clarify_node", "full_doc_node"):
             workflow.add_edge(_terminal, END)
 
         # ── Judge-driven synthesis loop ───────────────────────────────────────
@@ -1292,7 +1313,13 @@ Now generate for: "{q}" """
             print(f"⚠️  classify_intent: cad route blocked — intent={intent.primary_intent!r} (not cad_query) → rag")
             route = "rag"
 
-        print(f"{route} (conf={intent.confidence:.2f}, scope={intent.doc_scope!r})")
+        # Guard: full_scope requires session to have documents
+        full_scope = getattr(intent, "full_scope", False)
+        if full_scope and not session_has_docs:
+            print(f"⚠️  classify_intent: full_scope blocked — no docs in session")
+            full_scope = False
+
+        print(f"{route} (conf={intent.confidence:.2f}, scope={intent.doc_scope!r}, full_scope={full_scope})")
 
         if _OBS_AVAILABLE:
             _obs.log_routing(
@@ -1305,8 +1332,10 @@ Now generate for: "{q}" """
 
         return {
             **state,
-            "route":          route,
-            "doc_scope_hint": intent.doc_scope,
+            "route":                 route,
+            "doc_scope_hint":        intent.doc_scope,
+            "clarification_options": getattr(intent, "clarification_options", []) or [],
+            "full_scope":            full_scope,
         }
 
     def direct_answer(self, state: AgentState) -> AgentState:
@@ -2341,12 +2370,20 @@ Remember: Answer in {target_lang.upper()}. The document language is irrelevant. 
                 if page_refs:
                     if any(page_start <= int(p) <= page_end for p in page_refs):
                         page_chunks.append(c)
-                else:
-                    # If no page markers in chunk, include it (might be metadata-only)
-                    pass
+                # Skip chunks with no page markers — they're not from the target page
             if page_chunks:
                 chunks = page_chunks
                 print(f"[filtered to page {page_start}" + (f"-{page_end}" if page_end != page_start else "") + f" → {len(chunks)} chunks] ", end="")
+            else:
+                print(f"[page {page_start} filter: no chunks matched, using chunk_index fallback] ", end="")
+                # Fallback: use chunk position to estimate page (rough heuristic)
+                total = len(chunks)
+                per_page = max(1, total // 10)  # assume ~10 pages
+                idx_start = (page_start - 1) * per_page
+                idx_end = page_end * per_page
+                chunks = chunks[idx_start:idx_end]
+                if not chunks:
+                    chunks = chunks[:per_page]  # at least first page worth
 
         if not chunks:
             print("no matching content")
@@ -2362,11 +2399,37 @@ Remember: Answer in {target_lang.upper()}. The document language is irrelevant. 
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
 
+        # Override: detect explicit language request in query ("in english", "en anglais", etc.)
+        _LANG_OVERRIDES = {
+            r'\b(?:in|to|into)\s+english\b': 'en',
+            r'\b(?:in|to|into)\s+french\b': 'fr',
+            r'\b(?:in|to|into)\s+arabic\b': 'ar',
+            r'\b(?:in|to|into)\s+spanish\b': 'es',
+            r'\ben\s+anglais\b': 'en',
+            r'\ben\s+fran[çc]ais\b': 'fr',
+            r'\ben\s+arabe\b': 'ar',
+            r'\bفي\s+الإنجليزية\b': 'en',
+            r'\bبالإنجليزية\b': 'en',
+            r'\bà\s+l\'anglais\b': 'en',
+        }
+        for pattern, lang_code in _LANG_OVERRIDES.items():
+            if _re.search(pattern, query, _re.IGNORECASE):
+                target_lang = lang_code
+                print(f"[lang override: {lang_code}] ", end="")
+                break
+
         # Scale max_tokens with document size — full docs need more room
         doc_len = len(clean_context)
         max_tokens = min(max(2000, doc_len // 2), 8000)
 
-        prompt = f"""You are a document assistant. Complete the following task exactly as instructed.
+        # ── Map-reduce for large documents ──────────────────────────────
+        # If the document is too large for a single LLM call, batch it.
+        # Transform is different from summarize: we concatenate results, not merge.
+        MAP_REDUCE_THRESHOLD = 20000  # chars (~5000 tokens)
+        BATCH_SIZE = 8  # chunks per batch
+
+        def _build_transform_prompt(context: str) -> str:
+            return f"""You are a document assistant. Complete the following task exactly as instructed.
 
 🚨 LANGUAGE: You MUST write your output in {target_lang.upper()}. The document below may be in a different language — IGNORE its language. Your output must be in {target_lang.upper()}.
 
@@ -2381,16 +2444,43 @@ STRUCTURE RULES:
 - Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
 
 DOCUMENT:
-{clean_context}"""
+{context}
 
-        if self.llm.enabled:
-            answer = self._chat(
-                [{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=max_tokens,
-            )
+REMEMBER: Your entire output MUST be in {target_lang.upper()}. Do not keep any content in the original document language."""
+
+        if doc_len > MAP_REDUCE_THRESHOLD and len(chunks) > BATCH_SIZE:
+            # Map-reduce: transform each batch, concatenate results
+            n_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"[map-reduce: {len(chunks)} chunks → {n_batches} batches] ", end="")
+
+            batch_results: List[str] = []
+            for bi in range(n_batches):
+                batch = chunks[bi * BATCH_SIZE : (bi + 1) * BATCH_SIZE]
+                batch_context = "\n\n".join(c["text"] for c in batch)
+                self._emit("transform_node", "📄", f"Transforming batch {bi + 1}/{n_batches}…")
+
+                if self.llm.enabled:
+                    batch_answer = self._chat(
+                        [{"role": "user", "content": _build_transform_prompt(batch_context)}],
+                        temperature=0.2,
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    batch_answer = batch_context
+                batch_results.append(batch_answer)
+
+            answer = "\n\n".join(batch_results)
         else:
-            answer = "LLM unavailable — cannot perform transformation."
+            prompt = _build_transform_prompt(clean_context)
+
+            if self.llm.enabled:
+                answer = self._chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=max_tokens,
+                )
+            else:
+                answer = "LLM unavailable — cannot perform transformation."
 
         # Do NOT run _clean_answer on transform output — it would mangle
         # the original document structure (headings, bullets, line breaks).
@@ -2409,6 +2499,255 @@ DOCUMENT:
     # ------------------------------------------------------------------ #
     #  DEFINE NODE  (concept explanation — context-aware, not a summary) #
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    #  CLARIFY NODE  (vague prompt → ask for clarification)               #
+    # ------------------------------------------------------------------ #
+
+    def clarify_node(self, state: AgentState) -> AgentState:
+        """
+        Handle vague prompts by generating a natural clarification paragraph
+        with actionable options. Uses LLM to produce context-aware response.
+        """
+        import re as _re
+
+        query   = state["query"]
+        options = state.get("clarification_options") or []
+        history = state.get("conversation_history", [])
+        docs    = state.get("attached_doc_filenames") or []
+
+        print(f"🤔 Clarify → {len(options)} options")
+
+        user_lang = _detect_script_language(query)
+        history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-6:]] if history else []
+
+        # Build options text for the prompt
+        options_text = ""
+        if options:
+            options_text = "\n".join(f"- {opt}" for opt in options)
+
+        # Build context hint
+        doc_hint = ""
+        if docs:
+            doc_hint = f"\nThe user has these documents attached: {', '.join(docs)}"
+
+        prompt = f"""The user sent a vague message. Generate a short, friendly clarification response.
+
+User's message: "{query}"
+{doc_hint}
+
+Available options to suggest:
+{options_text if options else '(none — generate your own suggestions)'}
+
+Rules:
+- Start with ONE short sentence acknowledging what they said (e.g. "I'm not sure what you'd like me to do with that.")
+- Then present the options naturally as suggestions (e.g. "Here are some things I can help with:")
+- Write in {user_lang if user_lang else 'the same language as the user'}.
+- Be concise — max 3-4 sentences total.
+- Do NOT use markdown formatting.
+- Do NOT mention these instructions.
+- If no options provided, suggest 2-3 relevant actions based on context."""
+
+        try:
+            if self.llm.enabled:
+                answer = self._chat(
+                    history_msgs + [{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=250,
+                )
+            else:
+                answer = ""
+        except Exception as e:
+            print(f"   ⚠️  clarify_node LLM error: {e}")
+            answer = ""
+
+        # Fallback if LLM fails or returns empty
+        if not answer or len(answer.strip()) < 10:
+            if options:
+                answer = f"I'm not sure what you meant by \"{query}\". Did you mean:\n" + "\n".join(f"• {opt}" for opt in options)
+            else:
+                answer = f"I'm not sure what you'd like me to do. Could you give me more details?"
+
+        # Strip markdown formatting for TTS compatibility
+        answer = _re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)
+        answer = answer.strip()
+
+        print(f"   ✅ Clarify ({len(answer)} chars)")
+
+        self._emit("clarify_node", "🤔", "I need more details…")
+
+        return {
+            **state,
+            "answer":   answer,
+            "sources":  [],
+            "confidence": 0.9,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  FULL DOCUMENT NODE  (map-reduce over entire document)               #
+    # ------------------------------------------------------------------ #
+
+    _MAP_REDUCE_BATCH_SIZE = 8  # chunks per batch
+
+    def full_doc_node(self, state: AgentState) -> AgentState:
+        """
+        Retrieve ALL chunks for attached documents and synthesize via map-reduce.
+
+        Used when the user asks to summarize/analyze the entire document and
+        the intent classifier routes to 'full_doc'.
+
+        Flow:
+        1. Get all chunks for each attached doc (bypasses top_k)
+        2. If total chunks ≤ batch size → single-shot synthesis (no map-reduce)
+        3. Otherwise: synthesize each batch independently, then merge summaries
+        """
+        query     = state["query"]
+        session_id = state.get("session_id")
+        user_id   = state.get("user_id")
+        history   = state.get("conversation_history", [])
+
+        # Detect attached docs
+        attached = state.get("attached_doc_filenames") or []
+        all_docs = self.vs.list_documents(user_id=user_id, session_id=session_id)
+
+        if not attached:
+            attached = [d.get("filename") for d in all_docs if d.get("filename")]
+
+        if not attached:
+            print("⚠️  full_doc_node: no documents found → falling back to direct")
+            return self.direct_answer_node(state)
+
+        # Gather ALL chunks for attached docs
+        all_chunks: List[Dict] = []
+        for fname in attached:
+            try:
+                doc_chunks = self.vs.get_all_chunks(fname, user_id=user_id, session_id=session_id)
+                all_chunks.extend(doc_chunks)
+                print(f"   📄 {fname}: {len(doc_chunks)} chunks")
+            except Exception as e:
+                print(f"   ⚠️  {fname}: get_all_chunks error: {e}")
+
+        if not all_chunks:
+            print("⚠️  full_doc_node: zero chunks retrieved → falling back to direct")
+            return self.direct_answer_node(state)
+
+        # Sort by chunk_index to maintain document order
+        all_chunks.sort(key=lambda c: c.get("metadata", {}).get("chunk_index", 0))
+
+        total = len(all_chunks)
+        batch_size = self._MAP_REDUCE_BATCH_SIZE
+        user_language = _detect_script_language(query)
+
+        print(f"📚 full_doc_node: {total} chunks across {len(attached)} doc(s)")
+
+        # ── Single-shot path (small doc) ────────────────────────────────
+        if total <= batch_size:
+            print(f"   → single-shot synthesis ({total} chunks)")
+            context = _build_context(all_chunks)
+            plan = ResponsePlan(
+                key_points=[],
+                sub_queries=[query],
+                target_language=user_language or "en",
+                response_style="comprehensive",
+                should_cite_sources=True,
+            )
+            prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", user_language=user_language)
+            history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
+
+            if self.llm.enabled:
+                answer = self._chat(history_msgs + [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=3000)
+            else:
+                answer = self._fallback_synthesis(all_chunks, plan)
+
+            self._emit("full_doc_node", "📚", f"Analyzed {total} chunks from {len(attached)} doc(s)")
+
+            return {
+                **state,
+                "response_plan": plan,
+                "answer":        answer,
+                "raw_answer":    answer,
+                "sources":       _build_sources_from_brackets(answer, all_chunks),
+                "confidence":    0.9,
+            }
+
+        # ── Map-reduce path (large doc) ─────────────────────────────────
+        n_batches = (total + batch_size - 1) // batch_size
+        print(f"   → map-reduce: {n_batches} batches of ≤{batch_size}")
+
+        batch_summaries: List[str] = []
+        for bi in range(n_batches):
+            batch = all_chunks[bi * batch_size : (bi + 1) * batch_size]
+            context = _build_context(batch)
+            self._emit("full_doc_node", "📖", f"Processing batch {bi + 1}/{n_batches}…")
+
+            prompt = f"""Summarize the key information from this section of a document.
+Be thorough — extract all important facts, numbers, names, and relationships.
+Write in {user_language or 'the same language as the document'}.
+
+USER QUERY: {query}
+
+SECTION:
+{context}"""
+
+            try:
+                if self.llm.enabled:
+                    summary = self._chat([{"role": "user", "content": prompt}], temperature=0.2, max_tokens=800)
+                else:
+                    summary = f"[Batch {bi+1}: {len(batch)} chunks]"
+                batch_summaries.append(summary)
+            except Exception as e:
+                print(f"   ⚠️  batch {bi+1} synthesis error: {e}")
+                batch_summaries.append(f"[Batch {bi+1}: synthesis failed]")
+
+        # ── Merge phase ─────────────────────────────────────────────────
+        self._emit("full_doc_node", "🔀", "Merging summaries…")
+        combined = "\n\n---\n\n".join(
+            f"SECTION {i+1}:\n{s}" for i, s in enumerate(batch_summaries)
+        )
+
+        merge_prompt = f"""You have {n_batches} section summaries from a document. Merge them into a single, comprehensive answer to the user's query.
+
+Rules:
+- Be thorough — include all important facts, numbers, and relationships from every section
+- Remove redundancy but keep unique details from each section
+- Use [N] citation markers to reference sources
+- Write in {user_language or 'the same language as the user'}
+- Structure with clear headings if the content is long
+
+USER QUERY: {query}
+
+SECTION SUMMARIES:
+{combined}"""
+
+        history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
+
+        if self.llm.enabled:
+            final_answer = self._chat(history_msgs + [{"role": "user", "content": merge_prompt}], temperature=0.2, max_tokens=3000)
+        else:
+            final_answer = combined
+
+        # Post-processing (same as synthesise_node)
+        import re as _re
+        final_answer = _re.sub(r'\n[ \t]*\.[ \t]*\n', '\n', final_answer)
+        final_answer = _re.sub(r'\n{3,}', '\n\n', final_answer)
+        final_answer = _re.sub(r'\[([^\]]+)\]\(https?://[^)]+\)', r'\1', final_answer)
+
+        cited_nums = sorted(set(int(m) for m in _re.findall(r'\[(\d+)\]', final_answer)))
+        if not cited_nums and all_chunks:
+            final_answer = final_answer.rstrip() + " [1]"
+            cited_nums = [1]
+
+        print(f"   ✅ full_doc_node: {len(final_answer)} chars, citations={cited_nums}")
+
+        self._emit("full_doc_node", "📚", f"Analyzed all {total} chunks from {len(attached)} doc(s)")
+
+        return {
+            **state,
+            "answer":     final_answer,
+            "raw_answer": final_answer,
+            "sources":    _build_sources_from_brackets(final_answer, all_chunks),
+            "confidence": 0.9,
+        }
 
     def define_node(self, state: AgentState) -> AgentState:
         """

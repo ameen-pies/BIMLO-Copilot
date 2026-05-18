@@ -24,6 +24,7 @@ export interface Message {
   reportMeta?: { word_count: number; section_count: number; source_docs: string[]; version: number } | null;
   reportGenerating?: boolean;
   navAction?: { path: string; label: string; icon: string } | null;
+  clarificationOptions?: string[];
 }
 
 export interface FactChip {

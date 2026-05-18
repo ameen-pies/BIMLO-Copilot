@@ -49,10 +49,12 @@ async def generate_title(request: dict):
         prompt = f"Report request: \"{text}\"\n\nTitle:"
 
     try:
+        print(f"[title] type={title_type} | excerpt={excerpt[:100]!r} | prompt={prompt[:100]!r}")
         raw = call_llm(prompt, system_prompt=system, max_tokens=30, temperature=0.3, task="classify")
         title = raw.strip().strip('"').strip("'").strip()
+        print(f"[title] raw={raw!r} → title={title!r}")
         if not title or len(title) > 100:
-            raise ValueError("bad title")
+            raise ValueError(f"bad title: {title!r}")
         return {"title": title}
     except Exception as e:
         print(f"\u26a0\ufe0f  /title error: {e}")

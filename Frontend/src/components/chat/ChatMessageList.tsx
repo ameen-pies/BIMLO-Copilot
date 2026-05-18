@@ -6,8 +6,7 @@ import { ReportCard } from "@/components/chat/ReportCard";
 import { SourcesPanel } from "@/components/chat/SourcesPanel";
 import { ThinkingTrace } from "@/components/chat/ThinkingTrace";
 import { VoiceMessageBubble } from "@/components/chat/VoiceMessageBubble";
-import { ChartClarification } from "@/components/chat/ChartMessage";
-import { ChartMessage } from "@/components/chat/ChartMessage";
+import { ChartClarification, ChartMessage, ClarificationOptions } from "@/components/chat/ChartMessage";
 import { renderContent } from "@/components/chat/chatRenderers";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import TypewriterText from "@/components/TypewriterText";
@@ -500,6 +499,60 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     />
                   ) : msg.role === "assistant" && (msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error") ? (
                     <ChartMessage analytics={msg.analytics as any} answer={msg.content} />
+                  ) : msg.role === "assistant" && msg.clarificationOptions?.length ? (
+                    <div>
+                      {(msg.rawAnswer ?? msg.content) ? renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick) : null}
+                      <ClarificationOptions
+                        options={msg.clarificationOptions}
+                        onSelect={async (opt) => {
+                          if (isLoading) return;
+                          setIsLoading(true);
+                          setThinkingSteps([]);
+                          setThinkingExpanded(true);
+                          const convId = activeConvIdRef.current;
+                          const baseMessages = messages;
+                          const userMsg: Message = {
+                            id: createUniqueId("msg-"),
+                            role: "user",
+                            content: opt,
+                            timestamp: new Date(),
+                          };
+                          setMessages(prev => [...prev, userMsg]);
+                          setOpenSourceKey(null);
+                          setSuggestions([]);
+                          if (!notifyDismissed) setShowNotifyBanner(true);
+                          try {
+                            const assistantMsg = await runStreamingQuery(opt);
+                            if (!assistantMsg) {
+                              setTypingMessageId(null);
+                              setIsLoading(false);
+                              return;
+                            }
+                            setTypingMessageId(null);
+                            const finalMessages: Message[] = [...baseMessages, userMsg, { ...assistantMsg, isStreaming: undefined }];
+                            setMessages(finalMessages);
+                            const preview = assistantMsg.content.replace(/\[.*?\]/g, "").slice(0, 80) + "…";
+                            const currentTitle = conversations.find(c => c.id === convId)?.title ?? opt.slice(0, 50);
+                            updateConversationMessages(convId, finalMessages, preview, currentTitle);
+                            saveConversationToDB(convId, sessionIdRef.current ?? "", currentTitle, preview, finalMessages);
+                            fetchSuggestions(opt, assistantMsg.content);
+                            fireNotification();
+                          } catch (error) {
+                            setIsLoading(false);
+                            const errMsg: Message = {
+                              id: createUniqueId("msg-"),
+                              role: "assistant",
+                              content: `Sorry, I encountered an error: ${serializeError(error)}`,
+                              timestamp: new Date(),
+                            };
+                            setMessages(prev => [...prev, errMsg]);
+                          } finally {
+                            setIsLoading(false);
+                            setThinkingExpanded(false);
+                          }
+                        }}
+                      />
+                    </div>
                   ) : msg.role === "assistant" ? (
                     <div>
                       {renderContent(msg.rawAnswer ?? msg.content, msg.id, msg.sources, handleSourceClick)}

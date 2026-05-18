@@ -86,6 +86,9 @@ class IntentAnalysis:
     # ── New in this version ───────────────────────────────────────────────────
     classification_path: str = "llm"  # "llm" | "heuristic" | "cached"
     latency_ms:          float = 0.0  # wall-clock time for the full pipeline
+    clarification_options: List[str] = field(default_factory=list)  # 2-3 options when query is vague
+    vagueness_score:     float = 0.0  # 0.0–1.0, how ambiguous the query is
+    full_scope:          bool = False  # True = query needs ALL chunks, not just top_k
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -181,10 +184,13 @@ TASK — output ONLY this JSON object, no preamble, no backticks:
   "is_followup": <true|false>,
   "followup_type": "<modify | repeat | translate | clarify | none>",
   "ambiguity_score": <0.0–1.0>,
+  "vagueness_score": <0.0–1.0>,
+  "full_scope": <true|false>,
   "suggested_route": "<one of: direct | rag | iterative_rag | transform | analytics | graph | report | define | cad>",
   "confidence": <0.0–1.0>,
   "doc_scope": "<exact filename from the uploaded docs list if the user clearly targets ONE specific document; positional hint like 'first' or 'second' if they reference position; empty string if they want ALL docs or the scope is unclear>",
-  "reasoning": "<2–4 sentence chain-of-thought: what signals did you see, why did you pick this route, and which document (if any) are they targeting>"
+  "reasoning": "<2–4 sentence chain-of-thought: what signals did you see, why did you pick this route, and which document (if any) are they targeting>",
+  "clarification_options": ["<option 1>", "<option 2>", "<option 3>"]
 }}
 
 ROUTING RULES (apply these strictly when choosing suggested_route):
@@ -219,6 +225,37 @@ ROUTING RULES (apply these strictly when choosing suggested_route):
 - report: explicit request to PRODUCE a standalone written report/PDF/document (signals: "make a report", "generate a report", "rapport sur", "create a report")
 - define: asking the MEANING of a standalone technical term or acronym WITH NO reference to any uploaded document — ONLY when the user is clearly asking about a generic concept in isolation (e.g. "what is BIM?" with no docs, "define IFC"). NEVER use define if: (1) the session has uploaded documents AND the query references file content, (2) the query contains words like "this file", "this document", "it", "here", "the file", "in this", "of this".
 
+VAGUENESS DETECTION (independent of route):
+- vagueness_score: 0.0–1.0. How ambiguous is the query? High = system cannot act without clarification.
+    0.0–0.3 = clear query with obvious intent and subject
+    0.4–0.6 = slightly unclear but system can make a reasonable guess
+    0.7–1.0 = genuinely vague — system would be guessing
+    Set HIGH (0.7+) ONLY when the query is vague even AFTER considering conversation history:
+    (a) generic one-word/two-word commands with no subject AND history doesn't clarify ("summarize", "analyze", "help" with no prior context)
+    (b) references something unclear AND history doesn't clarify ("what about it", "tell me more" with no prior context)
+    (c) could reasonably map to 2+ completely different routes and confidence is low
+    Set LOW (0.0–0.3) when:
+    - the query has a clear subject, action, and target (even if short: "summarize this document")
+    - the conversation history makes the intent clear (e.g., user said "should I summarize?" then "yes" → NOT vague)
+    - the query is a follow-up that clearly references the previous exchange
+    - the query is a greeting or casual opener (hi, hello, hey, salam, bonjour, etc.) — NEVER flag greetings as vague
+    CRITICAL: Always check conversation history before flagging as vague. Short messages like "continue", "yes", "do it" are NOT vague if history provides context. Greetings are NEVER vague.
+    When vagueness_score >= 0.7, populate "clarification_options" with 2-3 ACTIONABLE choices the user can click. Each option must be:
+    - A concrete action or request (e.g., "Summarize the entire document"), NOT a question (NOT "What would you like to do?")
+    - Written in the SAME LANGUAGE as the user's query
+    - Specific enough that clicking it gives the system a clear task
+    - Context-aware: consider what documents are uploaded, what the conversation history suggests, and what the user likely wants
+    - Example good options: "Summarize the attached document", "Translate the document to English", "Explain the main concepts"
+    - Example bad options: "What would you like to do?", "How can I help?", "Tell me more"
+
+FULL SCOPE DETECTION (independent of route):
+- full_scope: true when the query needs ALL content from the document(s), not just top_k relevant chunks.
+    Set true when:
+    (a) "summarize this document/file", "give me a summary of everything", "analyze all of it"
+    (b) "what does the whole document say", "go through the entire file", "read everything"
+    (c) any query where the user explicitly wants comprehensive coverage of all content
+    Set false when: targeted questions, factual lookups, specific sections, definitions, anything where top_k retrieval suffices.
+
 DOC SCOPE RULES (for the "doc_scope" field):
 - If the user names a specific file (partial or full name), set doc_scope to that filename exactly as it appears in UPLOADED DOCUMENTS.
 - If the user uses a positional reference ("the first one", "le premier", "الأول"), set doc_scope to "first", "second", etc.
@@ -240,7 +277,7 @@ CRITICAL OVERRIDE RULES:
 7. Questions like "what is X" where X is something IN a document → rag, not define.
 """
 
-_VALID_ROUTES  = {"direct", "rag", "iterative_rag", "transform", "analytics", "graph", "report", "define", "cad"}
+_VALID_ROUTES  = {"direct", "rag", "iterative_rag", "transform", "analytics", "graph", "report", "define", "cad", "clarify"}
 _VALID_INTENTS = {
     "extract_info", "compare_docs", "generate_report", "visualise_data",
     "define_term", "modify_output", "converse", "converse_meta",
@@ -569,7 +606,15 @@ def _node_post_process(state: ClassifierState) -> ClassifierState:
                 result.reasoning += f" [doc_scope set from attachment: {attached_doc_filenames[0]}]"
             # else: multiple files — leave empty; retrieve_vector handles multi-doc search
 
-    # 7. Validate route is in known set
+    # 7. Vagueness override — if query is genuinely vague, force clarify
+    #    regardless of what route the LLM picked. This is the pre-routing wrapper.
+    if result.vagueness_score >= 0.7 and result.suggested_route != "clarify":
+        result.suggested_route = "clarify"
+        if not result.clarification_options:
+            result.clarification_options = []  # clarify_node has LLM fallback
+        result.reasoning += f" [override: vagueness_score={result.vagueness_score:.2f} → clarify]"
+
+    # 8. Validate route is in known set
     if result.suggested_route not in _VALID_ROUTES:
         result.suggested_route = "rag"
         result.reasoning += " [override: unknown route → rag]"
@@ -1009,12 +1054,15 @@ def _make_heuristic(
         is_followup       = is_followup,
         followup_type     = followup_type,
         ambiguity_score   = 0.4,
+        vagueness_score   = 0.0,
+        full_scope        = False,
         suggested_route   = route,
         confidence        = confidence,
         reasoning         = f"Heuristic classification: matched '{route}' pattern in query.",
         doc_scope         = doc_scope,
         classification_path = "heuristic",
         latency_ms        = 0.0,
+        clarification_options = [],
     )
 
 
@@ -1059,6 +1107,13 @@ def _parse_llm_result(raw: str) -> IntentAnalysis:
     if suggested not in _VALID_ROUTES:
         suggested = "rag"
 
+    # Parse clarification_options — must be a list of strings
+    raw_opts = data.get("clarification_options", [])
+    if isinstance(raw_opts, list):
+        clarification_options = [str(o) for o in raw_opts if o]
+    else:
+        clarification_options = []
+
     return IntentAnalysis(
         primary_intent    = str(data.get("primary_intent", "extract_info")),
         secondary_intent  = str(data.get("secondary_intent", "")),
@@ -1069,12 +1124,15 @@ def _parse_llm_result(raw: str) -> IntentAnalysis:
         is_followup       = bool(data.get("is_followup", False)),
         followup_type     = str(data.get("followup_type", "none")),
         ambiguity_score   = float(data.get("ambiguity_score", 0.5)),
+        vagueness_score   = float(data.get("vagueness_score", 0.0)),
+        full_scope        = bool(data.get("full_scope", False)),
         suggested_route   = suggested,
         confidence        = float(data.get("confidence", 0.7)),
         reasoning         = str(data.get("reasoning", "")),
         doc_scope         = str(data.get("doc_scope", "")),
         classification_path = "llm",
         latency_ms        = 0.0,
+        clarification_options = clarification_options,
     )
 
 

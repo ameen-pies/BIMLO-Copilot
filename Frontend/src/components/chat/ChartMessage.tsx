@@ -298,3 +298,79 @@ export const ChartClarification: React.FC<ChartClarificationProps> = ({ analytic
     </div>
   );
 };
+
+/* ── Clarification Options (vague-prompt detection) ─────────────────────── */
+
+export interface ClarificationOptionsProps {
+  options: string[];
+  onSelect: (option: string) => void;
+}
+
+export const ClarificationOptions: React.FC<ClarificationOptionsProps> = ({ options, onSelect }) => {
+  const { t } = useTranslation();
+  const [selected, setSelected] = React.useState<string | null>(null);
+  const [customText, setCustomText] = React.useState("");
+
+  if (selected !== null) {
+    return (
+      <p className="text-sm text-muted-foreground italic">
+        {selected}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 w-full mt-1">
+      {options.map((opt, i) => (
+        <motion.button
+          key={i}
+          initial={{ opacity: 0, x: -8 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ delay: i * 0.06 }}
+          onClick={() => { setSelected(opt); onSelect(opt); }}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt"
+        >
+          <span className="text-[11px] font-semibold text-primary/50 shrink-0 w-5 text-center">
+            {i + 1}
+          </span>
+          <span className="text-[13px] text-foreground group-hover/opt:text-primary transition-colors leading-snug">
+            {opt}
+          </span>
+        </motion.button>
+      ))}
+      {/* Custom text input */}
+      <motion.div
+        initial={{ opacity: 0, x: -8 }}
+        animate={{ opacity: 1, x: 0 }}
+        transition={{ delay: options.length * 0.06 }}
+        className="flex items-center gap-2 mt-1"
+      >
+        <input
+          type="text"
+          value={customText}
+          onChange={(e) => setCustomText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && customText.trim()) {
+              setSelected(customText.trim());
+              onSelect(customText.trim());
+            }
+          }}
+          placeholder={t("chat.clarify_placeholder")}
+          className="flex-1 px-3 py-2 text-[13px] rounded-lg border border-border bg-muted/40 text-foreground placeholder:text-foreground/30 focus:outline-none focus:border-primary/50 transition-colors"
+        />
+        <button
+          onClick={() => {
+            if (customText.trim()) {
+              setSelected(customText.trim());
+              onSelect(customText.trim());
+            }
+          }}
+          disabled={!customText.trim()}
+          className="px-3 py-2 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-[13px] text-foreground/60 hover:text-primary disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+        >
+          {t("chat.clarify_send")}
+        </button>
+      </motion.div>
+    </div>
+  );
+};
