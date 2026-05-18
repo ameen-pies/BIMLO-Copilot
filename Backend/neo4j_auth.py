@@ -1620,6 +1620,40 @@ def admin_logs(admin: Dict = Depends(require_admin), limit: int = 200):
     return {"logs": list(_log_buffer)[-limit:]}
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION MONITOR (active sessions + activity feed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/admin/monitor")
+def admin_monitor(admin: Dict = Depends(require_admin)):
+    """Return current session monitor snapshot (active sessions + recent events + aggregates)."""
+    from services.session_monitor import session_monitor
+    return session_monitor.snapshot()
+
+
+@router.get("/admin/monitor/stream")
+async def admin_monitor_stream(admin: Dict = Depends(require_admin)):
+    """SSE stream of session lifecycle events (start/update/complete)."""
+    import asyncio
+    from fastapi.responses import StreamingResponse as _SR
+    from services.session_monitor import session_monitor
+
+    q = session_monitor.subscribe()
+
+    async def _gen():
+        try:
+            while True:
+                try:
+                    msg = await asyncio.get_event_loop().run_in_executor(None, lambda: q.get(timeout=30))
+                    yield f"data: {msg}\n\n"
+                except Exception:
+                    yield "data: {}\n\n"
+        finally:
+            session_monitor.unsubscribe(q)
+
+    return _SR(_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # IN-MEMORY LOG BUFFER (captured from stdout for admin panel)
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

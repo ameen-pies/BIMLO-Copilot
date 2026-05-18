@@ -827,12 +827,15 @@ export default function AdminPage() {
   const { currentUser, logout, loading: authLoading } = useAuth();
   const navigate = useNavigate();
 
-  const [tab, setTab]           = useState<"users" | "health" | "logs" | "settings">("users");
+  const [tab, setTab]           = useState<"users" | "health" | "logs" | "monitor" | "settings">("users");
   const [users, setUsers]       = useState<AdminUser[]>([]);
   const [stats, setStats]       = useState<Stats | null>(null);
   const [health, setHealth]     = useState<HealthData | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [logs, setLogs]         = useState<LogEntry[]>([]);
+  const [monitorActive, setMonitorActive]     = useState<any[]>([]);
+  const [monitorRecent, setMonitorRecent]     = useState<any[]>([]);
+  const [monitorAggregates, setMonitorAggregates] = useState<any>({ active_count: 0, throughput_per_min: 0, errors_5min: 0 });
   const [search, setSearch]     = useState("");
   const [loading, setLoading]   = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
@@ -857,8 +860,9 @@ export default function AdminPage() {
   const [selfSaving, setSelfSaving]     = useState(false);
   const [selfMsg, setSelfMsg]           = useState<string | null>(null);
 
-  const logEndRef = useRef<HTMLDivElement>(null);
-  const esRef     = useRef<EventSource | null>(null);
+  const logEndRef  = useRef<HTMLDivElement>(null);
+  const esRef      = useRef<EventSource | null>(null);
+  const monEsRef   = useRef<EventSource | null>(null);
 
   // ── Log mode switch: console vs structured pipeline ────────────────────────
   const [logMode, setLogMode]               = useState<LogMode>("console");
@@ -990,6 +994,48 @@ export default function AdminPage() {
   useEffect(() => {
     if (tab === "logs") logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, tab]);
+
+  // ── Monitor SSE ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== "monitor" || !currentUser?.token) return;
+    if (monEsRef.current) { monEsRef.current.close(); monEsRef.current = null; }
+    // Initial fetch
+    fetch(`${API}/auth/admin/monitor`, { headers: authHeaders(currentUser.token) })
+      .then(r => r.json()).then(d => {
+        setMonitorActive(d.active || []);
+        setMonitorRecent(d.recent || []);
+        setMonitorAggregates(d.aggregates || {});
+      }).catch(() => {});
+    // SSE stream
+    const es = new EventSource(`${API}/auth/admin/monitor/stream?token=${currentUser.token}`);
+    monEsRef.current = es;
+    es.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (!ev.event) return;
+        // Update active sessions
+        if (ev.event === "start") {
+          setMonitorActive(prev => {
+            if (prev.find(s => s.session_id === ev.session_id)) return prev;
+            return [...prev, { session_id: ev.session_id, user_label: ev.user_label, route: ev.route, stage: ev.stage, elapsed_ms: 0, last_activity: ev.ts }];
+          });
+        } else if (ev.event === "update") {
+          setMonitorActive(prev => prev.map(s => s.session_id === ev.session_id ? { ...s, stage: ev.stage, last_activity: ev.ts } : s));
+        } else if (ev.event === "complete") {
+          setMonitorActive(prev => prev.filter(s => s.session_id !== ev.session_id));
+        }
+        // Append to recent feed
+        setMonitorRecent(prev => [...prev.slice(-49), ev]);
+        // Update aggregates
+        setMonitorAggregates((prev: any) => ({
+          ...prev,
+          active_count: ev.event === "start" ? (prev.active_count || 0) + 1 : ev.event === "complete" ? Math.max(0, (prev.active_count || 0) - 1) : prev.active_count,
+          errors_5min: ev.success === false ? (prev.errors_5min || 0) + 1 : prev.errors_5min,
+        }));
+      } catch {}
+    };
+    return () => { es.close(); monEsRef.current = null; };
+  }, [tab, currentUser?.token]);
 
   // ── Pipeline log fetch (structured JSON) ────────────────────────────────────
   const loadPipelineLogs = useCallback(async () => {
@@ -1223,11 +1269,12 @@ export default function AdminPage() {
 
         {/* ── Tabs ── */}
         <div style={{ display: "flex", gap: 4, marginBottom: 20 }}>
-          {(["users", "health", "logs", "settings"] as const).map(tabKey => (
+          {(["users", "health", "logs", "monitor", "settings"] as const).map(tabKey => (
             <button key={tabKey} onClick={() => setTab(tabKey)} style={S.tab(tab === tabKey)}>
               {tabKey === "users"   && <><Users size={13} /> {t("admin.tab_users")}</>}
               {tabKey === "health"  && <><Server size={13} /> {t("admin.tab_health")}</>}
               {tabKey === "logs"    && <><Terminal size={13} /> {t("admin.tab_logs")}</>}
+              {tabKey === "monitor" && <><Radio size={13} /> Monitor</>}
               {tabKey === "settings"&& <><Shield size={13} /> {t("admin.tab_settings")}</>}
             </button>
           ))}
@@ -1738,6 +1785,79 @@ export default function AdminPage() {
             </div>
           );
         })()}
+
+        {/* ══════════════════════ MONITOR TAB ══════════════════════ */}
+        {tab === "monitor" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Aggregate stats bar */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+              {[
+                { label: "Active Sessions", value: monitorAggregates.active_count || 0, color: "#3b82f6" },
+                { label: "Throughput / min", value: monitorAggregates.throughput_per_min || 0, color: "#22c55e" },
+                { label: "Errors (5 min)", value: monitorAggregates.errors_5min || 0, color: monitorAggregates.errors_5min > 0 ? "#ef4444" : "#64748b" },
+              ].map(m => (
+                <div key={m.label} style={{ ...S.card, padding: "14px 18px", display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: m.color, flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: "hsl(var(--foreground))" }}>{m.value}</div>
+                    <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{m.label}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: 16 }}>
+              {/* Active Sessions */}
+              <div style={{ ...S.card, maxHeight: 480, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid hsl(var(--border))", fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))", display: "flex", alignItems: "center", gap: 8 }}>
+                  <Radio size={14} className="animate-pulse" style={{ color: "#3b82f6" }} />
+                  Active ({monitorActive.length})
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
+                  {monitorActive.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>No active sessions</div>
+                  ) : monitorActive.map((s: any) => (
+                    <div key={s.session_id} style={{ padding: "10px 12px", borderRadius: 8, marginBottom: 6, background: "hsl(var(--background))", border: "1px solid hsl(var(--border))" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "hsl(var(--foreground))" }}>{s.user_label}</span>
+                        <span style={{ fontSize: 10, color: "#3b82f6", background: "rgba(59,130,246,0.1)", padding: "2px 6px", borderRadius: 4, fontWeight: 600 }}>{s.route}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", display: "flex", justifyContent: "space-between" }}>
+                        <span>{s.stage}</span>
+                        <span>{s.elapsed_ms ? `${(s.elapsed_ms / 1000).toFixed(1)}s` : "..."}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Activity Feed */}
+              <div style={{ ...S.card, maxHeight: 480, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid hsl(var(--border))", fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>
+                  Activity Feed
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", fontFamily: "monospace", fontSize: 11 }}>
+                  {monitorRecent.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>No activity yet</div>
+                  ) : monitorRecent.slice().reverse().map((ev: any, i: number) => {
+                    const ts = new Date(ev.ts * 1000).toLocaleTimeString();
+                    const statusIcon = ev.event === "complete" ? (ev.success ? "\u2705" : "\u274C") : ev.event === "start" ? "\u25B6\uFE0F" : "\u23E9";
+                    return (
+                      <div key={i} style={{ padding: "6px 12px", borderBottom: "1px solid hsl(var(--border) / 0.3)", display: "flex", gap: 10, alignItems: "center" }}>
+                        <span style={{ color: "#4a5568", flexShrink: 0, width: 60 }}>{ts}</span>
+                        <span style={{ flexShrink: 0, width: 70, fontWeight: 600 }}>{ev.user_label}</span>
+                        <span style={{ flexShrink: 0, width: 50, fontSize: 10, color: "#3b82f6", background: "rgba(59,130,246,0.1)", padding: "1px 5px", borderRadius: 3, textAlign: "center" }}>{ev.route}</span>
+                        <span style={{ flex: 1, color: "hsl(var(--muted-foreground))", fontSize: 11 }}>{ev.stage}</span>
+                        {ev.latency_ms != null && <span style={{ color: "#64748b", flexShrink: 0, width: 50, textAlign: "right" }}>{ev.latency_ms > 1000 ? `${(ev.latency_ms / 1000).toFixed(1)}s` : `${Math.round(ev.latency_ms)}ms`}</span>}
+                        <span style={{ flexShrink: 0 }}>{statusIcon}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ══════════════════════ SETTINGS TAB ══════════════════════ */}
         {tab === "settings" && (

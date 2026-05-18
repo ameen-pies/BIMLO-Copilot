@@ -229,6 +229,12 @@ class RAGEngine(RAGNodesMixin):
         print(f"\n{'='*80}")
         print(f"🔍 Query: {user_query}")
 
+        # ── Session monitor: track active session ──────────────────────────
+        from services.session_monitor import session_monitor
+        _user_label = f"user_{(user_id or session_id)[:4]}"
+        _initial_route = force_route or "auto"
+        session_monitor.start(session_id, _user_label, _initial_route)
+
         _t0 = time.time()
         try:
             final_state = self.graph.invoke(initial_state)
@@ -263,6 +269,14 @@ class RAGEngine(RAGNodesMixin):
                 sources_count=len(final_state.get("sources", [])),
                 error=str(final_state.get("error") or ""),
             )
+
+        # ── Session monitor: mark complete ─────────────────────────────────
+        session_monitor.update(session_id, final_state.get("route", "unknown"), _total_ms)
+        session_monitor.complete(
+            session_id,
+            success=not bool(final_state.get("error")),
+            error=str(final_state.get("error")) if final_state.get("error") else None,
+        )
 
         # Build response
         response = {
@@ -636,6 +650,10 @@ Now generate for: "{q}" """
                 )
             return state
 
+        # Session monitor: track stage
+        from services.session_monitor import session_monitor as _sm
+        _sm.update(state.get("session_id", ""), "classify_intent")
+
         query      = state["query"]
         history    = state.get("conversation_history", [])
         route_log  = state.get("route_log", [])
@@ -860,6 +878,9 @@ Now generate for: "{q}" """
         Node 1/3: fetch up to fetch_k candidates from ChromaDB.
         Stores raw results in retrieved_chunks; graph and reranker run next.
         """
+        from services.session_monitor import session_monitor as _sm
+        _sm.update(state.get("session_id", ""), "retrieve_vector")
+
         query = state["query"]
         top_k = state["top_k"]
         iteration = state["retrieval_iterations"] + 1
@@ -1219,6 +1240,9 @@ Reply with ONLY the rewritten search query. No explanation."""
         - How to structure the response
         - What to include/avoid
         """
+        from services.session_monitor import session_monitor as _sm
+        _sm.update(state.get("session_id", ""), "synthesise")
+
         query = state["query"]
         chunks = state["retrieved_chunks"]
         plan = state["response_plan"]
