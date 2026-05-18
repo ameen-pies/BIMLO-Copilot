@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Alexandria:wght@400;500;600;700&display=swap');
 @import './scrollbar.css';
 
 @tailwind base;
@@ -98,6 +98,15 @@
     transition: background-color 0.15s ease;
   }
   h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+  /* Arabic font override — Alexandria is the Montserrat counterpart for Arabic */
+  [dir="rtl"] {
+    --font-heading: 'Alexandria', 'Montserrat', sans-serif;
+    --font-body: 'Alexandria', 'Inter', sans-serif;
+  }
+  [dir="rtl"] body,
+  [dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3, [dir="rtl"] h4, [dir="rtl"] h5, [dir="rtl"] h6 {
     font-family: var(--font-heading);
   }
 }

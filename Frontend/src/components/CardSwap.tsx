@@ -32,6 +32,9 @@ const CardSwap = ({
   easing = 'elastic',
   children
 }: any) => {
+  // Negate skew in RTL so cards slant the other way
+  const isRtl = typeof document !== "undefined" && document.documentElement.dir === "rtl";
+  const effectiveSkew = isRtl ? -skewAmount : skewAmount;
   const config =
     easing === 'elastic'
       ? { ease: 'elastic.out(0.6,0.9)', durDrop: 2, durMove: 2, durReturn: 2, promoteOverlap: 0.9, returnDelay: 0.05 }
@@ -60,7 +63,7 @@ const CardSwap = ({
           gsap.set(r.current, {
             x: slot.x, y: slot.y, z: slot.z,
             xPercent: -50, yPercent: -50,
-            skewY: skewAmount,
+            skewY: effectiveSkew,
             transformOrigin: 'center center',
             zIndex: slot.zIndex,
             force3D: true

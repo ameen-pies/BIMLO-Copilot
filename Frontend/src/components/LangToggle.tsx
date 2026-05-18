@@ -10,35 +10,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const FrFlag = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3 2" className="h-3.5 w-5 rounded-[2px] shrink-0">
-    <rect width="3" height="2" fill="#ED2939" />
-    <rect width="2" height="2" fill="#fff" />
-    <rect width="1" height="2" fill="#002395" />
-  </svg>
+  <img src="/flag-for-flag-france-svgrepo-com.svg" alt="Français" className="h-3.5 w-5 rounded-[2px] shrink-0 object-cover" />
 );
 
 const EnFlag = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 30" className="h-3.5 w-5 rounded-[2px] shrink-0">
-    <clipPath id="uk-clip"><rect width="60" height="30" /></clipPath>
-    <g clipPath="url(#uk-clip)">
-      <rect width="60" height="30" fill="#012169" />
-      <path d="M0 0l60 30m0-30L0 30" stroke="#fff" strokeWidth="6" />
-      <path d="M0 0l60 30m0-30L0 30" stroke="#C8102E" strokeWidth="2" />
-      <path d="M30 0v30M0 15h60" stroke="#fff" strokeWidth="10" />
-      <path d="M30 0v30M0 15h60" stroke="#C8102E" strokeWidth="4" />
-    </g>
-  </svg>
+  <img src="/united-kingdom-uk-svgrepo-com.svg" alt="English" className="h-3.5 w-5 rounded-[2px] shrink-0 object-cover" />
 );
 
 const TnFlag = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" className="h-3.5 w-5 rounded-[2px] shrink-0">
-    <rect width="600" height="400" fill="#E70013" />
-    <circle cx="300" cy="200" r="90" fill="#fff" />
-    <circle cx="300" cy="200" r="70" fill="#E70013" />
-    <circle cx="300" cy="200" r="30" fill="#fff" />
-    <path d="M280 180 a30 30 0 0 1 40 0 a20 20 0 0 1-40 0z" fill="#E70013" transform="translate(0,-2)" />
-    <path d="M295 168 l5-18 l5 18 a15 15 0 0 1-10 0z" fill="#E70013" />
-  </svg>
+  <img src="/flag-for-flag-tunisia-svgrepo-com.svg" alt="العربية" className="h-3.5 w-5 rounded-[2px] shrink-0 object-cover" />
 );
 
 const languages = [

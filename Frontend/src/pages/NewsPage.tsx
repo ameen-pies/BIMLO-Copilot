@@ -1686,7 +1686,7 @@ const NewsPage = () => {
         {/* Grid */}
         <div style={{ flex: 1, minWidth: 0, paddingInlineEnd: chatOpen ? 384 : 0, transition: "padding-inline-end 0.28s cubic-bezier(0.4,0,0.2,1)" }}>
           {isInitialLoading ? (
-            <div className="news-grid" style={gridStyle}>
+            <div className="news-grid" style={gridStyle} dir="ltr">
               {SIZE_PATTERN.map((size, i) => <SkeletonCard key={i} theme={theme} size={size} />)}
             </div>
           ) : visible.length === 0 ? (
@@ -1700,7 +1700,7 @@ const NewsPage = () => {
             </div>
           ) : (
             <>
-              <div className="news-grid" style={gridStyle}>
+              <div className="news-grid" style={gridStyle} dir="ltr">
                 {visible.map((item, i) => {
                   const id = item.id ?? item.articleUrl ?? item.title ?? String(i);
                   return (

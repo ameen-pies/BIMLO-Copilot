@@ -414,10 +414,15 @@ const Index = () => {
           -webkit-mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
           mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
           overflow: hidden;
+          direction: ltr; /* keep ticker LTR so animation works correctly */
         }
         @keyframes slideLeft {
           from { transform: translateX(0); }
           to   { transform: translateX(-50%); }
+        }
+        @keyframes slideRight {
+          from { transform: translateX(0); }
+          to   { transform: translateX(50%); }
         }
         .ticker-track {
           display: flex;
@@ -426,6 +431,9 @@ const Index = () => {
           padding: 12px 0 20px;
           animation: slideLeft 40s linear infinite;
           will-change: transform;
+        }
+        [dir="rtl"] .ticker-track {
+          animation-name: slideRight;
         }
 
         /* card */
@@ -560,8 +568,8 @@ const Index = () => {
           onSuccess={(user: AuthUser) => { setLoginModalOpen(false); /* handle authed user here */ }}
         />
 
-        {/* Geometric background layer */}
-        <div className="fixed inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
+        {/* Geometric background layer — keep LTR direction so gradients don't flip */}
+        <div className="fixed inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0, direction: "ltr" }}>
           <div className={`absolute inset-0 ${isDark
             ? 'bg-gradient-to-br from-blue-500/[0.06] via-transparent to-indigo-500/[0.06]'
             : 'bg-gradient-to-br from-blue-500/[0.10] via-transparent to-indigo-500/[0.10]'} blur-3xl`} />
@@ -725,10 +733,10 @@ const Index = () => {
                 </div>
               </div>
 
-              <motion.div className="flex-1 hidden lg:flex items-center justify-center"
+              <motion.div className="flex-1 hidden lg:flex items-center justify-start"
                 initial={{ opacity: 0, x: 40 }} whileInView={{ opacity: 1, x: 0 }} viewport={{ once: true }}
                 transition={{ duration: 0.8, delay: 0.3 }}
-                style={{ height: 500, position: "relative", marginTop: "-60px" }}>
+                style={{ height: 500, position: "relative", marginTop: "-60px", marginInlineStart: "-40px" }}>
                 <CardSwap width={480} height={320} cardDistance={60} verticalDistance={70} delay={4000} easing="elastic">
                   <Card customClass="swap-card">
                     <div className="swap-card-icon"><MessageSquare size={18} color="hsl(var(--primary))" /></div>
