@@ -282,6 +282,29 @@ class VectorStoreManager:
         collection = self._get_collection(user_id, session_id)
         return collection.count() > 0
 
+    def get_all_chunks(self, filename: str, user_id: Optional[str] = None, session_id: Optional[str] = None) -> List[Dict]:
+        """
+        Get all chunks for a specific document filename, ordered by chunk_index.
+        Used by transform_node to get full document content instead of top_k RAG results.
+        """
+        collection = self._get_collection(user_id, session_id)
+        results = collection.get(where={"filename": filename})
+        if not results.get("ids"):
+            return []
+        chunks = []
+        for i, doc_id in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results.get("metadatas") else {}
+            chunks.append({
+                "text":       results["documents"][i] if results.get("documents") else "",
+                "metadata":   meta,
+                "id":         doc_id,
+                "has_images": meta.get("has_images", False),
+                "has_tables": meta.get("has_tables", False),
+            })
+        # Sort by chunk_index to maintain document order
+        chunks.sort(key=lambda c: c.get("metadata", {}).get("chunk_index", 0))
+        return chunks
+
     def get_collection_stats(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict:
         """
         Get stats for the user/session's collection.

@@ -554,6 +554,8 @@ can read the full article at the source link."
 4. Analyse through the lens of BIM, telecom infrastructure, and digital construction. Highlight \
 implications for BTP/construction professionals and telecom engineers where relevant.
 5. Be concise and expert. Cite which article you are drawing from when referencing specific claims.
+6. LANGUAGE: Always respond in the same language the user writes in. If the user writes in French, \
+respond in French. If in English, respond in English. Match the user's language exactly.
 """
 
 

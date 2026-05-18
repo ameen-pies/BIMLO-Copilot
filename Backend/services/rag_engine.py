@@ -2291,14 +2291,13 @@ Remember: Answer in {target_lang.upper()}. The document language is irrelevant. 
     def transform_node(self, state: AgentState) -> AgentState:
         """
         Execute a transformation task (translate, rewrite, reformat) on the
-        retrieved document content.
+        FULL document content — not top_k RAG chunks.
 
-        Key differences from synthesise:
-        - The judge plans tone/language as usual
-        - No [N] citation markers injected — sources are irrelevant
-        - No judge evaluation loop — no retry recursion
-        - Returns empty sources list
+        If user specifies a page number, only that page is used.
+        If user names a document, all chunks for that document are loaded.
         """
+        import re as _re
+
         query   = state["query"]
         chunks  = state["retrieved_chunks"]
 
@@ -2308,17 +2307,64 @@ Remember: Answer in {target_lang.upper()}. The document language is irrelevant. 
             print("no documents")
             return {**state, "answer": "No document content found to transform.", "sources": []}
 
+        # ── Load FULL document instead of top_k RAG chunks ──────────────
+        # Transform tasks need the actual document content, not semantically
+        # similar snippets. Load all chunks for the target document.
+        session_id = state.get("session_id", "")
+        user_id    = state.get("user_id")
+        doc_scope  = state.get("doc_scope_hint", "")
+
+        # Determine target filename: prefer doc_scope, fallback to first chunk's filename
+        target_filename = doc_scope or chunks[0].get("metadata", {}).get("filename", "")
+
+        if target_filename and self.vs:
+            full_chunks = self.vs.get_all_chunks(target_filename, user_id=user_id, session_id=session_id)
+            if full_chunks:
+                chunks = full_chunks
+                print(f"[full doc: {target_filename} → {len(chunks)} chunks] ", end="")
+
+        # ── Page filtering ──────────────────────────────────────────────
+        # If user asks for a specific page (e.g. "page 5", "p. 3", "pages 2-4"),
+        # filter chunks to only include content from that page.
+        page_match = _re.search(
+            r'(?:page|p\.?|pages?|page\s*)\s*(\d+)(?:\s*[-–]\s*(\d+))?',
+            query, _re.IGNORECASE
+        )
+        if page_match:
+            page_start = int(page_match.group(1))
+            page_end = int(page_match.group(2)) if page_match.group(2) else page_start
+            page_chunks = []
+            for c in chunks:
+                text = c.get("text", "")
+                # Look for page references in chunk text: [TABLE on page X], [IMAGE on page X], etc.
+                page_refs = _re.findall(r'(?:page|p\.?)\s*(\d+)', text, _re.IGNORECASE)
+                if page_refs:
+                    if any(page_start <= int(p) <= page_end for p in page_refs):
+                        page_chunks.append(c)
+                else:
+                    # If no page markers in chunk, include it (might be metadata-only)
+                    pass
+            if page_chunks:
+                chunks = page_chunks
+                print(f"[filtered to page {page_start}" + (f"-{page_end}" if page_end != page_start else "") + f" → {len(chunks)} chunks] ", end="")
+
+        if not chunks:
+            print("no matching content")
+            return {**state, "answer": "No document content found for the specified page.", "sources": []}
+
         # Ask the judge to plan (language detection etc.) — same as normal flow
         plan = self.judge.plan_response(query, retrieved_docs=chunks)
         print(f"{plan.target_language}/{plan.target_tone}")
-
-        context = _build_context(chunks)
 
         # Build a clean context for transform — no [Source N] headers bleeding into output
         clean_context = "\n\n".join(c["text"] for c in chunks)
 
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
+
+        # Scale max_tokens with document size — full docs need more room
+        doc_len = len(clean_context)
+        max_tokens = min(max(2000, doc_len // 2), 8000)
 
         prompt = f"""You are a document assistant. Complete the following task exactly as instructed.
 
@@ -2331,6 +2377,7 @@ STRUCTURE RULES:
 - Identify sections, subsections, bullet points, and numbered lists from context clues in the text (e.g. "1.", "2.", "- ", all-caps titles, etc.) and render them properly using markdown: ## for section headings, - for bullets, numbered lists where appropriate.
 - ALL-CAPS phrases that look like section titles (e.g. "EXECUTIVE SUMMARY", "EQUIPMENT SPECIFICATIONS") should become ## headings.
 - Apply the task to the text content only — the structure and layout must be clean and readable in the output.
+- Preserve ALL content from the document. Do not summarize or skip sections.
 - Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
 
 DOCUMENT:
@@ -2340,7 +2387,7 @@ DOCUMENT:
             answer = self._chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=2000,
+                max_tokens=max_tokens,
             )
         else:
             answer = "LLM unavailable — cannot perform transformation."
