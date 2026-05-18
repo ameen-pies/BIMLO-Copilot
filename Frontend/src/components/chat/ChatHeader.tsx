@@ -166,10 +166,11 @@ export function ChatHeader({
         <Logo className="h-7 w-7" />
         <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
       </div>
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4">
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4 pointer-events-none">
         {editingTitle ? (
           <input
             ref={editTitleRef}
+            style={{ pointerEvents: "auto" }}
             value={editTitleValue}
             onChange={e => setEditTitleValue(e.target.value)}
             onBlur={() => {
@@ -188,7 +189,7 @@ export function ChatHeader({
           />
         ) : (
           <p
-            className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem] cursor-pointer hover:text-primary/80 transition-colors"
+            className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem] cursor-pointer hover:text-primary/80 transition-colors pointer-events-auto"
             onClick={() => {
               if (!activeConversation) return;
               setEditTitleValue(activeConversation.title || "");
