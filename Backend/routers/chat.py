@@ -17,6 +17,68 @@ from services.report_agent import SharedContext
 router = APIRouter(tags=["chat"])
 
 
+def _generate_chat_title(session_id: str, messages: list) -> str:
+    """
+    Generate a chat title after the first exchange.
+    Returns the title string, or empty string on failure.
+    """
+    from llm_client import call_llm
+
+    excerpt = "\n".join(
+        f"{'User' if m.get('role') == 'user' else 'Assistant'}: {str(m.get('content', ''))[:150]}"
+        for m in messages[:6]
+    )
+    system = (
+        "You generate ultra-short conversation titles. "
+        "Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end. "
+        "Capture the TOPIC or ACTION — not the literal phrasing of the user. "
+        "For greetings, summarise the tone/language. "
+        "For questions, name the subject. "
+        "NEVER echo the user's words back verbatim. "
+        "Reply with ONLY the title, nothing else."
+    )
+    prompt = f"Conversation:\n{excerpt}\n\nTitle:"
+
+    try:
+        raw = call_llm(prompt, system_prompt=system, max_tokens=30, temperature=0.3, task="classify")
+        title = raw.strip().strip('"').strip("'").strip()
+        if not title or len(title) > 100:
+            return ""
+        return title
+    except Exception as e:
+        print(f"⚠️  title generation failed: {e}")
+        # Fallback: clean first user message
+        for m in messages:
+            if m.get("role") == "user":
+                fallback = re.sub(r'[#*_`~]', '', str(m.get("content", "")))[:50].strip()
+                if len(fallback) > 40:
+                    fallback = fallback[:40].rsplit(' ', 1)[0] + "…"
+                return fallback
+        return ""
+
+
+def _update_neo4j_title(session_id: str, title: str, frontend_conv_id: str = None):
+    """Update conversation title in Neo4j."""
+    try:
+        from neo4j_auth import _run as _neo4j_run
+        from core.globals import _conversation_cache
+        _conv_id = frontend_conv_id or _conversation_cache.get(session_id)
+        if not _conv_id:
+            _rows = _neo4j_run(
+                "MATCH (c:Conversation {session_id: $sid}) RETURN c.id AS id LIMIT 1",
+                {"sid": session_id},
+            )
+            _conv_id = _rows[0]["id"] if _rows else None
+        if _conv_id:
+            _neo4j_run(
+                "MATCH (c:Conversation {id: $conv_id}) SET c.title = $title, c.updated_at = $now",
+                {"conv_id": _conv_id, "title": title, "now": __import__('datetime').datetime.utcnow().isoformat()},
+            )
+            print(f"✅ Neo4j title updated: {title!r}")
+    except Exception as e:
+        print(f"⚠️  Neo4j title update failed: {e}")
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(
     request: QueryRequest,
@@ -111,8 +173,17 @@ async def query_documents(
             _session_routes[session_id] = result["route"]
             log_route(session_id, result["route"], request.query)
 
-        SharedContext.set_history(session_id, get_history(session_id))
+        current_history = get_history(session_id)
+        SharedContext.set_history(session_id, current_history)
         SharedContext.set_chunks(session_id, result.get("retrieved_chunks", []))
+
+        # Generate title on first exchange
+        chat_title = ""
+        user_msg_count = sum(1 for m in current_history if m.get("role") == "user")
+        if user_msg_count == 1 and not result.get("report_id"):
+            chat_title = _generate_chat_title(session_id, current_history)
+            if chat_title:
+                _update_neo4j_title(session_id, chat_title)
 
         print(f"\u2705 Done (route={result.get('route')}, confidence={result['confidence']})")
 
@@ -123,6 +194,7 @@ async def query_documents(
             route=result.get("route"),
             analytics=result.get("analytics"),
             session_id=session_id,
+            chat_title=chat_title,
         )
     except Exception as e:
         print(f"\u274c Query error: {e}")
@@ -302,9 +374,18 @@ async def query_stream(
                 _session_routes[session_id] = result["route"]
                 log_route(session_id, result["route"], request.query)
 
-            SharedContext.set_history(session_id, get_history(session_id))
+            current_history = get_history(session_id)
+            SharedContext.set_history(session_id, current_history)
             SharedContext.set_chunks(session_id, result.get("retrieved_chunks", []))
             SharedContext.set_analytics(session_id, result.get("analytics"))
+
+            # Generate title on first exchange (1 user + 1 assistant = 2 messages)
+            chat_title = ""
+            user_msg_count = sum(1 for m in current_history if m.get("role") == "user")
+            if user_msg_count == 1 and not result.get("report_id"):
+                chat_title = _generate_chat_title(session_id, current_history)
+                if chat_title:
+                    _update_neo4j_title(session_id, chat_title, frontend_conv_id)
 
             safe_result = {
                 "answer":       result.get("answer", ""),
@@ -316,6 +397,7 @@ async def query_stream(
                 "report_id":    result.get("report_id"),
                 "report_title": result.get("report_title"),
                 "clarification_options": result.get("clarification_options") or [],
+                "chat_title":   chat_title,
             }
             q.put({"type": "result", "session_id": session_id, **safe_result})
         except Exception as e:

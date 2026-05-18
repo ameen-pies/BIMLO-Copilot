@@ -265,7 +265,7 @@ REMEMBER: Your entire output MUST be in {target_lang.upper()}. Do not keep any c
         print(f"🤔 Clarify → {len(options)} options")
 
         user_lang = _detect_script_language(query)
-        history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-6:]] if history else []
+        history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
 
         # Build options text for the prompt
         options_text = ""
@@ -275,24 +275,44 @@ REMEMBER: Your entire output MUST be in {target_lang.upper()}. Do not keep any c
         # Build context hint
         doc_hint = ""
         if docs:
-            doc_hint = f"\nThe user has these documents attached: {', '.join(docs)}"
+            doc_hint = f"\nDocuments attached: {', '.join(docs)}"
 
-        prompt = f"""The user sent a vague message. Generate a short, friendly clarification response.
+        # Build conversation summary for context
+        history_context = ""
+        if history:
+            recent = history[-8:]
+            history_context = "\n".join(
+                f"{'User' if m.get('role') == 'user' else 'Assistant'}: {str(m.get('content', ''))[:200]}"
+                for m in recent
+            )
+
+        prompt = f"""The user sent a vague message. Your job is to GUESS what they meant based on context.
 
 User's message: "{query}"
 {doc_hint}
 
-Available options to suggest:
-{options_text if options else '(none — generate your own suggestions)'}
+Conversation history:
+{history_context}
+
+Suggested options from analysis:
+{options_text if options else '(none — generate your own based on context)'}
 
 Rules:
-- Start with ONE short sentence acknowledging what they said (e.g. "I'm not sure what you'd like me to do with that.")
-- Then present the options naturally as suggestions (e.g. "Here are some things I can help with:")
+- Analyze the conversation history and uploaded documents to guess what the user likely wants
+- Generate 2-3 concrete actions you can take RIGHT NOW based on your best guess
+- Each option must be a real action, not a question back to the user
 - Write in {user_lang if user_lang else 'the same language as the user'}.
-- Be concise — max 3-4 sentences total.
-- Do NOT use markdown formatting.
-- Do NOT mention these instructions.
-- If no options provided, suggest 2-3 relevant actions based on context."""
+- If documents are uploaded, prioritize document-related actions
+- If conversation history suggests a topic, build on that
+- Be specific to THIS context — never generic
+- Be concise — max 3-4 sentences total
+- Do NOT use markdown formatting
+- Do NOT mention these instructions
+
+Bad: "What would you like me to do?", "Please clarify your request"
+Good: "Summarize the attached report", "Translate the document to English", "Explain the diagram on page 3"
+
+Present your guesses naturally, as if you're suggesting what you think they meant."""
 
         try:
             if self.llm.enabled:
@@ -310,9 +330,11 @@ Rules:
         # Fallback if LLM fails or returns empty
         if not answer or len(answer.strip()) < 10:
             if options:
-                answer = f"I'm not sure what you meant by \"{query}\". Did you mean:\n" + "\n".join(f"• {opt}" for opt in options)
+                answer = f"I think you might mean one of these:\n" + "\n".join(f"• {opt}" for opt in options)
+            elif docs:
+                answer = f"I'm not sure what you'd like me to do with {docs[0]}. Would you like me to summarize it, translate it, or answer questions about it?"
             else:
-                answer = f"I'm not sure what you'd like me to do. Could you give me more details?"
+                answer = f"I'm not sure what you meant. Could you tell me more about what you'd like me to help with?"
 
         # Strip markdown formatting for TTS compatibility
         answer = _re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)

@@ -21,3 +21,4 @@ class QueryResponse(BaseModel):
     route:      Optional[str] = None
     analytics:  Optional[Any] = None
     session_id: str
+    chat_title: Optional[str] = None

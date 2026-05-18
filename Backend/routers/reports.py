@@ -57,7 +57,31 @@ async def generate_title(request: dict):
             raise ValueError(f"bad title: {title!r}")
         return {"title": title}
     except Exception as e:
-        print(f"\u26a0\ufe0f  /title error: {e}")
+        print(f"⚠️  /title LLM error: {e}, retrying with simpler prompt…")
+        # Retry with a simpler prompt
+        try:
+            simple_prompt = f"Give this conversation a short title (3-6 words):\n{excerpt[:300]}\n\nTitle:"
+            raw = call_llm(simple_prompt, system_prompt="Reply with ONLY a short title.", max_tokens=20, temperature=0.3, task="classify")
+            title = raw.strip().strip('"').strip("'").strip()
+            if title and len(title) <= 100:
+                print(f"[title] retry succeeded: {title!r}")
+                return {"title": title}
+        except Exception as e2:
+            print(f"⚠️  /title retry also failed: {e2}")
+
+        # Fallback: generate title from first user message
+        first_user = ""
+        for m in messages:
+            if m.get("role") == "user":
+                first_user = str(m.get("content", ""))[:80]
+                break
+        if first_user:
+            # Clean up: remove markdown, truncate at word boundary
+            fallback = re.sub(r'[#*_`~]', '', first_user).strip()
+            if len(fallback) > 50:
+                fallback = fallback[:50].rsplit(' ', 1)[0] + "…"
+            print(f"[title] fallback from user message: {fallback!r}")
+            return {"title": fallback}
         return {"title": ""}
 
 
