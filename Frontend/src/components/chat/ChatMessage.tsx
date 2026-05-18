@@ -47,7 +47,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
           <p className="text-sm whitespace-pre-wrap">{content}</p>
         )}
         {isStreaming && (
-          <span className="inline-block w-2 h-4 bg-current animate-pulse ml-1" />
+          <span className="inline-block w-2 h-4 bg-current animate-pulse ms-1" />
         )}
         {role === "assistant" && !isStreaming && (
           <div className="flex gap-2 mt-2 pt-2 border-t border-border/50 opacity-0 group-hover:opacity-100 transition-opacity">

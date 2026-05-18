@@ -460,7 +460,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
 
       {/* Category badge */}
       <div style={{
-        position: "absolute", top: 12, left: 12,
+        position: "absolute", top: 12, insetInlineStart: 12,
         display: "inline-flex", alignItems: "center", gap: "0.28rem",
         fontSize: "0.62rem", fontWeight: 700, color: "#fff",
         background: "rgba(0,0,0,0.45)", borderRadius: 999,
@@ -471,7 +471,7 @@ function NewsCard({ item, revealed, theme, size, onPin, isPinned, chatOpen }: {
       </div>
 
       {/* Top-right: pin + external link */}
-      <div style={{ position: "absolute", top: 10, right: 10, display: "flex", gap: "0.35rem", alignItems: "center" }}>
+      <div style={{ position: "absolute", top: 10, insetInlineEnd: 10, display: "flex", gap: "0.35rem", alignItems: "center" }}>
         <button
           onClick={() => onPin(item)}
           title={isPinned ? t("news.remove_from_chat") : t("news.mention_in_chat")}
@@ -1082,7 +1082,7 @@ function NewsChatPanel({
                       {msg.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </span>
                     {msg.role === "assistant" && msg.id !== typingMessageId && (
-                      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginLeft: "0.2rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.1rem", marginInlineStart: "0.2rem" }}>
                         <button
                           onClick={() => {
                             navigator.clipboard.writeText(msg.rawAnswer ?? msg.content);
@@ -1193,7 +1193,7 @@ function NewsChatPanel({
                     </span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{a.title}</span>
                     <button onClick={() => onRemovePin(a.id)}
-                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: neutralText, display: "flex", lineHeight: 1, flexShrink: 0, marginLeft: 1 }}
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: neutralText, display: "flex", lineHeight: 1, flexShrink: 0, marginInlineStart: 1 }}
                     ><X size={9} /></button>
                   </span>
                 );
@@ -1684,7 +1684,7 @@ const NewsPage = () => {
       <div style={{ display: "flex", gap: "1.2rem", alignItems: "flex-start", padding: "1.5rem 2.5rem 3rem" }}>
 
         {/* Grid */}
-        <div style={{ flex: 1, minWidth: 0, paddingRight: chatOpen ? 384 : 0, transition: "padding-right 0.28s cubic-bezier(0.4,0,0.2,1)" }}>
+        <div style={{ flex: 1, minWidth: 0, paddingInlineEnd: chatOpen ? 384 : 0, transition: "padding-inline-end 0.28s cubic-bezier(0.4,0,0.2,1)" }}>
           {isInitialLoading ? (
             <div className="news-grid" style={gridStyle}>
               {SIZE_PATTERN.map((size, i) => <SkeletonCard key={i} theme={theme} size={size} />)}
@@ -1738,7 +1738,7 @@ const NewsPage = () => {
           <div style={{
             position: "fixed",
             top: navbarHeight + 12,
-            right: 12,
+            insetInlineEnd: 12,
             bottom: 12,
             width: 360,
             zIndex: 40,

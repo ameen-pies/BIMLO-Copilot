@@ -1004,7 +1004,7 @@ const CallPage: React.FC = () => {
             <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-950 border border-red-500/50 text-red-400 text-xs font-medium shadow-sm">
               <span>😢</span>
               <span>{t("call.silence_warning")}</span>
-              <button onClick={() => { setShowSilenceWarning(false); }} className="ml-1 hover:text-red-300 transition-colors">
+              <button onClick={() => { setShowSilenceWarning(false); }} className="ms-1 hover:text-red-300 transition-colors">
                 <X className="h-3 w-3" />
               </button>
             </div>
@@ -1185,7 +1185,7 @@ const CallPage: React.FC = () => {
                           initial={{ opacity: 0, y: 4, filter: "blur(4px)" }}
                           animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
                           transition={{ duration: 0.16 }}
-                          className="inline-block mr-[0.28em]"
+                          className="inline-block me-[0.28em]"
                         >{word}</motion.span>
                       ))}
                     </AnimatePresence>
@@ -1327,14 +1327,14 @@ const CallPage: React.FC = () => {
                   <button
                     key={v.id}
                     onClick={() => { setSelectedVoice(v.id); setShowVoicePicker(false); }}
-                    className={`w-full text-left px-3.5 py-2.5 text-xs transition-colors ${
+                    className={`w-full text-start px-3.5 py-2.5 text-xs transition-colors ${
                       selectedVoice === v.id
                         ? "bg-blue-500/15 text-blue-400"
                         : "text-foreground/50 hover:bg-foreground/5 hover:text-foreground/80"
                     }`}
                   >
                     <span className="font-medium">{v.label}</span>
-                    <span className="ml-2 text-foreground/25">{t(v.hintKey)}</span>
+                    <span className="ms-2 text-foreground/25">{t(v.hintKey)}</span>
                   </button>
                 ))}
               </motion.div>

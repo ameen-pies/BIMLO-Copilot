@@ -54,7 +54,7 @@ export function renderContent(
             </span>
           ),
           li: ({ children }) => (
-            <li className="ml-2 leading-relaxed">
+            <li className="ms-2 leading-relaxed">
               {injectChips(children, `li-${si}`)}
             </li>
           ),

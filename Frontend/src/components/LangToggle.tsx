@@ -30,9 +30,21 @@ const EnFlag = () => (
   </svg>
 );
 
+const TnFlag = () => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" className="h-3.5 w-5 rounded-[2px] shrink-0">
+    <rect width="600" height="400" fill="#E70013" />
+    <circle cx="300" cy="200" r="90" fill="#fff" />
+    <circle cx="300" cy="200" r="70" fill="#E70013" />
+    <circle cx="300" cy="200" r="30" fill="#fff" />
+    <path d="M280 180 a30 30 0 0 1 40 0 a20 20 0 0 1-40 0z" fill="#E70013" transform="translate(0,-2)" />
+    <path d="M295 168 l5-18 l5 18 a15 15 0 0 1-10 0z" fill="#E70013" />
+  </svg>
+);
+
 const languages = [
   { code: "fr", label: "Français", Flag: FrFlag },
   { code: "en", label: "English", Flag: EnFlag },
+  { code: "ar", label: "العربية", Flag: TnFlag },
 ];
 
 const LangToggle = () => {

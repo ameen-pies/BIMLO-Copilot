@@ -207,7 +207,7 @@ export function ChatHeader({
           </p>
         )}
       </div>
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ms-auto flex items-center gap-2">
 
         {/* ── Conversations bubble ── */}
         <div className="relative" data-convs-panel>
@@ -217,7 +217,7 @@ export function ChatHeader({
               setConvsPanelOpen(next);
               if (next) loadConversationsFromDB();
             }}
-            className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+            className={`relative flex items-center gap-2 ps-3 pe-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
               convsPanelOpen
                 ? "bg-primary text-primary-foreground border-primary shadow-sm"
                 : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
@@ -241,7 +241,7 @@ export function ChatHeader({
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: -6 }}
                 transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-                className="absolute right-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
+                className="absolute end-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
                 style={{ transformOrigin: "top right", maxHeight: 480 }}
               >
                 {/* Header */}
@@ -266,12 +266,12 @@ export function ChatHeader({
                 {/* Search + sort */}
                 <div className="px-3 pt-2.5 pb-2 space-y-2 shrink-0">
                   <div className="relative">
-                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50 pointer-events-none" />
+                    <Search className="absolute start-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50 pointer-events-none" />
                     <input
                       value={historySearch}
                       onChange={e => setHistorySearch(e.target.value)}
                       placeholder={t("chat.search_conversations")}
-                      className="w-full pl-7 pr-3 py-1.5 text-xs bg-muted/50 rounded-lg border border-transparent focus:border-primary/30 focus:bg-background focus:outline-none text-foreground placeholder:text-muted-foreground/50 transition-all"
+                      className="w-full ps-7 pe-3 py-1.5 text-xs bg-muted/50 rounded-lg border border-transparent focus:border-primary/30 focus:bg-background focus:outline-none text-foreground placeholder:text-muted-foreground/50 transition-all"
                     />
                   </div>
                   <button
@@ -316,7 +316,7 @@ export function ChatHeader({
                               <p className="text-[12px] font-semibold text-foreground leading-snug truncate flex-1">{conv.title}</p>
                               <div className="shrink-0 flex items-center mt-0.5">
                               {pendingConvIds[conv.id] ? (
-                                <span className="mr-2 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                                <span className="me-2 inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
                               ) : null}
                               <span className="text-[10px] text-muted-foreground/60 tabular-nums group-hover:hidden">
                                 {conv.timestamp.toLocaleDateString([], { month: "short", day: "numeric" })}
@@ -356,7 +356,7 @@ export function ChatHeader({
                 setReportsPanelOpen(next);
                 if (!next) { setActiveReport(null); setReportEditMode(false); setPreviewedVersion(null); }
               }}
-              className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+              className={`relative flex items-center gap-2 ps-3 pe-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
                 reportsPanelOpen
                   ? "bg-primary text-primary-foreground border-primary shadow-sm"
                   : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
@@ -371,11 +371,11 @@ export function ChatHeader({
                 {reports.length}
               </span>
               {isGeneratingReport && (
-                <Loader2 className="h-3 w-3 animate-spin ml-0.5" />
+                <Loader2 className="h-3 w-3 animate-spin ms-0.5" />
               )}
             </button>
             <div
-              className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-[9999] flex flex-col"
+              className="absolute end-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-[9999] flex flex-col"
               style={{
                 transformOrigin: "top right",
                 width:     activeReport ? 540 : 300,
@@ -611,7 +611,7 @@ export function ChatHeader({
                                 } catch { /* ignore */ }
                               }}
                               className={[
-                                "shrink-0 flex flex-col items-start gap-1 px-3 py-2.5 rounded-xl border text-left w-44",
+                                "shrink-0 flex flex-col items-start gap-1 px-3 py-2.5 rounded-xl border text-start w-44",
                                 "transition-all duration-150",
                                 isActive
                                   ? "bg-primary/10 border-primary/40 shadow-sm ring-1 ring-primary/20"
@@ -644,7 +644,7 @@ export function ChatHeader({
                               </div>
 
                               {/* Title */}
-                              <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1 w-full text-left">
+                              <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1 w-full text-start">
                                 {snap.title}
                               </p>
 
@@ -655,7 +655,7 @@ export function ChatHeader({
 
                               {/* Edit instruction snippet */}
                               {snap.instruction && (
-                                <p className="text-[9px] text-muted-foreground/50 italic leading-snug line-clamp-2 w-full text-left">
+                                <p className="text-[9px] text-muted-foreground/50 italic leading-snug line-clamp-2 w-full text-start">
                                   "{snap.instruction.slice(0, 50)}{snap.instruction.length > 50 ? "…" : ""}"
                                 </p>
                               )}
@@ -759,7 +759,7 @@ export function ChatHeader({
         <div className="relative" data-docs-panel>
           <button
             onClick={() => { const next = !docsPanelOpenRef.current; docsPanelOpenRef.current = next; setDocsPanelOpen(next); }}
-            className={`relative flex items-center gap-2 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
+            className={`relative flex items-center gap-2 ps-3 pe-3.5 py-1.5 rounded-full text-xs font-medium transition-all border ${
               docsPanelOpen
                 ? "bg-primary text-primary-foreground border-primary shadow-sm"
                 : "bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border-border"
@@ -779,7 +779,7 @@ export function ChatHeader({
 
           {/* Always-mounted — CSS transitions only, React state inside never destroyed */}
           <div
-            className="absolute right-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-50 flex flex-col"
+            className="absolute end-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-50 flex flex-col"
             style={{
               transformOrigin: "top right",
               width: bubbleDoc ? 520 : 288,
@@ -1025,7 +1025,7 @@ export function ChatHeader({
               },
             });
           }}
-          className="flex items-center gap-1.5 pl-3 pr-3.5 py-1.5 rounded-full text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all"
+          className="flex items-center gap-1.5 ps-3 pe-3.5 py-1.5 rounded-full text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all"
         >
           <Phone className="h-3.5 w-3.5 shrink-0" />
           <span>Call</span>

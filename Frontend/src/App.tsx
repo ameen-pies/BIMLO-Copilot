@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,9 +17,21 @@ import './scrollbar.css';
 
 const queryClient = new QueryClient();
 
+/** Set document direction + lang for RTL support */
+const RtlDetector = () => {
+  const { i18n } = useTranslation();
+  useEffect(() => {
+    const isRtl = i18n.language === "ar";
+    document.documentElement.dir = isRtl ? "rtl" : "ltr";
+    document.documentElement.lang = i18n.language;
+  }, [i18n.language]);
+  return null;
+};
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
+      <RtlDetector />
       <Toaster />
       <Sonner />
       <BrowserRouter>

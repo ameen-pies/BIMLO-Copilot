@@ -451,7 +451,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: "100%", opacity: 0 }}
           transition={{ type: "spring", stiffness: 320, damping: 32 }}
-          className="fixed top-0 right-0 bottom-0 z-40 w-[380px] max-w-[92vw] bg-background border-l border-border flex flex-col shadow-2xl"
+          className="fixed top-0 end-0 bottom-0 z-40 w-[380px] max-w-[92vw] bg-background border-l border-border flex flex-col shadow-2xl"
           onDragEnter={handleDragEnter}
           onDragOver={e => e.preventDefault()}
           onDragLeave={handleDragLeave}
@@ -529,7 +529,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
                   <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2.5">
                     <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
                     <p className="text-[11px] text-destructive leading-snug">{uploadError}</p>
-                    <button onClick={() => setUploadError(null)} className="ml-auto text-destructive/60 hover:text-destructive">
+                    <button onClick={() => setUploadError(null)} className="ms-auto text-destructive/60 hover:text-destructive">
                       <X className="h-3 w-3" />
                     </button>
                   </div>
@@ -557,7 +557,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
                       <button
                         onClick={e => { e.stopPropagation(); deleteFile(f.file_id); }}
                         disabled={deletingId === f.file_id}
-                        className="absolute top-2 right-2 h-5 w-5 hidden group-hover:flex items-center justify-center rounded bg-background/80 text-muted-foreground/60 hover:text-destructive transition-colors"
+                        className="absolute top-2 end-2 h-5 w-5 hidden group-hover:flex items-center justify-center rounded bg-background/80 text-muted-foreground/60 hover:text-destructive transition-colors"
                       >
                         {deletingId === f.file_id
                           ? <Loader2 className="h-2.5 w-2.5 animate-spin" />
@@ -627,7 +627,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
                           <button
                             key={i}
                             onClick={() => setInput(q)}
-                            className="text-left text-[11px] px-3 py-2 rounded-lg border border-border hover:border-primary/40 hover:bg-primary/5 text-muted-foreground hover:text-foreground transition-all"
+                            className="text-start text-[11px] px-3 py-2 rounded-lg border border-border hover:border-primary/40 hover:bg-primary/5 text-muted-foreground hover:text-foreground transition-all"
                           >
                             {q}
                           </button>

@@ -136,11 +136,11 @@ const renderReportContent = (record: ReportRecord) => {
           p: ({ children }) => <p className="mb-2 text-foreground/90 leading-relaxed text-xs">{children}</p>,
           ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5 text-foreground/90 text-xs">{children}</ul>,
           ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5 text-foreground/90 text-xs">{children}</ol>,
-          li: ({ children }) => <li className="ml-2">{children}</li>,
+          li: ({ children }) => <li className="ms-2">{children}</li>,
           strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
           em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
           hr: () => <hr className="border-border my-4" />,
-          blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground my-2 text-xs">{children}</blockquote>,
+          blockquote: ({ children }) => <blockquote className="border-s-2 border-primary/40 ps-3 italic text-muted-foreground my-2 text-xs">{children}</blockquote>,
           code: ({ inline, node, children }: { inline?: boolean; node?: any; children?: React.ReactNode }) => {
             const codeStr = String(children ?? "");
             const isInline = inline === true || (inline === undefined && !codeStr.includes("\n"));
@@ -164,7 +164,7 @@ const renderReportContent = (record: ReportRecord) => {
             );
           },
           table: ({ children }) => <div className="overflow-x-auto my-3"><table className="text-xs border-collapse w-full">{children}</table></div>,
-          th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-left text-xs">{children}</th>,
+          th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-start text-xs">{children}</th>,
           td: ({ children }) => <td className="border border-border px-2 py-1 text-xs">{children}</td>,
         }}
       >

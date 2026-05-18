@@ -78,7 +78,7 @@ export const ThinkingTrace: React.FC<ThinkingTraceProps> = ({
                     transition={{ duration: 0.18 }}
                     className="overflow-hidden"
                   >
-                    <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+                    <div className="flex flex-col gap-0.5 ps-3 border-l border-border/25 ms-[2px]">
                       {steps.slice(0, -1).map((step, i) => {
                         const icon =
                           step.node === "retrieve"       ? <FileText className={cls} /> :
@@ -145,7 +145,7 @@ export const ThinkingTrace: React.FC<ThinkingTraceProps> = ({
             transition={{ duration: 0.18 }}
             className="overflow-hidden"
           >
-            <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+            <div className="flex flex-col gap-0.5 ps-3 border-l border-border/25 ms-[2px]">
               {steps.map((step, i) => {
                 const icon =
                   step.node === "retrieve"       ? <FileText className={cls} /> :

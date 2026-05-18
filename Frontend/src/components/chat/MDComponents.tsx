@@ -52,7 +52,7 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
     });
     const text = typeof children === "string" ? children : Array.isArray(children) ? children.join("") : String(children ?? "");
     if (!text.trim()) return null;
-    return <li className="ml-2 leading-relaxed">{flatChildren ?? children}</li>;
+    return <li className="ms-2 leading-relaxed">{flatChildren ?? children}</li>;
   },
   strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
   em: ({ children }) => <em className="italic text-foreground/80">{children}</em>,
@@ -390,7 +390,7 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
     );
   },
   blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground my-2 block">
+    <blockquote className="border-s-2 border-primary/40 ps-3 italic text-muted-foreground my-2 block">
       {children}
     </blockquote>
   ),
@@ -400,7 +400,7 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
       <span>{children}</span>
       {href && href !== "#" && (
         <a href={href} target="_blank" rel="noopener noreferrer" title={href}
-          className="inline-flex items-center ml-0.5 text-primary/50 hover:text-primary transition-colors"
+          className="inline-flex items-center ms-0.5 text-primary/50 hover:text-primary transition-colors"
           onClick={(e) => e.stopPropagation()}>
           <ExternalLink className="h-2.5 w-2.5 translate-y-[-1px]" strokeWidth={2.5} />
         </a>
@@ -412,7 +412,7 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
       <table className="text-xs border-collapse w-full">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-left">{children}</th>,
+  th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-start">{children}</th>,
   td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
   br: () => <br />,
 };

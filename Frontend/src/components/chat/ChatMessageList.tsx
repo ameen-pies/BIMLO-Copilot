@@ -184,7 +184,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   const isOpen = openSourceKey === stepKey;
                   const cls = "h-3 w-3 shrink-0 text-muted-foreground/35";
                   return (
-                    <div className="flex flex-col gap-1 pl-0 mb-1">
+                    <div className="flex flex-col gap-1 ps-0 mb-1">
                       <button
                         onClick={() => setOpenSourceKey(k => k === stepKey ? null : stepKey)}
                         className="flex items-center gap-1.5 group/think w-fit"
@@ -210,7 +210,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                             transition={{ duration: 0.18 }}
                             className="overflow-hidden"
                           >
-                            <div className="flex flex-col gap-0.5 pl-3 border-l border-border/25 ml-[2px]">
+                            <div className="flex flex-col gap-0.5 ps-3 border-l border-border/25 ms-[2px]">
                               {steps.map((step, i) => {
                                 const icon =
                                   step.node === "retrieve"       ? <FileText className={cls} /> :
@@ -269,7 +269,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         <button
                           key={docId}
                           onClick={() => openBubbleDoc(doc)}
-                          className="group flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-xl bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                          className="group flex items-center gap-2 ps-1.5 pe-3 py-1.5 rounded-xl bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-start shadow-sm"
                           title={doc.filename}
                         >
                           <div className="w-7 h-7 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
@@ -333,7 +333,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                       setCopiedMsgId(msg.id);
                       setTimeout(() => setCopiedMsgId(null), 1500);
                     }}
-                    className={`sticky top-2 float-right ml-2 -mr-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
+                    className={`sticky top-2 float-end ms-2 -me-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] font-medium transition-all duration-150 z-10 ${
                       copiedMsgId === msg.id
                         ? "opacity-100 bg-primary/15 text-primary"
                         : "opacity-0 group-hover/msg:opacity-100 bg-muted/80 text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -639,7 +639,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     {(msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                   </span>
                   {msg.role === "assistant" && msg.id !== typingMessageId && !msg.interrupted && (
-                    <div className="flex items-center gap-1 ml-1">
+                    <div className="flex items-center gap-1 ms-1">
                       <button
                         onClick={() => setFeedback(prev => ({ ...prev, [msg.id]: prev[msg.id] === "like" ? null : "like" }))}
                         className={`p-1 rounded-md transition-colors ${feedback[msg.id] === "like" ? "text-primary" : "text-muted-foreground/40 hover:text-primary"}`}

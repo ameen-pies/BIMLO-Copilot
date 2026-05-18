@@ -78,7 +78,7 @@ const TickerCard = ({ article, onLoginRequired, isLoggedIn }: { article: Article
           : <div className="ticker-card-img-fallback" style={{ background: meta.gradient }} />
         }
         <span className="ticker-card-cat-badge" style={{ background: meta.color + "22", color: meta.color, borderColor: meta.color + "55" }}>
-          <Icon size={10} style={{ display: "inline", marginRight: 3 }} />
+          <Icon size={10} style={{ display: "inline", marginInlineEnd: 3 }} />
           {meta.label}
         </span>
       </div>
@@ -471,7 +471,7 @@ const Index = () => {
         }
         .ticker-card-cat-badge {
           position: absolute;
-          bottom: 8px; left: 8px;
+          bottom: 8px; inset-inline-start: 8px;
           font-size: 0.62rem;
           font-weight: 700;
           text-transform: uppercase;
@@ -576,7 +576,7 @@ const Index = () => {
               height={140}
               rotate={12}
               gradient={isDark ? "from-blue-500/[0.12]" : "from-blue-500/[0.25]"}
-              className="left-[-10%] md:left-[-5%] top-[15%] md:top-[20%]"
+              className="start-[-10%] md:start-[-5%] top-[15%] md:top-[20%]"
             />
             <ElegantShape
               isDark={isDark}
@@ -585,7 +585,7 @@ const Index = () => {
               height={120}
               rotate={-15}
               gradient={isDark ? "from-indigo-500/[0.12]" : "from-indigo-500/[0.25]"}
-              className="right-[-5%] md:right-[0%] top-[70%] md:top-[75%]"
+              className="end-[-5%] md:end-[0%] top-[70%] md:top-[75%]"
             />
             <ElegantShape
               isDark={isDark}
@@ -594,7 +594,7 @@ const Index = () => {
               height={80}
               rotate={-8}
               gradient={isDark ? "from-sky-500/[0.12]" : "from-sky-500/[0.25]"}
-              className="left-[5%] md:left-[10%] bottom-[5%] md:bottom-[10%]"
+              className="start-[5%] md:start-[10%] bottom-[5%] md:bottom-[10%]"
             />
             <ElegantShape
               isDark={isDark}
@@ -603,7 +603,7 @@ const Index = () => {
               height={60}
               rotate={20}
               gradient={isDark ? "from-violet-500/[0.12]" : "from-violet-500/[0.25]"}
-              className="right-[15%] md:right-[20%] top-[10%] md:top-[15%]"
+              className="end-[15%] md:end-[20%] top-[10%] md:top-[15%]"
             />
             <ElegantShape
               isDark={isDark}
@@ -612,7 +612,7 @@ const Index = () => {
               height={40}
               rotate={-25}
               gradient={isDark ? "from-cyan-400/[0.12]" : "from-cyan-500/[0.25]"}
-              className="left-[20%] md:left-[25%] top-[5%] md:top-[10%]"
+              className="start-[20%] md:start-[25%] top-[5%] md:top-[10%]"
             />
           </div>
           <div className="absolute inset-0 bg-gradient-to-t from-background via-transparent to-background/80 pointer-events-none" />

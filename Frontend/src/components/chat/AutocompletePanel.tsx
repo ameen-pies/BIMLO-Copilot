@@ -55,7 +55,7 @@ export function AutocompletePanel({
               <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
                 Documents
               </span>
-              <span className="text-[10px] text-muted-foreground/50 ml-auto">
+              <span className="text-[10px] text-muted-foreground/50 ms-auto">
                 ↑↓ · Tab to select
               </span>
             </div>

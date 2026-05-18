@@ -134,7 +134,7 @@ export const ChartMessage: React.FC<ChartMessageProps> = ({ analytics, answer })
           <span className="text-[13px] font-semibold text-foreground leading-snug flex-1 truncate">
             {analytics.title || analytics.chart_js?.options?.plugins?.title?.text || ""}
           </span>
-          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+          <div className="flex items-center gap-1.5 shrink-0 ms-auto">
             {analytics.sources && analytics.sources.length > 0 && (
               <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-muted text-muted-foreground whitespace-nowrap">
                 {analytics.sources[0]}{analytics.sources.length > 1 ? ` +${analytics.sources.length - 1}` : ""}
@@ -260,7 +260,7 @@ export const ChartClarification: React.FC<ChartClarificationProps> = ({ analytic
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ delay: (fi * 3 + i) * 0.04 }}
                     onClick={() => { setSelected(g.label); onSelect(g.hint); }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-start transition-all group/opt"
                   >
                     <BarChart2 className="h-3 w-3 text-primary/40 shrink-0 group-hover/opt:text-primary transition-colors" />
                     <span className="text-[12px] font-medium text-foreground group-hover/opt:text-primary transition-colors">
@@ -281,7 +281,7 @@ export const ChartClarification: React.FC<ChartClarificationProps> = ({ analytic
               animate={{ opacity: 1, scale: 1 }}
               transition={{ delay: i * 0.05 }}
               onClick={() => { setSelected(g.label); onSelect(g.hint); }}
-              className="flex flex-col items-start gap-0.5 px-3 py-2 rounded-xl border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt max-w-[220px]"
+              className="flex flex-col items-start gap-0.5 px-3 py-2 rounded-xl border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-start transition-all group/opt max-w-[220px]"
             >
               <span className="text-[13px] font-medium text-foreground group-hover/opt:text-primary transition-colors leading-snug">
                 {g.label}
@@ -328,7 +328,7 @@ export const ClarificationOptions: React.FC<ClarificationOptionsProps> = ({ opti
           animate={{ opacity: 1, x: 0 }}
           transition={{ delay: i * 0.06 }}
           onClick={() => { setSelected(opt); onSelect(opt); }}
-          className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-left transition-all group/opt"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border hover:border-primary/50 bg-muted/40 hover:bg-primary/10 text-start transition-all group/opt"
         >
           <span className="text-[11px] font-semibold text-primary/50 shrink-0 w-5 text-center">
             {i + 1}

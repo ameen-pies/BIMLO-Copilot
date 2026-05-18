@@ -466,7 +466,7 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, hi
         <>
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-border bg-background/80 shrink-0 gap-2">
             <span className="text-[11px] text-muted-foreground/60 hidden sm:block">Ctrl+scroll to zoom</span>
-            <div className="flex items-center gap-1 ml-auto">
+            <div className="flex items-center gap-1 ms-auto">
               <button
                 onClick={() => setZoomMode(m => !m)}
                 title={zoomMode ? "Exit zoom mode" : "Click-to-zoom mode"}

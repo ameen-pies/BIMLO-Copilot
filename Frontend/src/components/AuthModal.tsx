@@ -74,7 +74,7 @@ const Input: React.FC<{
           background:   "rgba(100,116,139,0.10)",
           border:       "1px solid rgba(100,116,139,0.25)",
           color:        "inherit",
-          paddingRight: suffix ? "2.5rem" : undefined,
+          paddingInlineEnd: suffix ? "2.5rem" : undefined,
         }}
         onFocus={e => {
           e.currentTarget.style.borderColor = "#60a5fa";
@@ -86,7 +86,7 @@ const Input: React.FC<{
         }}
       />
       {suffix && (
-        <div className="absolute inset-y-0 right-0 flex items-center pr-3">{suffix}</div>
+        <div className="absolute inset-y-0 end-0 flex items-center pe-3">{suffix}</div>
       )}
     </div>
   </div>

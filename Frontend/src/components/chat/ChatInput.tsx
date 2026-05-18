@@ -222,7 +222,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     <button
                       type="button"
                       onClick={() => openBubbleDoc(doc)}
-                      className="group flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left shadow-sm"
+                      className="group flex items-center gap-1.5 ps-1 pe-2.5 py-1 rounded-lg bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-start shadow-sm"
                       title={doc.filename}
                     >
                       <div className="w-8 h-8 rounded-md overflow-hidden bg-muted/60 flex items-center justify-center shrink-0 border border-border/50">
@@ -257,7 +257,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                           setConfirmingDeleteId(null);
                         }
                       }}
-                      className={`absolute -top-1 -right-1 h-5 w-5 rounded-full flex items-center justify-center transition-all ${
+                      className={`absolute -top-1 -end-1 h-5 w-5 rounded-full flex items-center justify-center transition-all ${
                         confirmingDeleteId === doc.document_id
                           ? "bg-primary text-primary-foreground"
                           : "bg-muted border border-border text-muted-foreground hover:text-foreground hover:bg-muted/80"
@@ -359,7 +359,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   </div>
 
                   {/* Elapsed timer */}
-                  <span className="text-[11px] text-primary/70 font-mono tabular-nums shrink-0 w-8 text-right">
+                  <span className="text-[11px] text-primary/70 font-mono tabular-nums shrink-0 w-8 text-end">
                     {String(Math.floor(recordingElapsed / 60)).padStart(2, "0")}:{String(recordingElapsed % 60).padStart(2, "0")}
                   </span>
                 </div>
@@ -410,7 +410,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   <span
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-0 flex items-center text-sm leading-5 select-none py-1.5 overflow-hidden"
-                    style={{ left: "calc(1.75rem + 6px)", color: "transparent" }}
+                    style={{ insetInlineStart: "calc(1.75rem + 6px)", color: "transparent" }}
                   >
                     <span className="whitespace-pre">{input}</span>
                     <span className="text-muted-foreground/40 whitespace-pre">{wordSuffix}</span>
@@ -442,7 +442,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: 6, scale: 0.97 }}
                       transition={{ duration: 0.13 }}
-                      className="absolute bottom-full mb-2 left-0 z-[9999] bg-card border border-border rounded-xl shadow-xl overflow-hidden min-w-[220px]"
+                      className="absolute bottom-full mb-2 start-0 z-[9999] bg-card border border-border rounded-xl shadow-xl overflow-hidden min-w-[220px]"
                     >
                       <div className="px-3 py-2 border-b border-border/60">
                         <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">{t("chat.select_model")}</p>
@@ -455,7 +455,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                             setSelectedModel(opt.id);
                             setModelDropdownOpen(false);
                           }}
-                          className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors ${
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 text-start transition-colors ${
                             selectedModel === opt.id
                               ? "bg-primary/8 text-foreground"
                               : "hover:bg-muted text-foreground/70 hover:text-foreground"
