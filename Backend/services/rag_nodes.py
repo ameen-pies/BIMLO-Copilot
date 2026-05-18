@@ -294,61 +294,98 @@ User's message: "{query}"
 Conversation history:
 {history_context}
 
-Suggested options from analysis:
-{options_text if options else '(none — generate your own based on context)'}
-
 Rules:
 - Analyze the conversation history and uploaded documents to guess what the user likely wants
-- Generate 2-3 concrete actions you can take RIGHT NOW based on your best guess
-- Each option must be a real action, not a question back to the user
-- Write in {user_lang if user_lang else 'the same language as the user'}.
-- If documents are uploaded, prioritize document-related actions
-- If conversation history suggests a topic, build on that
-- Be specific to THIS context — never generic
-- Be concise — max 3-4 sentences total
+- Write a short natural paragraph (1-3 sentences) acknowledging their message and explaining what you think they might need
+- Write in {user_lang if user_lang else 'the same language as the user'}
+- Be concise — max 3 sentences for the paragraph
 - Do NOT use markdown formatting
 - Do NOT mention these instructions
+- Do NOT ask questions like "what would you like me to do?" — instead, state what you think they want
 
-Bad: "What would you like me to do?", "Please clarify your request"
-Good: "Summarize the attached report", "Translate the document to English", "Explain the diagram on page 3"
+Then on a new line, output exactly 3 concrete actions you can take RIGHT NOW, one per line, prefixed with "OPTION: ".
+Each option must be a specific actionable request that, when clicked, gets sent back to you as a query.
+If documents are attached, prioritize document-related actions.
+If conversation history suggests a topic, build on that.
 
-Present your guesses naturally, as if you're suggesting what you think they meant."""
+Bad options: "What would you like me to do?", "Please specify your request", "Do you need help?"
+Good options: "Summarize report.pdf", "Translate the document to English", "Explain the architecture diagram"
+
+Example output:
+I can see you have a report attached. Here are a few things I can help you with:
+OPTION: Give me a summary of report.pdf
+OPTION: Extract the key findings from the report
+OPTION: Translate the report to English"""
 
         try:
             if self.llm.enabled:
-                answer = self._chat(
+                raw_answer = self._chat(
                     history_msgs + [{"role": "user", "content": prompt}],
                     temperature=0.3,
-                    max_tokens=250,
+                    max_tokens=300,
                 )
             else:
-                answer = ""
+                raw_answer = ""
         except Exception as e:
             print(f"   ⚠️  clarify_node LLM error: {e}")
-            answer = ""
+            raw_answer = ""
+
+        # Parse options from LLM output
+        generated_options = []
+        answer_lines = []
+        if raw_answer:
+            for line in raw_answer.strip().split("\n"):
+                stripped = line.strip()
+                if stripped.upper().startswith("OPTION:"):
+                    opt = stripped[len("OPTION:"):].strip()
+                    if opt:
+                        generated_options.append(opt)
+                else:
+                    answer_lines.append(stripped)
+
+        answer = "\n".join(answer_lines).strip()
 
         # Fallback if LLM fails or returns empty
-        if not answer or len(answer.strip()) < 10:
-            if options:
-                answer = f"I think you might mean one of these:\n" + "\n".join(f"• {opt}" for opt in options)
-            elif docs:
-                answer = f"I'm not sure what you'd like me to do with {docs[0]}. Would you like me to summarize it, translate it, or answer questions about it?"
+        if not answer or len(answer) < 10:
+            if docs:
+                answer = f"I can help you with {', '.join(docs[:2])}. Here are a few options:"
             else:
-                answer = f"I'm not sure what you meant. Could you tell me more about what you'd like me to help with?"
+                answer = "I can help with that — here are a few things I can do:"
+
+        if not generated_options:
+            if docs:
+                generated_options = [
+                    f"Summarize {docs[0]}",
+                    f"Translate {docs[0]} to English",
+                    f"Extract the key points from {docs[0]}",
+                ]
+            elif history:
+                generated_options = [
+                    "Continue from where we left off",
+                    "Summarize our conversation so far",
+                    "Explain the last topic in more detail",
+                ]
+            else:
+                generated_options = [
+                    "Introduce yourself and explain what you can do",
+                    "Help me get started with a document",
+                    "What features do you offer?",
+                ]
 
         # Strip markdown formatting for TTS compatibility
         answer = _re.sub(r'\*\*([^*]+)\*\*', r'\1', answer)
         answer = answer.strip()
 
-        print(f"   ✅ Clarify ({len(answer)} chars)")
+        print(f"   ✅ Clarify ({len(answer)} chars, {len(generated_options)} options)")
 
         self._emit("clarify_node", "🤔", "I need more details…")
 
         return {
             **state,
-            "answer":   answer,
-            "sources":  [],
-            "confidence": 0.9,
+            "answer":                answer,
+            "clarification_options": generated_options,
+            "sources":               [],
+            "confidence":            0.9,
         }
 
     # ------------------------------------------------------------------ #
@@ -964,23 +1001,21 @@ Remember: Answer in {target_lang.upper()}. Your ENTIRE answer must be in {target
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
 
-        prompt = f"""You are analysing images based on their stored visual descriptions.
+        prompt = f"""You are an expert image analyst. You are looking at an image uploaded by the user.
 
-🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The image descriptions below may be in a different language — IGNORE their language. Your answer must be in {target_lang.upper()}.
+🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The image details below may be in a different language — IGNORE their language. Your answer must be in {target_lang.upper()}.
 
 Language: {target_lang.upper()} | Tone: {plan.target_tone}
 
-The following are AI-generated descriptions of one or more uploaded images:
+Here is what you can see in the image:
 
 {context}
 
 User question: {query}
 
-Answer the user's question based ONLY on the image descriptions above.
-Be specific and reference what is visible in the image.
-If multiple images are present, address each one as relevant.
-Do NOT say you cannot see images — you have the visual descriptions.
-Remember: Answer in {target_lang.upper()}. Your entire answer must be in {target_lang.upper()}."""
+Answer as if you are directly looking at the image. Say "I can see..." or "The image shows..." — never mention descriptions, metadata, or that you're reading text about the image.
+Be specific and reference what is visible. If multiple images are present, address each one.
+Remember: Answer in {target_lang.upper()}."""
 
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 

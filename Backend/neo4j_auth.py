@@ -974,6 +974,20 @@ def list_documents(user: Dict = Depends(require_user)):
 
 
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@router.patch("/conversations/{conv_id}/title")
+def rename_conversation(conv_id: str, body: dict, user: Dict = Depends(require_user)):
+    """Rename a conversation title."""
+    new_title = (body.get("title") or "").strip()
+    if not new_title:
+        raise HTTPException(status_code=400, detail="Title required")
+    _run(
+        """
+        MATCH (c:Conversation {id: $conv_id})<-[:HAS_CONVERSATION]-(u:User {id: $user_id})
+        SET c.title = $title
+        """,
+        {"conv_id": conv_id, "user_id": user["user_id"], "title": new_title},
+    )
+    return {"ok": True}
 # NEWS CHAT CONVERSATION PERSISTENCE
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 

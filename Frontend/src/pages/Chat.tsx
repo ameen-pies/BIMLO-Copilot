@@ -18,7 +18,7 @@ const Chat = () => {
     blobUrlMapRef, bubbleDoc, bubbleHighlightRef, bubbleScrollRef, bubbleViewer,
     chatDragCounterRef, confirmingDeleteId, convLoading, conversations,
     convsPanelOpen, copiedMsgId, currentUser,
-    deleteConversation, deletingReportId, docFileInputRef, docsPanelOpen,
+    deleteConversation, renameConversation, deletingReportId, docFileInputRef, docsPanelOpen,
     docsPanelOpenRef, documents, downloadingReportId, dragCounterRef,
     duplicateBanner, duplicateBannerTimeoutRef,
     editDraft, editingMsgId, editTextareaRef, elapsedTimerRef,
@@ -74,11 +74,11 @@ const Chat = () => {
       onDragEnterCapture={e => { e.preventDefault(); pageDragCounterRef.current++; if (pageDragCounterRef.current === 1) setIsDragOver(true); }}
       onDragLeaveCapture={e => { e.preventDefault(); pageDragCounterRef.current--; if (pageDragCounterRef.current <= 0) { pageDragCounterRef.current = 0; setIsDragOver(false); } }}
       onDragOverCapture={e => e.preventDefault()}
-      onDropCapture={e => { e.preventDefault(); pageDragCounterRef.current = 0; setIsDragOver(false); }}
+      onDropCapture={e => { e.preventDefault(); e.stopPropagation(); pageDragCounterRef.current = 0; dragCounterRef.current = 0; setIsDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
       onDragEnter={e => { e.preventDefault(); dragCounterRef.current++; if (dragCounterRef.current === 1) setIsDragOver(true); }}
       onDragLeave={e => { e.preventDefault(); dragCounterRef.current--; if (dragCounterRef.current <= 0) { dragCounterRef.current = 0; setIsDragOver(false); } }}
       onDragOver={e => e.preventDefault()}
-      onDrop={e => { e.preventDefault(); dragCounterRef.current = 0; setIsDragOver(false); }}
+      onDrop={e => { e.preventDefault(); e.stopPropagation(); dragCounterRef.current = 0; pageDragCounterRef.current = 0; setIsDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
     >
 
       {/* Drag-and-drop overlay (page-level) */}
@@ -196,6 +196,7 @@ const Chat = () => {
           currentUser={currentUser}
           showAuthModal={showAuthModal}
           logout={logout}
+          onRenameConversation={renameConversation}
         />
 
         {/* Silence warning banner */}
@@ -220,10 +221,6 @@ const Chat = () => {
         </AnimatePresence>
         <ChatMessageList
           messages={messages}
-          isChatDragOver={isChatDragOver}
-          setIsChatDragOver={setIsChatDragOver}
-          chatDragCounterRef={chatDragCounterRef}
-          handleFiles={handleFiles}
           convLoading={convLoading}
           activeConvId={activeConvId}
           openSourceKey={openSourceKey}

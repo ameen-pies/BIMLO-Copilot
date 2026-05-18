@@ -1768,6 +1768,19 @@ export function useChatPage() {
     abortLoad();
   };
 
+  const renameConversation = useCallback((convId: string, newTitle: string) => {
+    setConversations(prev => prev.map(c =>
+      c.id === convId ? { ...c, title: newTitle, titleLocked: true } : c
+    ));
+    const base = getApiBase();
+    fetch(`${base}/auth/conversations/${convId}/title`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify({ title: newTitle }),
+    }).catch(() => {});
+  }, [getApiBase, getAuthHeader]);
+
   const deleteConversation = async (convId: string) => {
     // Mark as deleted first so any in-flight response won't re-insert it
     deletedConvIdsRef.current.add(convId);
@@ -2777,7 +2790,7 @@ export function useChatPage() {
     blobUrlMapRef, bubbleDoc, bubbleHighlightRef, bubbleScrollRef, bubbleViewer,
     chatDragCounterRef, confirmingDeleteId, convLoading, conversations,
     convsPanelOpen, copiedMsgId, currentUser,
-    deleteConversation, deletingReportId, docFileInputRef, docsPanelOpen,
+    deleteConversation, renameConversation, deletingReportId, docFileInputRef, docsPanelOpen,
     docsPanelOpenRef, documents, downloadingReportId, dragCounterRef,
     duplicateBanner, duplicateBannerTimeoutRef,
     editDraft, editingMsgId, editTextareaRef, elapsedTimerRef,

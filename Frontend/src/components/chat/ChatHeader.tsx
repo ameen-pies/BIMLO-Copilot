@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate } from "react-router-dom";
@@ -84,6 +84,7 @@ interface ChatHeaderProps {
   currentUser: AuthUser | null;
   showAuthModal: (onSuccess?: (() => void) | null) => void;
   logout: () => void;
+  onRenameConversation?: (convId: string, newTitle: string) => void;
 }
 
 export function ChatHeader({
@@ -144,9 +145,13 @@ export function ChatHeader({
   currentUser,
   showAuthModal,
   logout,
+  onRenameConversation,
 }: ChatHeaderProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editTitleValue, setEditTitleValue] = useState("");
+  const editTitleRef = useRef<HTMLInputElement>(null);
   const getApiBase = () =>
     ((typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_URL) || "http://localhost:8000");
 
@@ -161,15 +166,45 @@ export function ChatHeader({
         <Logo className="h-7 w-7" />
         <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
       </div>
-      <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4">
-        <p className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem]">
-          <TypewriterText
-            key={(activeConversation?.id ?? "new-conversation") + "-" + (activeConversation?.title ?? "")}
-            text={activeConversation?.initialTitle ?? activeConversation?.title ?? "New conversation"}
-            speed={28}
-            render={partial => <span className="inline-block align-middle">{partial}</span>}
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4">
+        {editingTitle ? (
+          <input
+            ref={editTitleRef}
+            value={editTitleValue}
+            onChange={e => setEditTitleValue(e.target.value)}
+            onBlur={() => {
+              const trimmed = editTitleValue.trim();
+              if (trimmed && activeConversation && onRenameConversation) {
+                onRenameConversation(activeConversation.id, trimmed);
+              }
+              setEditingTitle(false);
+            }}
+            onKeyDown={e => {
+              if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); }
+              if (e.key === "Escape") { setEditingTitle(false); }
+            }}
+            maxLength={80}
+            className="text-sm font-semibold text-foreground bg-transparent border-b border-primary/40 outline-none text-center w-full max-w-[18rem] mx-auto px-1 py-0.5"
           />
-        </p>
+        ) : (
+          <p
+            className="text-sm font-semibold text-foreground truncate mx-auto max-w-[18rem] cursor-pointer hover:text-primary/80 transition-colors"
+            onClick={() => {
+              if (!activeConversation) return;
+              setEditTitleValue(activeConversation.title || "");
+              setEditingTitle(true);
+              setTimeout(() => editTitleRef.current?.select(), 10);
+            }}
+            title={t("chat.edit_title", "Click to rename")}
+          >
+            <TypewriterText
+              key={(activeConversation?.id ?? "new-conversation") + "-" + (activeConversation?.title ?? "")}
+              text={activeConversation?.initialTitle ?? activeConversation?.title ?? "New conversation"}
+              speed={28}
+              render={partial => <span className="inline-block align-middle">{partial}</span>}
+            />
+          </p>
+        )}
       </div>
       <div className="ml-auto flex items-center gap-2">
 

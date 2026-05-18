@@ -13,14 +13,10 @@ import TypewriterText from "@/components/TypewriterText";
 import { Message, ThinkingStep, Conversation, ReportRecord, createUniqueId } from "@/pages/chatTypes";
 import { Source } from "@/services/api";
 // Icons
-import { Plus, Loader2, ChevronDown, FileText, Search, ScrollText, Pencil, Check, Sparkles, Phone, Copy, Square, X, ThumbsUp, ThumbsDown, RotateCcw, ChevronRight, Bell, Trash2, ImageIcon } from "lucide-react";
+import { Loader2, ChevronDown, FileText, Search, ScrollText, Pencil, Check, Sparkles, Phone, Copy, Square, X, ThumbsUp, ThumbsDown, RotateCcw, ChevronRight, Bell, Trash2, ImageIcon } from "lucide-react";
 
 interface ChatMessageListProps {
   messages: Message[];
-  isChatDragOver: boolean;
-  setIsChatDragOver: (v: boolean) => void;
-  chatDragCounterRef: React.MutableRefObject<number>;
-  handleFiles: (files: FileList | File[]) => Promise<void>;
   convLoading: boolean;
   activeConvId: string;
   openSourceKey: string | null;
@@ -79,10 +75,6 @@ interface ChatMessageListProps {
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messages,
-  isChatDragOver,
-  setIsChatDragOver,
-  chatDragCounterRef,
-  handleFiles,
   convLoading,
   activeConvId,
   openSourceKey,
@@ -139,36 +131,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const { t } = useTranslation();
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin scrollbar-thumb-muted-foreground/20 scrollbar-track-transparent hover:scrollbar-thumb-muted-foreground/40 relative"
-      onDragEnter={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current++; setIsChatDragOver(true); }}
-      onDragLeave={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current--; if (chatDragCounterRef.current === 0) setIsChatDragOver(false); }}
-      onDragOver={e => e.preventDefault()}
-      onDrop={e => { e.preventDefault(); e.stopPropagation(); chatDragCounterRef.current = 0; setIsChatDragOver(false); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); }}
     >
-      <AnimatePresence>
-        {isChatDragOver && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="absolute inset-0 z-50 bg-background/60 backdrop-blur-[2px] flex items-center justify-center pointer-events-none rounded-lg"
-          >
-            <motion.div
-              initial={{ scale: 0.92, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.92, opacity: 0 }}
-              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-              className="flex flex-col items-center gap-2 px-8 py-6 rounded-2xl border border-primary/30 bg-card/90 shadow-2xl"
-            >
-              <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                <Plus className="h-5 w-5 text-primary" />
-              </div>
-              <p className="text-sm font-medium text-foreground">Drop to upload</p>
-              <p className="text-[11px] text-muted-foreground/60">PDF · DOCX · TXT · PNG · JPG · WEBP · IFC · DWG · DXF · STEP</p>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
       <WelcomeSplash visible={messages.length === 0 && !convLoading && !activeConvId} />
       <AnimatePresence mode="wait">
         {convLoading ? (
