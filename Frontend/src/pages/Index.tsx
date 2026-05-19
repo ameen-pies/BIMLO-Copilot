@@ -640,14 +640,14 @@ const Index = () => {
               </motion.span>
             </motion.div>
             <motion.h1
-              className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-foreground leading-tight max-w-5xl flex flex-col items-center"
+              className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-foreground leading-tight max-w-5xl flex flex-col items-center overflow-visible"
               initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.15 }}
             >
               <span className="whitespace-nowrap">{t("landing.hero_title_1")} {t("landing.hero_title_2")}</span>
               <TypewriterText
                 key={i18n.language}
                 texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
-                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-8 pb-2 pt-1 inline-block"
+                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-8 pb-3 pt-2 inline-block overflow-visible"
                 speed={100}
                 deleteSpeed={50}
                 pauseDuration={2000}
