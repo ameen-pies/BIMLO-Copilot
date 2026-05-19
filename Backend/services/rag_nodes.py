@@ -435,11 +435,17 @@ OPTION: Translate the report to English"""
             print(f"   → single-shot synthesis ({total} chunks)")
             context = _build_context(all_chunks)
             plan = ResponsePlan(
-                key_points=[],
-                sub_queries=[query],
                 target_language=user_language or "en",
+                target_language_confidence=0.9,
+                target_tone="comprehensive",
+                tone_reasoning="Full document synthesis",
                 response_style="comprehensive",
                 should_cite_sources=True,
+                max_response_length="comprehensive",
+                key_points_to_include=[],
+                things_to_avoid=[],
+                approach="Full document synthesis — cover all relevant content",
+                reasoning="full_doc_node: single-shot synthesis for small document",
             )
             prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", user_language=user_language)
             history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
@@ -590,11 +596,17 @@ SECTION SUMMARIES:
         context = _build_context(filtered)
         user_language = _detect_script_language(query)
         plan = ResponsePlan(
-            key_points=[],
-            sub_queries=[query],
             target_language=user_language or "en",
+            target_language_confidence=0.9,
+            target_tone="comprehensive",
+            tone_reasoning="Relevance-filtered synthesis",
             response_style="comprehensive",
             should_cite_sources=True,
+            max_response_length="comprehensive",
+            key_points_to_include=[],
+            things_to_avoid=[],
+            approach="Synthesize from relevant chunks only",
+            reasoning="relevance_node: filtered chunks for focused answer",
         )
         prompt = self._build_synthesis_prompt(query, context, plan, fix_instruction="", user_language=user_language)
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
