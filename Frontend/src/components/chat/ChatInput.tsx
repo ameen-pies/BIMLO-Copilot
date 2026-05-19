@@ -132,7 +132,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   return (
     <div
       ref={inputAreaRef}
-      className={`transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messagesLength > 0 ? "relative z-10 border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm overflow-visible" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-20 bg-transparent overflow-visible"}`}
+      className={`transition-all duration-500 ease-[cubic-bezier(0.4,0,0.2,1)] ${messagesLength > 0 ? "relative z-[60] border-t border-border pt-3 pb-4 px-4 shadow-[0_-4px_24px_0_rgba(0,0,0,0.06)] bg-background/80 backdrop-blur-sm overflow-visible" : "absolute left-0 right-0 px-4 pt-3 pb-4 z-[60] bg-transparent overflow-visible"}`}
       style={messagesLength === 0 ? { top: "50%", transform: "translateY(calc(-50% + 60px))" } : {}}
     >
       <div className="max-w-3xl mx-auto">

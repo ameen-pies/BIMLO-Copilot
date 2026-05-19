@@ -119,7 +119,7 @@ async def health_check():
             "statistics":       stats,
             "active_sessions":  len(g._sessions),
             "report_count":     report_count,
-            "services": f"{sum([cf_primary_ok, cf_backup_ok, groq_ok, nvidia_ok, elevenlabs_ok, g._cad_ifc_available, g._news_pipeline_available])} services active",
+            "services": f"{sum([any_provider_ok, elevenlabs_ok, g._cad_ifc_available, g._news_pipeline_available])} services active",
         }
     except Exception as e:
         return {"status": "degraded", "timestamp": datetime.now().isoformat(), "error": str(e)}

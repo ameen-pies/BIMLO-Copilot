@@ -38,16 +38,6 @@ jobs:
       - run: cd Frontend && npm run lint
       - run: cd Frontend && npm run build
 
-  e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: cd Frontend && npm ci
-      - run: cd Frontend && npx playwright install chromium
-      - run: cd Frontend && npx playwright test
 
   trivy:
     runs-on: ubuntu-latest

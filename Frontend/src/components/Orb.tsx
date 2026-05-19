@@ -272,7 +272,7 @@ export default function Orb({
     // Smoothly interpolated hue and backgroundColor so transitions are gradual
     // rather than instant jumps read straight from the ref each frame.
     let currentHue     = hueRef.current;
-    let currentBg      = hexToVec3(backgroundColorRef.current);
+    const currentBg      = hexToVec3(backgroundColorRef.current);
     const rotationSpeed = 0.3;
     // Speed of smooth interpolation (fraction per frame at 60 fps).
     // 0.05 ≈ ~300 ms transition; raise toward 0.1 for a snappier feel.

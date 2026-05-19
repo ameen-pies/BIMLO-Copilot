@@ -305,6 +305,7 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
     ]);
     const shouldHighlight = HIGHLIGHTED_LANGS.has(lang.toLowerCase());
 
+    // eslint-disable-next-line react-hooks/rules-of-hooks -- "code" is a ReactMarkdown component
     const [copied, setCopied] = React.useState(false);
     const handleCopy = () => {
       navigator.clipboard.writeText(codeText).catch(() => {});

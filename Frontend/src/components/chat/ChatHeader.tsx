@@ -241,7 +241,7 @@ export function ChatHeader({
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: -6 }}
                 transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-                className="absolute end-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-50 flex flex-col"
+                className="absolute end-0 top-full mt-2 w-72 bg-background border border-border rounded-2xl shadow-2xl overflow-hidden z-[70] flex flex-col"
                 style={{ transformOrigin: "top right", maxHeight: 480 }}
               >
                 {/* Header */}
@@ -779,7 +779,7 @@ export function ChatHeader({
 
           {/* Always-mounted — CSS transitions only, React state inside never destroyed */}
           <div
-            className="absolute end-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-50 flex flex-col"
+            className="absolute end-0 top-full mt-2 bg-background border border-border rounded-2xl shadow-2xl z-[70] flex flex-col"
             style={{
               transformOrigin: "top right",
               width: bubbleDoc ? 520 : 288,

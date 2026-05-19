@@ -785,7 +785,7 @@ export function buildInitialCfg(raw: Record<string, any>, isDark: boolean): Reco
 
   const cbs = pl?.tooltip?.callbacks;
   if (cbs?.label && typeof cbs.label === "string") {
-    try { /* eslint-disable-next-line no-new-func */ cbs.label = new Function("return " + cbs.label)(); } catch { delete cbs.label; }
+    try {   cbs.label = new Function("return " + cbs.label)(); } catch { delete cbs.label; }
   }
 
   cfg.options.animation = {
