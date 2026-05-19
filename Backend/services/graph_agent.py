@@ -499,7 +499,7 @@ DOCUMENTS:
 {context}"""
 
         raw = _call_llm(prompt, system, self.api_key, self.base_url,
-                        max_tokens=2500, temperature=0.0)
+                        max_tokens=4000, temperature=0.0)
         if not raw:
             return None
 
@@ -899,9 +899,9 @@ DOCUMENTS:
         Returns a flat list of groups, each tagged with source_file so the
         frontend can group them visually under their filename.
 
-        Capped at 4 suggestions total (max 2 per file) to keep the UI clean.
+        Capped at 8 suggestions total (max 2 per file) to keep the UI clean.
         """
-        context = self._build_context(chunks, max_chars_per_chunk=800)
+        context = self._build_context(chunks, max_chars_per_chunk=2000)
         files_str = "\n".join(f"- {f}" for f in available_files)
 
         system = (
@@ -935,7 +935,7 @@ DOCUMENTS:
 {context}"""
 
         raw = _call_llm(prompt, system, self.api_key, self.base_url,
-                        max_tokens=800, temperature=0.0)
+                        max_tokens=1200, temperature=0.0)
         if not raw:
             return []
 
@@ -966,7 +966,7 @@ DOCUMENTS:
                 "description": str(item.get("description", ""))[:120],
                 "hint":        hint[:200],
             })
-            if len(valid) >= 4:
+            if len(valid) >= 8:
                 break
 
         return valid
@@ -987,7 +987,7 @@ DOCUMENTS:
             {"label": "Power & Infrastructure", "description": "Power load, cable length, equipment specs", "hint": "chart power and infrastructure metrics"},
           ]
         """
-        context = self._build_context(chunks, max_chars_per_chunk=2500)
+        context = self._build_context(chunks, max_chars_per_chunk=4000)
 
         system = (
             "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
@@ -997,7 +997,7 @@ DOCUMENTS:
 
         prompt = f"""The user asked: "{query}"
 
-Scan the document content below and identify 2-5 DISTINCT groups of numeric data that could each make a meaningful chart.
+Scan the document content below and identify 2-8 DISTINCT groups of numeric data that could each make a meaningful chart.
 Each group must share the same unit or domain (e.g. all throughput values, all power readings, all equipment counts).
 
 Return ONLY a JSON array — no markdown, no backticks, no explanation:
@@ -1020,7 +1020,7 @@ CRITICAL rules for "hint":
 - GOOD example: "chart downlink throughput in Mbps per site as a bar chart from site_survey.pdf" (exact, buildable, names the file)
 
 Rules:
-- 2 to 5 groups maximum
+- 2 to 8 groups maximum
 - Each group must be internally coherent (same unit, same domain, or same time series)
 - "label" must be short and clear — the user will click it as a button — include the filename if it helps identify which doc
 - "source_file" must be the EXACT filename from the document header (e.g. "network_report.pdf")
@@ -1030,7 +1030,7 @@ DOCUMENTS:
 {context}"""
 
         raw = _call_llm(prompt, system, self.api_key, self.base_url,
-                        max_tokens=600, temperature=0.2)
+                        max_tokens=1000, temperature=0.2)
         if not raw:
             return []
 
@@ -1057,7 +1057,7 @@ DOCUMENTS:
                     "description": description,
                     "hint":        str(item["hint"])[:200],
                 })
-        return valid[:5]
+        return valid[:8]
 
     # ── STAGE 3: INTERPRETATION ───────────────────────────────────────────
 
@@ -1173,7 +1173,7 @@ Rules:
             return None
 
         # Sort by insertion order (Python 3.7+ dicts are ordered)
-        for lbl, val in list(seen.items())[:20]:  # cap at 20 data points
+        for lbl, val in list(seen.items())[:100]:  # cap at 100 data points
             labels.append(lbl)
             values.append(val)
 
@@ -1204,7 +1204,7 @@ Rules:
         return text.strip()
 
     @staticmethod
-    def _build_context(chunks: List[Dict], max_chars_per_chunk: int = 3500) -> str:
+    def _build_context(chunks: List[Dict], max_chars_per_chunk: int = 5000) -> str:
         parts = []
         for i, c in enumerate(chunks, 1):
             m = c.get("metadata", {})

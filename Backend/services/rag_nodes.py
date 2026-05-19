@@ -1268,6 +1268,22 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
         query  = state["query"]
         chunks = state["retrieved_chunks"]
 
+        # Load ALL chunks for attached docs — graph needs complete datasets
+        attached = state.get("attached_doc_filenames", [])
+        session_id = state.get("session_id", "")
+        user_id = state.get("user_id")
+        if attached and self.vs:
+            all_chunks = []
+            for fname in attached:
+                try:
+                    doc_chunks = self.vs.get_all_chunks(fname, user_id=user_id, session_id=session_id)
+                    all_chunks.extend(doc_chunks)
+                    print(f"   📊 graph: loaded {len(doc_chunks)} chunks from {fname}")
+                except Exception as e:
+                    print(f"   ⚠️  graph: get_all_chunks error for {fname}: {e}")
+            if all_chunks:
+                chunks = all_chunks
+
         cb = getattr(self, "_status_callback", None)
         if callable(cb):
             msgs = getattr(self, "_status_msgs", None) or self._DEFAULT_STATUS_MSGS
