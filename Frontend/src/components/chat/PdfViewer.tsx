@@ -131,12 +131,16 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, hi
       const DPR      = Math.min(window.devicePixelRatio || 1, 2);
       const availW   = outer.clientWidth - 32;
       const baseVP   = page.getViewport({ scale: 1 });
-      const baseScale = availW / baseVP.width;
-      const viewport = page.getViewport({ scale: baseScale * DPR });
+      // Swap width/height for rotated pages (90° or 270°)
+      const rotation = baseVP.rotation ?? 0;
+      const isRotated = rotation === 90 || rotation === 270;
+      const effectiveWidth = isRotated ? baseVP.height : baseVP.width;
+      const baseScale = availW / effectiveWidth;
+      const viewport = page.getViewport({ scale: baseScale * DPR, rotation });
       viewportsRef.current.set(pageNum, viewport);
 
-      const cssW = Math.floor(baseScale * baseVP.width);
-      const cssH = Math.floor(baseScale * baseVP.height);
+      const cssW = Math.floor(baseScale * effectiveWidth);
+      const cssH = Math.floor(baseScale * (isRotated ? baseVP.width : baseVP.height));
       const pxW  = Math.floor(viewport.width);
       const pxH  = Math.floor(viewport.height);
 

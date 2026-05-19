@@ -16,6 +16,10 @@ import { Source } from "@/services/api";
 // Icons
 import { Loader2, ChevronDown, FileText, Search, ScrollText, Pencil, Check, Sparkles, Phone, Copy, Square, X, ThumbsUp, ThumbsDown, RotateCcw, ChevronRight, Bell, Trash2, ImageIcon } from "lucide-react";
 
+/** Detect if text contains Arabic/RTL characters */
+const ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+const isRTLText = (text: string) => ARABIC_RE.test(text);
+
 interface ChatMessageListProps {
   messages: Message[];
   convLoading: boolean;
@@ -320,6 +324,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     }
                   />
                 ) : <div
+                  dir={isRTLText(msg.content) ? "rtl" : "ltr"}
                   className={`group/bubble relative z-10 px-4 rounded-2xl text-sm leading-relaxed ${
                     msg.role === "user"
                       ? "py-3 bg-primary text-primary-foreground rounded-br-md w-fit break-words min-w-0 max-w-full"

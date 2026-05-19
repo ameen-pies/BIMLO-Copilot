@@ -66,6 +66,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
+/** Detect if text contains Arabic/RTL characters */
+const ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+const isRTLText = (text: string) => ARABIC_RE.test(text);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +648,7 @@ const CadPanel: React.FC<CadPanelProps> = ({
                         className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                       >
                         <div
+                          dir={isRTLText(msg.content) ? "rtl" : "ltr"}
                           className={`max-w-[85%] rounded-2xl px-3 py-2 text-[12px] leading-relaxed whitespace-pre-wrap ${
                             msg.role === "user"
                               ? "bg-primary text-primary-foreground rounded-br-md"

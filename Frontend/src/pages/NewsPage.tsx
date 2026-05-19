@@ -12,6 +12,9 @@ import CardNav from "@/components/CardNav";
 import { useAuth } from "@/context/AuthContext";
 import { ProfileBubble } from "@/components/Navbar";
 
+/** Detect if text contains Arabic/RTL characters */
+const ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/;
+const isRTLText = (text: string) => ARABIC_RE.test(text);
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -1022,7 +1025,7 @@ function NewsChatPanel({
                     ))}
                   </div>
                 )}
-                <div style={{
+                <div dir={isRTLText(msg.content) ? "rtl" : "ltr"} style={{
                   maxWidth: "90%",
                   padding: msg.role === "user" ? "0.5rem 0.72rem" : "0.6rem 0.78rem",
                   borderRadius: msg.role === "user"

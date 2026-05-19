@@ -86,7 +86,7 @@ const SourcesPanel = ({ msg, onOpenDocument }: { msg: Message; onOpenDocument: (
               <span className="flex-1 min-w-0 flex items-center gap-1.5 flex-wrap">
                 <span
                   title={source.filename}
-                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9px] font-mono font-medium shrink-0 max-w-[200px] cursor-pointer hover:opacity-80 transition-opacity"
                   style={{ color: "#60a5fa", background: "color-mix(in srgb, #3b82f6 12%, transparent)", border: "1px solid color-mix(in srgb, #3b82f6 20%, transparent)" }}
                   data-open-doc
                   onClick={(e) => { e.stopPropagation(); onOpenDocument(source.filename, docExcerpt); }}
@@ -95,7 +95,7 @@ const SourcesPanel = ({ msg, onOpenDocument }: { msg: Message; onOpenDocument: (
                     <path d="M2 2h5l3 3v5a1 1 0 01-1 1H2a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
                     <path d="M7 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
                   </svg>
-                  {source.filename}
+                  <span className="truncate">{source.filename}</span>
                 </span>
                 {factChips.length > 0 && (
                   <span className="text-[9px] text-muted-foreground/50 shrink-0">
@@ -135,7 +135,7 @@ const SourcesPanel = ({ msg, onOpenDocument }: { msg: Message; onOpenDocument: (
                       {chip.label}
                     </span>
                     <span className="text-[8px] text-muted-foreground/30 leading-none">·</span>
-                    <span className={`text-[11px] font-semibold leading-none whitespace-nowrap ${chip.is_numeric ? "text-primary" : "text-foreground/80"}`}>
+                    <span className={`text-[11px] font-semibold leading-none whitespace-nowrap truncate max-w-[180px] ${chip.is_numeric ? "text-primary" : "text-foreground/80"}`} title={chip.value}>
                       {chip.value}
                     </span>
                   </button>

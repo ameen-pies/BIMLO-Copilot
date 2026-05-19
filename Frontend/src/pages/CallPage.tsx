@@ -541,15 +541,15 @@ const CallPage: React.FC = () => {
 
       // Friendly spoken phrases per RAG node
       const NODE_PHRASES: Record<string, string> = {
-        retrieve:         "Let me look that up…",
-        rewrite_query:    "Rephrasing your question…",
-        check_retrieval:  "Checking what I found…",
-        judge_plan:       "Planning my answer…",
-        synthesise:       "Putting it together…",
-        judge_evaluate:   "Double-checking…",
-        graph_node:       "Querying the knowledge graph…",
-        report_node:      "Building a report…",
-        analytics_node:   "Running the analysis…",
+        retrieve:         t("call.node_phrases.retrieve"),
+        rewrite_query:    t("call.node_phrases.rewrite_query"),
+        check_retrieval:  t("call.node_phrases.check_retrieval"),
+        judge_plan:       t("call.node_phrases.judge_plan"),
+        synthesise:       t("call.node_phrases.synthesise"),
+        judge_evaluate:   t("call.node_phrases.judge_evaluate"),
+        graph_node:       t("call.node_phrases.graph_node"),
+        report_node:      t("call.node_phrases.report_node"),
+        analytics_node:   t("call.node_phrases.analytics_node"),
       };
 
       const SLOW_NODES = new Set(Object.keys(NODE_PHRASES));

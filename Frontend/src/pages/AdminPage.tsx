@@ -157,15 +157,15 @@ interface PipelineLogEntry {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return "never";
+function timeAgo(iso: string | null | undefined, t: (key: string, opts?: any) => string): string {
+  if (!iso) return t("admin.time_never");
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
-  if (m < 1)  return "just now";
-  if (m < 60) return `${m}m ago`;
+  if (m < 1)  return t("admin.time_just_now");
+  if (m < 60) return t("admin.time_minutes_ago", { m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  if (h < 24) return t("admin.time_hours_ago", { h });
+  return t("admin.time_days_ago", { d: Math.floor(h / 24) });
 }
 
 function isOnline(last_seen: string | null | undefined): boolean {
@@ -268,11 +268,12 @@ function Sparkline({ data, color, height = 36 }: { data: number[]; color: string
 // ─── Engagement Funnel ──────────────────────────────────────────────────────
 
 function EngagementFunnel({ stats }: { stats: Stats }) {
+  const { t } = useTranslation();
   const stages = [
-    { label: "Total Users",          value: stats.total_users,              color: "#3b82f6" },
-    { label: "With Conversations",   value: stats.users_with_conversations, color: "#6366f1" },
-    { label: "With Documents",       value: stats.users_with_documents,     color: "#8b5cf6" },
-    { label: "With Reports",         value: stats.users_with_reports,       color: "#22c55e" },
+    { label: t("admin.funnel_total_users"),          value: stats.total_users,              color: "#3b82f6" },
+    { label: t("admin.funnel_with_conversations"),   value: stats.users_with_conversations, color: "#6366f1" },
+    { label: t("admin.funnel_with_documents"),       value: stats.users_with_documents,     color: "#8b5cf6" },
+    { label: t("admin.funnel_with_reports"),         value: stats.users_with_reports,       color: "#22c55e" },
   ];
   const maxVal = Math.max(stages[0].value, 1);
 
@@ -428,7 +429,7 @@ function ExpandedChart({ data: rawData, color, label }: { data: number[]; color:
       {xLabels.map((idx) => (
         <text key={idx} x={toX(idx)} y={H - 4} textAnchor="middle"
           fontSize={8} fill="rgba(148,163,184,0.7)" fontFamily="inherit">
-          {idx === 0 ? "7d ago" : idx === data.length - 1 ? "now" : "mid"}
+          {idx === 0 ? t("admin.chart_7d_ago") : idx === data.length - 1 ? t("admin.chart_now") : t("admin.chart_mid")}
         </text>
       ))}
 
@@ -450,7 +451,7 @@ function ExpandedChart({ data: rawData, color, label }: { data: number[]; color:
         fill={color} stroke="hsl(220 15% 12%)" strokeWidth={2} />
       <text x={points[peakIdx].x} y={points[peakIdx].y - 8}
         textAnchor="middle" fontSize={8} fontWeight={700} fill={color} fontFamily="inherit">
-        peak: {max}
+        {t("admin.chart_peak", { value: max })}
       </text>
 
       {/* Hover hit areas */}
@@ -590,7 +591,7 @@ function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
                     : "kpiChartFadeIn 0.25s cubic-bezier(0,0,.2,1) forwards",
                 }}>
                   <div style={{ fontSize: 9, color: "hsl(var(--muted-foreground))", marginBottom: 4, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                    Last 7 days · {label}
+                    {t("admin.chart_last_7d", { label })}
                   </div>
                   <ExpandedChart data={sparkData} color={accent} label={label} />
                   {sub && <div style={{ fontSize: 10, color: "hsl(var(--muted-foreground))", marginTop: 6 }}>{sub}</div>}
@@ -744,7 +745,7 @@ function NewsPipelineCard({ health, onTrigger }: { health: HealthData | null; on
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
           <span style={{ color: "hsl(var(--muted-foreground))" }}>{t("admin.last_run")}</span>
-          <span style={{ color: "hsl(var(--foreground))", fontWeight: 600 }}>{lastRun ? timeAgo(np?.last_run_at!) : t("admin.never")}</span>
+          <span style={{ color: "hsl(var(--foreground))", fontWeight: 600 }}>{lastRun ? timeAgo(np?.last_run_at!, t) : t("admin.never")}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
           <span style={{ color: "hsl(var(--muted-foreground))" }}>{t("admin.next_run_in")}</span>
@@ -900,12 +901,12 @@ export default function AdminPage() {
       });
       const data = await res.json();
       if (res.ok) {
-        setEmailResult(`✅ Sent to ${data.sent?.length ?? 0} user(s)${data.failed?.length ? `, ${data.failed.length} failed` : ""}`);
+        setEmailResult(t("admin.email_sent", { sent: data.sent?.length ?? 0, failed: data.failed?.length ?? 0 }));
         setTimeout(() => { setEmailModal(false); setEmailSubject(""); setEmailBody(""); setEmailResult(null); }, 2000);
       } else {
-        setEmailResult(`❌ ${data.detail || "Failed to send"}`);
+        setEmailResult(data.detail || t("admin.email_failed"));
       }
-    } catch { setEmailResult("❌ Network error"); }
+    } catch { setEmailResult(t("admin.email_network_error")); }
     finally { setEmailSending(false); }
   }
 
@@ -1108,8 +1109,8 @@ export default function AdminPage() {
       const res = await fetch(`${API}/auth/admin/users/${currentUser.user_id}`, {
         method: "PATCH", headers: authHeaders(currentUser.token), body: JSON.stringify(body),
       });
-      if (res.ok) { setSelfMsg("Credentials updated! Please log in again."); setSelfPassword(""); }
-      else        { setSelfMsg("Update failed."); }
+      if (res.ok) { setSelfMsg(t("admin.self_update_success")); setSelfPassword(""); }
+      else        { setSelfMsg(t("admin.self_update_failed")); }
     } finally { setSelfSaving(false); }
   }
 
@@ -1126,7 +1127,7 @@ export default function AdminPage() {
 
   // Activity bar data: bucket users by signup recency (last 7 days)
   const activityBars = (() => {
-    const days = ["6d","5d","4d","3d","2d","1d","Today"];
+    const days = t("admin.chart_days", { returnObjects: true }) as string[];
     const counts = new Array(7).fill(0);
     users.forEach(u => {
       if (!u.created_at) return;
@@ -1235,11 +1236,11 @@ export default function AdminPage() {
 
         {/* ── KPIs ── */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 24 }}>
-          <KpiCard icon={Users}       label={t("admin.kpi_total_users")}  value={stats?.total_users ?? "—"}    sub={`${stats?.admin_users ?? 0} admin(s)`}  accent="#3b82f6" />
-          <KpiCard icon={Wifi}        label={t("admin.kpi_active_1h")}  value={stats?.active_1h ?? "—"}      sub="online now"        accent="#22c55e" />
-          <KpiCard icon={Activity}    label={t("admin.kpi_active_24h")} value={stats?.active_24h ?? "—"}     sub="last 24 hours"     accent="#06b6d4" />
-          <KpiCard icon={TrendingUp}  label={t("admin.kpi_new_7d")}     value={stats?.new_users_7d ?? "—"}   sub="new signups"       accent="#a855f7" trend={stats && (stats.new_users_7d || stats.new_users_prev_7d) ? Math.round(((stats.new_users_7d - stats.new_users_prev_7d) / Math.max(stats.new_users_prev_7d, 1)) * 100) : undefined} sparkData={activityBars.counts} />
-          <KpiCard icon={MessageSquare} label={t("admin.kpi_conversations")} value={stats?.total_conversations ?? "—"} sub="all sessions" accent="#f59e0b" sparkData={convSparkData} />
+          <KpiCard icon={Users}       label={t("admin.kpi_total_users")}  value={stats?.total_users ?? "—"}    sub={t("admin.kpi_admins", { count: stats?.admin_users ?? 0 })}  accent="#3b82f6" />
+          <KpiCard icon={Wifi}        label={t("admin.kpi_active_1h")}  value={stats?.active_1h ?? "—"}      sub={t("admin.kpi_online_now")}        accent="#22c55e" />
+          <KpiCard icon={Activity}    label={t("admin.kpi_active_24h")} value={stats?.active_24h ?? "—"}     sub={t("admin.kpi_last_24h")}     accent="#06b6d4" />
+          <KpiCard icon={TrendingUp}  label={t("admin.kpi_new_7d")}     value={stats?.new_users_7d ?? "—"}   sub={t("admin.kpi_new_signups")}       accent="#a855f7" trend={stats && (stats.new_users_7d || stats.new_users_prev_7d) ? Math.round(((stats.new_users_7d - stats.new_users_prev_7d) / Math.max(stats.new_users_prev_7d, 1)) * 100) : undefined} sparkData={activityBars.counts} />
+          <KpiCard icon={MessageSquare} label={t("admin.kpi_conversations")} value={stats?.total_conversations ?? "—"} sub={t("admin.kpi_all_sessions")} accent="#f59e0b" sparkData={convSparkData} />
         </div>
 
         {/* ── Engagement Funnel + News Pipeline row ── */}
@@ -1248,8 +1249,8 @@ export default function AdminPage() {
           <div style={{ ...S.card, padding: "18px 20px", display: "flex", flexDirection: "column" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexShrink: 0 }}>
               <div>
-                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>Engagement Funnel</div>
-                <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>User journey through the platform</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 2 }}>{t("admin.engagement_funnel")}</div>
+                <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{t("admin.engagement_funnel_desc")}</div>
               </div>
               <TrendingUp size={18} color="#6366f1" />
             </div>
@@ -1274,7 +1275,7 @@ export default function AdminPage() {
               {tabKey === "users"   && <><Users size={13} /> {t("admin.tab_users")}</>}
               {tabKey === "health"  && <><Server size={13} /> {t("admin.tab_health")}</>}
               {tabKey === "logs"    && <><Terminal size={13} /> {t("admin.tab_logs")}</>}
-              {tabKey === "monitor" && <><Radio size={13} /> Monitor</>}
+              {tabKey === "monitor" && <><Radio size={13} /> {t("admin.tab_monitor")}</>}
               {tabKey === "settings"&& <><Shield size={13} /> {t("admin.tab_settings")}</>}
             </button>
           ))}
@@ -1360,7 +1361,7 @@ export default function AdminPage() {
                         <td style={{ padding: "12px 16px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
                             <Circle size={7} fill={online ? "#22c55e" : "#64748b"} color={online ? "#22c55e" : "#64748b"} />
-                            <span style={{ color: online ? "#22c55e" : "hsl(var(--muted-foreground))" }}>{online ? "Online" : "Offline"}</span>
+                            <span style={{ color: online ? "#22c55e" : "hsl(var(--muted-foreground))" }}>{online ? t("admin.user_online") : t("admin.user_offline")}</span>
                           </div>
                         </td>
                         <td style={{ padding: "12px 16px", fontSize: 13, color: "hsl(var(--foreground))", textAlign: "center" }}>
@@ -1376,27 +1377,27 @@ export default function AdminPage() {
                           </div>
                         </td>
                         <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap" }}>
-                          {u.created_at ? timeAgo(u.created_at) : "—"}
+                          {u.created_at ? timeAgo(u.created_at, t) : "—"}
                         </td>
                         <td style={{ padding: "12px 16px", fontSize: 12, color: "hsl(var(--muted-foreground))", whiteSpace: "nowrap" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                            <Clock size={10} /> {timeAgo(u.last_seen)}
+                            <Clock size={10} /> {timeAgo(u.last_seen, t)}
                           </div>
                         </td>
                         <td style={{ padding: "12px 16px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            <button onClick={() => openEdit(u)} title="Edit" style={{
+                            <button onClick={() => openEdit(u)} title={t("admin.action_edit")} style={{
                               width: 28, height: 28, borderRadius: 6, border: "1px solid hsl(var(--border))",
                               background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                               color: "hsl(var(--muted-foreground))",
                             }}><Edit3 size={12} /></button>
-                            <button onClick={() => { setEmailTarget(u); setEmailSubject(""); setEmailBody(""); setEmailResult(null); setEmailModal(true); }} title="Send message" style={{
+                            <button onClick={() => { setEmailTarget(u); setEmailSubject(""); setEmailBody(""); setEmailResult(null); setEmailModal(true); }} title={t("admin.action_send_message")} style={{
                               width: 28, height: 28, borderRadius: 6, border: "1px solid #3b82f630",
                               background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                               color: "#3b82f6",
                             }}><Mail size={12} /></button>
                             {!isMe && (
-                              <button onClick={() => setDeleteConfirm(u.user_id)} title="Delete" style={{
+                              <button onClick={() => setDeleteConfirm(u.user_id)} title={t("admin.action_delete")} style={{
                                 width: 28, height: 28, borderRadius: 6, border: "1px solid #ef444430",
                                 background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
                                 color: "#ef4444",
@@ -1420,16 +1421,16 @@ export default function AdminPage() {
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <div style={{ fontSize: 16, fontWeight: 800, color: "hsl(var(--foreground))" }}>System Health</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "hsl(var(--foreground))" }}>{t("admin.health_title")}</div>
                 {health?.timestamp && (
                   <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 2 }}>
-                    Last checked: {new Date(health.timestamp).toLocaleTimeString()}
+                    {t("admin.health_last_checked", { time: new Date(health.timestamp).toLocaleTimeString() })}
                   </div>
                 )}
               </div>
               <button onClick={loadHealth} disabled={healthLoading} style={{ ...S.btn("ghost"), gap: 6 }}>
                 <RefreshCw size={13} style={healthLoading ? { animation: "spin 0.8s linear infinite" } : {}} />
-                Refresh
+                {t("admin.health_refresh")}
               </button>
             </div>
 
@@ -1445,15 +1446,15 @@ export default function AdminPage() {
               </div>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 700, color: "hsl(var(--foreground))" }}>
-                  {health?.status === "healthy" ? "All Systems Operational" : health ? "System Issues Detected" : "Checking system status…"}
+                  {health?.status === "healthy" ? t("admin.health_all_ok") : health ? t("admin.health_issues") : t("admin.health_checking")}
                 </div>
                 <div style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginTop: 1 }}>
-                  {health?.services ?? "Loading service status…"}
+                  {health?.services ?? t("admin.health_loading")}
                 </div>
               </div>
               <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
                 <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", animation: "pulse 2s infinite" }} />
-                <span style={{ fontSize: 11, fontWeight: 600, color: "#22c55e" }}>LIVE</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#22c55e" }}>{t("admin.health_live")}</span>
               </div>
             </div>
 
@@ -1462,38 +1463,38 @@ export default function AdminPage() {
 
               {/* Core Infrastructure */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
-                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Core Infrastructure</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>{t("admin.health_core")}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <ServiceBadge label="API Server (FastAPI)"    status={health ? "ok" : "unknown"}              icon={Server}   detail="Backend running" />
-                  <ServiceBadge label="Vector Store (Chroma)"   status={deriveStatus(health?.vector_store)}     icon={Cpu}      detail={health?.statistics?.total_chunks != null ? `${health.statistics.total_chunks.toLocaleString()} chunks · ${health.statistics.total_documents ?? 0} docs` : "Embedding & similarity search"} />
-                  <ServiceBadge label="Neo4j Graph Database"    status={deriveStatus(health?.neo4j)}            icon={Database} detail={health?.neo4j === "connected" ? "Auth, sessions & knowledge graph" : health?.neo4j ?? "Not configured"} />
-                  <ServiceBadge label="Voice Agent (ElevenLabs)" status={deriveStatus(health?.elevenlabs)}     icon={Radio}    detail={health?.elevenlabs === "configured" ? "TTS ready — eleven_flash_v2_5" : "ELEVENLABS_API_KEY not set"} />
+                  <ServiceBadge label={t("admin.health_api")}    status={health ? "ok" : "unknown"}              icon={Server}   detail={t("admin.health_api_detail")} />
+                  <ServiceBadge label={t("admin.health_vector")}   status={deriveStatus(health?.vector_store)}     icon={Cpu}      detail={health?.statistics?.total_chunks != null ? t("admin.health_vector_chunks", { chunks: health.statistics.total_chunks.toLocaleString(), docs: health.statistics.total_documents ?? 0 }) : t("admin.health_vector_detail")} />
+                  <ServiceBadge label={t("admin.health_neo4j")}    status={deriveStatus(health?.neo4j)}            icon={Database} detail={health?.neo4j === "connected" ? t("admin.health_neo4j_detail") : health?.neo4j ?? t("admin.health_not_configured")} />
+                  <ServiceBadge label={t("admin.health_voice")} status={deriveStatus(health?.elevenlabs)}     icon={Radio}    detail={health?.elevenlabs === "configured" ? t("admin.health_voice_detail") : t("admin.health_voice_no_key")} />
                 </div>
               </div>
 
               {/* LLM Providers */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div style={{ ...S.sectionTitle }}>LLM Providers</div>
+                  <div style={{ ...S.sectionTitle }}>{t("admin.health_llm")}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                     <div style={{ width: 6, height: 6, borderRadius: "50%", background: health?.llm_status === "ok" ? "#22c55e" : "#ef4444" }} />
                     <span style={{ fontSize: 10, color: health?.llm_status === "ok" ? "#22c55e" : "#ef4444", fontWeight: 600 }}>
-                      {health?.llm_status === "ok" ? "Operational" : "Degraded"}
+                      {health?.llm_status === "ok" ? t("admin.health_llm_ok") : t("admin.health_llm_degraded")}
                     </span>
                   </div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {([
-                    { key: "cf_primary",  label: "CF Worker Primary",      icon: Zap,      color: "#f97316" },
-                    { key: "cf_backup",   label: "CF Worker Backup",       icon: Zap,      color: "#f97316" },
-                    { key: "groq",        label: "Groq (Llama 3.3 70B)",   icon: Cpu,      color: "#8b5cf6" },
-                    { key: "nvidia_nim",  label: "NVIDIA NIM (MiniMax)",   icon: Activity, color: "#76b900" },
+                    { key: "cf_primary",  label: t("admin.health_cf_primary"),      icon: Zap,      color: "#f97316" },
+                    { key: "cf_backup",   label: t("admin.health_cf_backup"),       icon: Zap,      color: "#f97316" },
+                    { key: "groq",        label: t("admin.health_groq"),   icon: Cpu,      color: "#8b5cf6" },
+                    { key: "nvidia_nim",  label: t("admin.health_nvidia"),   icon: Activity, color: "#76b900" },
                   ] as const).map(p => {
                     const val = health?.llm_providers?.[p.key as keyof LLMProviders];
                     const st = val === "configured" ? "ok" : val === "not_configured" ? "warn" : "unknown";
                     return (
                       <ServiceBadge key={p.key} label={p.label} status={st} icon={p.icon}
-                        detail={val === "configured" ? "API key configured" : "API key not set"} />
+                        detail={val === "configured" ? t("admin.health_key_set") : t("admin.health_key_not_set")} />
                     );
                   })}
                 </div>
@@ -1505,54 +1506,54 @@ export default function AdminPage() {
 
               {/* Agents & Pipelines */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
-                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Agents & Pipelines</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>{t("admin.health_agents")}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <ServiceBadge
-                    label="Ingestion Pipeline"
+                    label={t("admin.health_ingestion")}
                     status={health?.ingestion_mode === "langgraph" ? "ok" : health?.ingestion_mode ? "warn" : "unknown"}
                     icon={Zap}
-                    detail={health?.ingestion_mode === "langgraph" ? "LangGraph 3-node pipeline" : "Fallback: direct indexing"}
+                    detail={health?.ingestion_mode === "langgraph" ? t("admin.health_ingestion_detail") : t("admin.health_ingestion_fallback")}
                   />
                   <ServiceBadge
-                    label="LLM Judge (RAG Evaluator)"
+                    label={t("admin.health_judge")}
                     status={deriveStatus(health?.llm_judge)}
                     icon={CheckCircle2}
-                    detail={health?.llm_judge === "available" ? "Plan → generate → evaluate loop" : "Module not found"}
+                    detail={health?.llm_judge === "available" ? t("admin.health_judge_detail") : t("admin.health_module_not_found")}
                   />
                   <ServiceBadge
-                    label="Wiki Enricher"
+                    label={t("admin.health_wiki")}
                     status={deriveStatus(health?.wiki_enricher)}
                     icon={Search}
-                    detail={health?.wiki_enricher === "available" ? "wikipedia-api installed" : "pip install wikipedia-api"}
+                    detail={health?.wiki_enricher === "available" ? t("admin.health_wiki_detail") : t("admin.health_wiki_install")}
                   />
                   <ServiceBadge
-                    label="CAD / IFC Agent"
+                    label={t("admin.health_cad")}
                     status={deriveStatus(health?.cad_ifc_agent)}
                     icon={BarChart3}
-                    detail={health?.cad_ifc_agent === "available" ? "IFC, DXF, DWG, STEP supported" : "Module not loaded"}
+                    detail={health?.cad_ifc_agent === "available" ? t("admin.health_cad_detail") : t("admin.health_cad_not_loaded")}
                   />
                   <ServiceBadge
-                    label="News Pipeline"
+                    label={t("admin.health_news")}
                     status={health?.news_pipeline?.available ? (health.news_pipeline.running ? "warn" : "ok") : "error"}
                     icon={Clock}
                     detail={health?.news_pipeline?.available
-                      ? (health.news_pipeline.running ? "Currently running…" : `${health.news_pipeline.total_articles ?? health.news_pipeline.total_items ?? 0} articles cached`)
-                      : "Module not found"}
+                      ? (health.news_pipeline.running ? t("admin.health_news_running") : t("admin.health_news_cached", { count: health.news_pipeline.total_articles ?? health.news_pipeline.total_items ?? 0 }))
+                      : t("admin.health_module_not_found")}
                   />
                 </div>
               </div>
 
               {/* Platform Metrics */}
               <div style={{ ...S.card, padding: "18px 20px" }}>
-                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>Platform Metrics</div>
+                <div style={{ ...S.sectionTitle, marginBottom: 12 }}>{t("admin.health_platform")}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {([
-                    { label: "Total Users",         value: stats?.total_users ?? 0,               icon: Users,         color: "#3b82f6" },
-                    { label: "Conversations",        value: stats?.total_conversations ?? 0,       icon: MessageSquare, color: "#f59e0b" },
-                    { label: "Documents Uploaded",   value: stats?.total_documents ?? 0,           icon: Zap,           color: "#06b6d4" },
-                    { label: "Reports Generated",    value: health?.report_count ?? stats?.total_reports ?? 0, icon: BarChart3, color: "#22c55e" },
-                    { label: "Vector Chunks",        value: health?.statistics?.total_chunks ?? 0, icon: Database,      color: "#8b5cf6" },
-                    { label: "Active Sessions",      value: health?.active_sessions ?? 0,          icon: Activity,      color: "#f97316" },
+                    { label: t("admin.health_total_users"),         value: stats?.total_users ?? 0,               icon: Users,         color: "#3b82f6" },
+                    { label: t("admin.health_conversations"),        value: stats?.total_conversations ?? 0,       icon: MessageSquare, color: "#f59e0b" },
+                    { label: t("admin.health_documents"),   value: stats?.total_documents ?? 0,           icon: Zap,           color: "#06b6d4" },
+                    { label: t("admin.health_reports"),    value: health?.report_count ?? stats?.total_reports ?? 0, icon: BarChart3, color: "#22c55e" },
+                    { label: t("admin.health_chunks"),        value: health?.statistics?.total_chunks ?? 0, icon: Database,      color: "#8b5cf6" },
+                    { label: t("admin.health_active_sessions"),      value: health?.active_sessions ?? 0,          icon: Activity,      color: "#f97316" },
                   ] as const).map(m => (
                     <div key={m.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <div style={{ width: 28, height: 28, borderRadius: 7, background: `${m.color}15`, border: `1px solid ${m.color}25`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -1572,13 +1573,13 @@ export default function AdminPage() {
         {tab === "logs" && (() => {
           // ── Pipeline event helpers ──────────────────────────────────────────
           const EVENT_META: Record<string, { label: string; color: string; icon: string }> = {
-            routing:   { label: "Route",     color: "#3b82f6", icon: "🗺️" },
-            judge:     { label: "Judge",     color: "#a855f7", icon: "⚖️" },
-            retrieval: { label: "Retrieval", color: "#06b6d4", icon: "🔍" },
-            ingestion: { label: "Ingest",    color: "#f59e0b", icon: "📦" },
-            query_end: { label: "Query",     color: "#22c55e", icon: "✅" },
-            alert:     { label: "Alert",     color: "#ef4444", icon: "🚨" },
-            latency:   { label: "Latency",   color: "#64748b", icon: "⏱️" },
+            routing:   { label: t("admin.logs_route"),     color: "#3b82f6", icon: "🗺️" },
+            judge:     { label: t("admin.logs_judge"),     color: "#a855f7", icon: "⚖️" },
+            retrieval: { label: t("admin.logs_retrieval"), color: "#06b6d4", icon: "🔍" },
+            ingestion: { label: t("admin.logs_ingest"),    color: "#f59e0b", icon: "📦" },
+            query_end: { label: t("admin.logs_query"),     color: "#22c55e", icon: "✅" },
+            alert:     { label: t("admin.logs_alert"),     color: "#ef4444", icon: "🚨" },
+            latency:   { label: t("admin.logs_latency"),   color: "#64748b", icon: "⏱️" },
           };
 
           const filteredPipeline = pipelineLogs.filter(e =>
@@ -1641,7 +1642,7 @@ export default function AdminPage() {
                         display: "flex", alignItems: "center", gap: 5,
                       }}>
                         {m === "console" ? <Terminal size={11} /> : <Activity size={11} />}
-                        {m === "console" ? "Console" : "Pipeline"}
+                        {m === "console" ? t("admin.logs_console") : t("admin.logs_pipeline")}
                       </button>
                     ))}
                   </div>
@@ -1652,8 +1653,8 @@ export default function AdminPage() {
                       <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", animation: "pulse 2s infinite" }} />
                       <span style={{ fontSize: 11, color: "#22c55e", fontWeight: 600 }}>LIVE</span>
                     </div>
-                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginLeft: "auto" }}>{logs.length} entries</span>
-                    <button onClick={() => setLogs([])} style={S.btn("ghost")}><X size={12} /> Clear</button>
+                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))", marginLeft: "auto" }}>{t("admin.logs_entries", { count: logs.length })}</span>
+                    <button onClick={() => setLogs([])} style={S.btn("ghost")}><X size={12} /> {t("admin.logs_clear")}</button>
                   </>)}
 
                   {/* Pipeline: filter chips + refresh */}
@@ -1669,16 +1670,16 @@ export default function AdminPage() {
                             color: pipelineFilter === f ? (m?.color ?? "#3b82f6") : "hsl(var(--muted-foreground))",
                             cursor: "pointer",
                           }}>
-                            {f === "all" ? "All" : `${m?.icon} ${m?.label}`}
+                            {f === "all" ? t("admin.logs_all") : `${m?.icon} ${m?.label}`}
                           </button>
                         );
                       })}
                     </div>
                     <button onClick={loadPipelineLogs} disabled={pipelineLoading} style={{ ...S.btn("ghost"), marginLeft: "auto", gap: 5 }}>
                       <RefreshCw size={11} style={pipelineLoading ? { animation: "spin 0.8s linear infinite" } : {}} />
-                      Refresh
+                      {t("admin.logs_refresh")}
                     </button>
-                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{filteredPipeline.length} entries</span>
+                    <span style={{ fontSize: 11, color: "hsl(var(--muted-foreground))" }}>{t("admin.logs_entries", { count: filteredPipeline.length })}</span>
                   </>)}
                 </div>
 
@@ -1692,7 +1693,7 @@ export default function AdminPage() {
                   }}>
                     {logs.length === 0 ? (
                       <div style={{ padding: 40, textAlign: "center", color: "#4a5568", fontSize: 13 }}>
-                        Waiting for log entries…
+                        {t("admin.logs_waiting")}
                       </div>
                     ) : logs.map((l, i) => {
                       const kind  = classifyLog(l.msg);
@@ -1723,7 +1724,7 @@ export default function AdminPage() {
                   }}>
                     {filteredPipeline.length === 0 ? (
                       <div style={{ padding: 40, textAlign: "center", color: "#4a5568", fontSize: 13 }}>
-                        {pipelineLoading ? "Loading pipeline logs…" : "No pipeline events yet. Run a query to see structured logs."}
+                        {pipelineLoading ? t("admin.logs_loading") : t("admin.logs_no_events")}
                       </div>
                     ) : [...filteredPipeline].reverse().map((e, i) => {
                       const { ts, meta, summary, sessionShort } = fmtPipelineRow(e);
@@ -1767,13 +1768,13 @@ export default function AdminPage() {
               {logMode === "pipeline" && pipelineStats && (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
                   {([
-                    { label: "Total Queries",    value: (pipelineStats.event_counts?.["query_end"] ?? 0).toLocaleString(),      color: "#22c55e" },
-                    { label: "Judge Pass Rate",  value: pipelineStats.judge_pass_rate != null ? `${(pipelineStats.judge_pass_rate * 100).toFixed(1)}%` : "—", color: "#a855f7" },
-                    { label: "Judge Passes",     value: (pipelineStats.judge_pass ?? 0).toLocaleString(),                        color: "#3b82f6" },
-                    { label: "Judge Failures",   value: (pipelineStats.judge_fail ?? 0).toLocaleString(),                        color: "#ef4444" },
-                    { label: "Routing Events",   value: (pipelineStats.event_counts?.["routing"]   ?? 0).toLocaleString(),      color: "#f59e0b" },
-                    { label: "Ingestion Events", value: (pipelineStats.event_counts?.["ingestion"] ?? 0).toLocaleString(),      color: "#06b6d4" },
-                    { label: "Alerts Fired",     value: (pipelineStats.event_counts?.["alert"]     ?? 0).toLocaleString(),      color: "#ef4444" },
+                    { label: t("admin.logs_total_queries"),    value: (pipelineStats.event_counts?.["query_end"] ?? 0).toLocaleString(),      color: "#22c55e" },
+                    { label: t("admin.logs_judge_pass_rate"),  value: pipelineStats.judge_pass_rate != null ? `${(pipelineStats.judge_pass_rate * 100).toFixed(1)}%` : "—", color: "#a855f7" },
+                    { label: t("admin.logs_judge_passes"),     value: (pipelineStats.judge_pass ?? 0).toLocaleString(),                        color: "#3b82f6" },
+                    { label: t("admin.logs_judge_failures"),   value: (pipelineStats.judge_fail ?? 0).toLocaleString(),                        color: "#ef4444" },
+                    { label: t("admin.logs_routing_events"),   value: (pipelineStats.event_counts?.["routing"]   ?? 0).toLocaleString(),      color: "#f59e0b" },
+                    { label: t("admin.logs_ingestion_events"), value: (pipelineStats.event_counts?.["ingestion"] ?? 0).toLocaleString(),      color: "#06b6d4" },
+                    { label: t("admin.logs_alerts_fired"),     value: (pipelineStats.event_counts?.["alert"]     ?? 0).toLocaleString(),      color: "#ef4444" },
                   ]).map(s => (
                     <div key={s.label} style={{ ...S.card, padding: "14px 16px" }}>
                       <div style={{ fontSize: 20, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
@@ -1792,9 +1793,9 @@ export default function AdminPage() {
             {/* Aggregate stats bar */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
               {[
-                { label: "Active Sessions", value: monitorAggregates.active_count || 0, color: "#3b82f6" },
-                { label: "Throughput / min", value: monitorAggregates.throughput_per_min || 0, color: "#22c55e" },
-                { label: "Errors (5 min)", value: monitorAggregates.errors_5min || 0, color: monitorAggregates.errors_5min > 0 ? "#ef4444" : "#64748b" },
+                { label: t("admin.monitor_active_sessions"), value: monitorAggregates.active_count || 0, color: "#3b82f6" },
+                { label: t("admin.monitor_throughput"), value: monitorAggregates.throughput_per_min || 0, color: "#22c55e" },
+                { label: t("admin.monitor_errors"), value: monitorAggregates.errors_5min || 0, color: monitorAggregates.errors_5min > 0 ? "#ef4444" : "#64748b" },
               ].map(m => (
                 <div key={m.label} style={{ ...S.card, padding: "14px 18px", display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ width: 8, height: 8, borderRadius: "50%", background: m.color, flexShrink: 0 }} />
@@ -1811,11 +1812,11 @@ export default function AdminPage() {
               <div style={{ ...S.card, maxHeight: 480, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 <div style={{ padding: "12px 16px", borderBottom: "1px solid hsl(var(--border))", fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))", display: "flex", alignItems: "center", gap: 8 }}>
                   <Radio size={14} className="animate-pulse" style={{ color: "#3b82f6" }} />
-                  Active ({monitorActive.length})
+                  {t("admin.monitor_active_count", { count: monitorActive.length })}
                 </div>
                 <div style={{ flex: 1, overflowY: "auto", padding: 8 }}>
                   {monitorActive.length === 0 ? (
-                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>No active sessions</div>
+                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>{t("admin.monitor_no_sessions")}</div>
                   ) : monitorActive.map((s: any) => (
                     <div key={s.session_id} style={{ padding: "10px 12px", borderRadius: 8, marginBottom: 6, background: "hsl(var(--background))", border: "1px solid hsl(var(--border))" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -1834,11 +1835,11 @@ export default function AdminPage() {
               {/* Activity Feed */}
               <div style={{ ...S.card, maxHeight: 480, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 <div style={{ padding: "12px 16px", borderBottom: "1px solid hsl(var(--border))", fontSize: 13, fontWeight: 600, color: "hsl(var(--foreground))" }}>
-                  Activity Feed
+                  {t("admin.monitor_activity_feed")}
                 </div>
                 <div style={{ flex: 1, overflowY: "auto", fontFamily: "monospace", fontSize: 11 }}>
                   {monitorRecent.length === 0 ? (
-                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>No activity yet</div>
+                    <div style={{ fontSize: 12, color: "hsl(var(--muted-foreground))", textAlign: "center", padding: 24 }}>{t("admin.monitor_no_activity")}</div>
                   ) : monitorRecent.slice().reverse().map((ev: any, i: number) => {
                     const ts = new Date(ev.ts * 1000).toLocaleTimeString();
                     const statusIcon = ev.event === "complete" ? (ev.success ? "\u2705" : "\u274C") : ev.event === "start" ? "\u25B6\uFE0F" : "\u23E9";
@@ -2054,12 +2055,12 @@ export default function AdminPage() {
                 </div>
                 <div>
                   <div style={{ fontSize: 16, fontWeight: 800, color: "#fff", letterSpacing: "-0.01em" }}>
-                    {emailTarget ? `Message to ${emailTarget.username}` : "Broadcast Message"}
+                    {emailTarget ? t("admin.email_message_to", { username: emailTarget.username }) : t("admin.email_broadcast_title")}
                   </div>
                   <div style={{ fontSize: 11, color: "rgba(148,163,184,0.9)", marginTop: 2 }}>
                     {emailTarget
-                      ? `Sending to ${emailTarget.email}`
-                      : `${users.length} recipient${users.length !== 1 ? "s" : ""} · All users`}
+                      ? t("admin.email_sending_to", { email: emailTarget.email })
+                      : t("admin.email_recipients", { count: users.length })}
                   </div>
                 </div>
               </div>
