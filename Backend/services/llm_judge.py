@@ -19,6 +19,7 @@ import json
 import requests
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from prompt_loader import load_prompt_template
 
 # ── Load .env so CF_API_KEY is always available ─────────────────────────────
 try:
@@ -218,52 +219,7 @@ class LLMJudge:
                 f"The document language is IRRELEVANT — always match the user's query language."
             )
 
-        return f"""You are a response planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom, DeepTwin AI). Users are professionals in BTP/construction and telecom asking questions about their uploaded technical documents.
-
-QUERY: {user_query}
-{docs_section}
-{history_section}
-{lang_hint}
-
-Analyse the query and the document excerpts above, then output a JSON plan.
-
-LANGUAGE RULE (CRITICAL — HIGHEST PRIORITY):
-- Mirror the query language EXACTLY. If query is in French → "fr". Arabic → "ar". English → "en".
-- If user explicitly requests a different output language, use that instead.
-- The documents may be in a different language — IGNORE their language. The user's language is what matters.
-- Set target_language_confidence to 0.9+ when language is clear from query content.
-- NEVER let the document language influence target_language. Only the user's query matters.
-
-DIRECTNESS RULE:
-- Set approach to describe HOW to answer this specific question, not generic advice.
-- If the query is a simple factual question ("who is X", "what is the value of Y"), set response_style="concise" and max_response_length="brief".
-- If the query asks to summarize or list many things, set response_style="detailed" and max_response_length="comprehensive".
-- If the query asks for comparison or analysis, set response_style="technical".
-
-KEY POINTS RULE:
-- key_points_to_include must list the ACTUAL specific things the user wants to know, based on the query and documents above. Not generic placeholders.
-- Example for "what type of maps are in this file?": ["list each map type mentioned", "describe what each map is used for", "include any associated values or zones"]
-- Example for "what is the host company?": ["state the company name directly", "include any relevant contact or project details if present"]
-- Example for "summarize this file": ["main subject and purpose of document", "key technical parameters and values", "standards or norms referenced", "project location and context"]
-
-SOURCE CITATION RULE:
-- should_cite_sources = true for ANY question about document content (facts, values, names, specs, descriptions).
-- should_cite_sources = false ONLY for: pure translation requests, greetings, or small talk.
-
-Respond ONLY with this JSON:
-{{
-  "target_language": "<ISO 639-1 code>",
-  "target_language_confidence": 0.0-1.0,
-  "target_tone": "casual|friendly|professional|technical|conversational",
-  "tone_reasoning": "one sentence",
-  "response_style": "concise|detailed|bullet_points|narrative|technical",
-  "should_cite_sources": true|false,
-  "max_response_length": "brief|medium|comprehensive",
-  "key_points_to_include": ["specific point 1", "specific point 2"],
-  "things_to_avoid": ["thing 1"],
-  "approach": "concrete description of how to answer THIS specific question",
-  "reasoning": "one sentence of overall reasoning"
-}}"""
+        return load_prompt_template("judge_planning_prompt", user_query=user_query, docs_section=docs_section, history_section=history_section, lang_hint=lang_hint)
     
     def _build_evaluation_prompt(
         self,
@@ -282,41 +238,7 @@ Respond ONLY with this JSON:
             ])
             docs_section = f"\n\nALL SOURCE DOCUMENTS (same context the answer was generated from):\n{docs_formatted}"
 
-        return f"""You are a response evaluator for Bimlo Copilot. Your job is to verify quality, NOT to be maximally strict.
-
-QUERY: {user_query}
-PLAN: language={plan.target_language}, tone={plan.target_tone}, style={plan.response_style}, length={plan.max_response_length}
-RESPONSE:
-{generated_response}
-{docs_section}
-
-CHECK these criteria:
-1. Does it answer what was asked? (direct answer, not generic background)
-2. Language: is the response in {plan.target_language}? If not, set language_correct=false.
-3. Hallucination: does the response contain claims that CONTRADICT or are COMPLETELY INVENTED beyond what the documents say?
-   - If a claim is plausible and could reasonably come from the documents even if you can't find the exact sentence, do NOT flag it.
-   - Only flag clear fabrications: specific numbers, names, dates, or facts that are provably wrong or completely absent.
-   - When in doubt, give the benefit of the doubt — the answer saw the same documents you see above.
-4. Length: is it reasonable for the question? (brief questions deserve brief answers)
-5. Sources: are key facts from the documents included?
-
-SCORING: A response that answers the question correctly and in the right language should score 0.7+. Only score below 0.5 if there are clear, provable problems.
-
-Respond ONLY with this JSON:
-{{
-  "plan_adherence_score": 0.0-1.0,
-  "language_correct": true|false,
-  "tone_correct": true|false,
-  "has_hallucination": true|false,
-  "hallucination_details": "specific fabricated claim, or null",
-  "uses_sources_correctly": true|false,
-  "overall_score": 0.0-1.0,
-  "is_acceptable": true|false,
-  "issues": ["issue 1"],
-  "specific_problems": ["concrete problem 1"],
-  "how_to_fix": "specific actionable instruction for retry",
-  "reasoning": "one sentence"
-}}"""
+        return load_prompt_template("judge_evaluation_prompt", user_query=user_query, target_language=plan.target_language, target_tone=plan.target_tone, response_style=plan.response_style, max_response_length=plan.max_response_length, generated_response=generated_response, docs_section=docs_section)
     
     def _call_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 500,
                   system_prompt: str = "", history: Optional[List[Dict]] = None,

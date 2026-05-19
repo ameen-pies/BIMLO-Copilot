@@ -55,6 +55,7 @@ import json
 import time
 import requests
 from typing import Any, Dict, List, Optional, Tuple
+from prompt_loader import load_prompt, load_prompt_template
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -447,12 +448,7 @@ class GraphAgent:
                 '\nFor scatter charts, "data" must be a list of {"x": number, "y": number} objects.'
             )
 
-        system = (
-            "You are a data extraction specialist for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, "
-            "a company specialising in BIM engineering, telecom infrastructure, and DeepTwin AI. "
-            "Your job is to read document text and extract structured numerical data for chart generation. "
-            "You return ONLY valid JSON — no markdown, no explanation, no backticks."
-        )
+        system = load_prompt("graph_extract_data_system")
 
         prompt = f"""The user wants a {chart_type} chart. Their request: "{query}"{axes_instruction}
 
@@ -904,10 +900,7 @@ DOCUMENTS:
         context = self._build_context(chunks, max_chars_per_chunk=2000)
         files_str = "\n".join(f"- {f}" for f in available_files)
 
-        system = (
-            "You are a data analyst for Bimlo Copilot. "
-            "You return ONLY valid JSON — no markdown, no explanation, no backticks."
-        )
+        system = load_prompt("graph_discover_file_groups_system")
 
         prompt = f"""The user wants a chart but hasn't specified which file to use.
 Available files:
@@ -989,11 +982,7 @@ DOCUMENTS:
         """
         context = self._build_context(chunks, max_chars_per_chunk=4000)
 
-        system = (
-            "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
-            "You help users choose what to chart from their BIM, construction, or telecom documents. "
-            "You return ONLY valid JSON — no markdown, no explanation, no backticks."
-        )
+        system = load_prompt("graph_discover_metric_groups_system")
 
         prompt = f"""The user asked: "{query}"
 
@@ -1090,12 +1079,7 @@ DOCUMENTS:
             data_lines.append(f"  {series_name}: {pairs}")
         data_summary = "\n".join(data_lines)
 
-        system = (
-            "You are a data analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
-            "(BIM engineering, telecom infrastructure, DeepTwin AI). "
-            "You give sharp, specific insights relevant to BTP/construction and telecom professionals — not generic observations. "
-            "Respond in plain prose with no markdown, no bullet points."
-        )
+        system = load_prompt("graph_interpret_chart_system")
 
         prompt = f"""Chart title: "{title}"
 User request: "{query}"
@@ -1376,10 +1360,7 @@ GRAPH_NODE_METHOD = '''
             f"Document context:\n{context_text}"
         )
 
-        sys_prompt = (
-            f"You are a helpful document assistant. Answer the user\'s question in "
-            f"{plan.target_language} with a {plan.target_tone} tone. Be concise and direct."
-        )
+        sys_prompt = load_prompt_template("graph_narrative_system", target_language=plan.target_language, target_tone=plan.target_tone)
 
         messages = [
             {"role": "system", "content": sys_prompt},

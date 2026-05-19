@@ -62,6 +62,9 @@ from reportlab.platypus import (
 from reportlab.platypus import Frame, PageTemplate
 from reportlab.lib.utils import ImageReader
 
+from prompt_loader import load_prompt, load_prompt_template
+
+
 # ── LLM client (shared with all other agents) ─────────────────────────────────
 try:
     from llm_client import call_llm
@@ -1027,13 +1030,7 @@ def _generate_report_content(
     docs_hint    = ", ".join(explicit_docs) if explicit_docs else ", ".join(available_docs[:8])
 
     # ── Step 0: Detect intent ─────────────────────────────────────────────────
-    intent_system = (
-        "You are a report planner for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE, "
-        "a company specialising in BIM engineering (3D–7D digital models), Scan to BIM, BIM 4D construction planning, "
-        "telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins. "
-        "Extract exactly what the user wants in their report. "
-        "Respond ONLY in valid JSON — no markdown fences, no preamble."
-    )
+    intent_system = load_prompt("report_intent_system")
     intent_prompt = (
         f'User request: "{prompt}"\n\n'
         'Return JSON:\n'
@@ -1062,14 +1059,7 @@ def _generate_report_content(
     report_type       = intent.get("report_type", "analysis")
 
     # ── Step 1: Plan sections ─────────────────────────────────────────────────
-    plan_system = (
-        "You are an expert analyst for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
-        "(BIM engineering, telecom infrastructure, DeepTwin AI). "
-        "Plan a professional report structure tailored to BTP/construction and telecom professionals. "
-        "Every planned section MUST be answerable from the provided document excerpts. "
-        "Do NOT plan sections that require information not in the documents. "
-        "Respond ONLY in valid JSON — no markdown fences, no preamble."
-    )
+    plan_system = load_prompt("report_plan_system")
 
     lang_directive = (
         f"The report MUST be written in {detected_language}."
@@ -1145,16 +1135,7 @@ def _generate_report_content(
     # Refine the title with a dedicated focused LLM call — the planner often
     # echoes back the user's prompt; this single-purpose call produces a clean,
     # editorial title.
-    _title_system = (
-        "You generate short, specific report titles. "
-        "Rules: 4–8 words, Title Case, NO quotes, NO punctuation at end. "
-        "Must name the real subject/entity/metric from the documents. "
-        "NEVER start with 'Report', 'Analysis', or 'Summary'. "
-        "NEVER just reword the user's request. "
-        "Good examples: 'Telecom Site Survey Field Results', "
-        "'Network Infrastructure Cost Breakdown 2024', 'Customer Churn Drivers — Prepaid'. "
-        "Reply with ONLY the title."
-    )
+    _title_system = load_prompt("report_title_system")
     _title_prompt = (
         f"Report request: \"{prompt}\"\n"
         f"Document(s): {docs_hint or 'various'}\n"
@@ -1168,16 +1149,11 @@ def _generate_report_content(
     source_docs = explicit_docs if explicit_docs else plan.get("source_docs", [])
 
     # ── Step 2: Generate each section ─────────────────────────────────────────
-    section_system = (
-        f"You are a technical writer for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE "
-        f"(BIM engineering, telecom infrastructure, DeepTwin AI). "
-        f"You are producing a {report_type} in {detected_language} for professionals in BTP/construction and telecom. "
-        "CRITICAL RULE: Write ONLY what is directly supported by the provided document excerpts. "
-        "If a fact is not in the excerpts, do NOT include it. "
-        "Cite the source document name when you use specific data. "
-        "Use markdown. Be specific: use exact numbers, names, and dates from the sources."
-        + (f" You MUST only draw from these files: {', '.join(explicit_docs)}." if explicit_docs else "")
-    )
+    section_system = load_prompt_template(
+        "report_section_system",
+        report_type=report_type,
+        detected_language=detected_language,
+    ) + (f" You MUST only draw from these files: {', '.join(explicit_docs)}." if explicit_docs else "")
 
     sections_md: List[str] = []
 
@@ -1416,16 +1392,7 @@ def _generate_report_content(
         else ", ".join(source_docs[:-1]) + f", and {source_docs[-1]}"
     ) if source_docs else "your documents"
 
-    summary_system = (
-        "You are Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI). "
-        "You are a sharp, friendly assistant delivering a report to its requester. "
-        "You write like a knowledgeable colleague handing over a finished piece of work — "
-        "direct, warm, specific. No corporate fluff, no hollow filler. "
-        "Never use phrases like 'valuable insights', 'comprehensive examination', "
-        "'notable findings', 'delve into', or 'it is worth noting'. "
-        "Never start with 'I have generated' or 'The report contains'. "
-        "Start with 'Here's' or a direct reference to what's inside."
-    )
+    summary_system = load_prompt("report_summary_system")
 
     summary_prompt = (
         f'The user asked: "{prompt}"\n\n'
@@ -1728,12 +1695,7 @@ async def patch_report(report_id: str, req: PatchReportRequest):
     chunks  = SharedContext.get_chunks(sid)
     context = _build_context(chunks)
 
-    system = (
-        "You are an expert technical writer. "
-        "You receive an existing report in Markdown and an edit instruction. "
-        "Apply the instruction precisely and return ONLY the full updated Markdown. "
-        "Preserve all section headings and overall structure unless the instruction explicitly says to change them."
-    )
+    system = load_prompt("report_patch_system")
 
     prompt = (
         f'Existing report:\n"""\n{report["content"]}\n"""\n\n'

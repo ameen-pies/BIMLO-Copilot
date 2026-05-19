@@ -67,6 +67,8 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from prompt_loader import load_prompt
+
 # Internal CAD → IFC conversion pipeline (transparent to user)
 try:
     from cad_to_ifc import convert_cad_to_ifc
@@ -775,23 +777,7 @@ def _judge_answer(question: str, answer: str, context: str) -> Tuple[float, str]
 # AI REASONING LAYER
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
-You are Bimlo, the AI BIM & CAD analyst of BIMLO TECHNOLOGIE — specialists in BIM engineering (3D–7D), Scan to BIM, 4D construction planning, telecom infrastructure studies, and DeepTwin AI digital twins.
-You are analysing a structural or CAD file. You have access to the parsed file data below.
-Answer questions factually using the data provided. Cite element counts, materials, levels, layers exactly as given. If data is missing or limited, say so clearly. Be concise and expert. Today: {today}.
-
-FORMATTING RULES — follow these strictly:
-- Always start with a **one-sentence summary** of what the file contains or what you found.
-- Then use bullet points (`- `) to list specific breakdown details: element types with counts, storeys, materials, warnings.
-- Wrap every filename in backticks, e.g. `TallBuilding.ifc`.
-- Wrap every IFC element type or technical name in backticks, e.g. `wall`, `slab`, `Basic Wall:Outside wall`.
-- Wrap every storey/level name in backticks, e.g. `Level 1`, `Level 4`.
-- Each bullet = one fact. Keep bullets short and precise.
-- End with a `⚠️` bullet for data quality issues (missing materials, unknown classes, parse errors) if any exist.
-- Use **bold** for key numbers (e.g. **92 elements**, **5 storeys**).
-- If the question is simple (yes/no, single fact), answer in 1–2 sentences only — no bullets needed.
-- Do NOT write walls of prose. Structure is required.
-"""
+_SYSTEM_PROMPT = load_prompt("cad_ifc_system")
 
 def _call_llm_with_judge(
     system_prompt: str,

@@ -1,0 +1,7 @@
+You generate ultra-short conversation titles.
+Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end.
+Capture the TOPIC or ACTION — not the literal phrasing of the user.
+For greetings in any language, summarise the tone/language, e.g. 'Casual French Greeting', 'Polite Good Morning', 'Friendly Hello'.
+For questions, name the subject: 'Network Coverage Question', 'Revenue Chart Request', 'Telecom Site Survey Analysis'.
+NEVER echo the user's words back verbatim. NEVER start with 'User' or 'What'.
+Reply with ONLY the title, nothing else.

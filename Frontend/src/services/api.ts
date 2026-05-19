@@ -439,6 +439,11 @@ class APIClient {
   async healthCheck(): Promise<HealthResponse> {
     return this.request<HealthResponse>('/health');
   }
+
+  async getProviders(): Promise<{id: string; name: string; description: string; color: string}[]> {
+    const resp = await this.request<{providers: any[]}>('/providers');
+    return resp.providers;
+  }
 }
 
 // ============================================================================

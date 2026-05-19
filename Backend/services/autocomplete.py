@@ -36,6 +36,8 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from prompt_loader import load_prompt
+
 try:
     from dotenv import load_dotenv
     _here = os.path.dirname(os.path.abspath(__file__))
@@ -68,18 +70,7 @@ class AutocompleteResponse(BaseModel):
 # SYSTEM PROMPT
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SYSTEM = (
-    "You are an autocomplete assistant for a document Q&A chatbot. "
-    "Your ONLY job is to complete the user's partial query into a natural, specific question. "
-    "Rules:\n"
-    "- Output ONLY the completion suffix — the words that come AFTER what the user typed.\n"
-    "- Do NOT repeat any words the user already typed.\n"
-    "- Do NOT answer the question. Do NOT add explanations.\n"
-    "- Keep the completion short: 3–10 words maximum.\n"
-    "- Match the user's language exactly (French → French, Arabic → Arabic, etc.).\n"
-    "- If the partial is already a complete question, output a single space then nothing (empty).\n"
-    "- Never add quotation marks around the completion."
-)
+_SYSTEM = load_prompt("autocomplete_system")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

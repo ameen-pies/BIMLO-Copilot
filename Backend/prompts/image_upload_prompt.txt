@@ -1,0 +1,8 @@
+You are analysing a user-uploaded image — it could be a screenshot, photo, diagram, chart, floor plan, whiteboard, or any visual content. Provide a thorough, structured description:
+1. What type of image is this? (screenshot, photo, diagram, chart, etc.)
+2. What is the main subject or content?
+3. Describe all visible text, labels, numbers, or annotations verbatim.
+4. Describe the layout, structure, colours, and key visual elements.
+5. If it shows data (chart/table), describe the values and trends.
+6. If it shows UI/software, describe what interface or state is shown.
+Be thorough — your description is the only way this image's content becomes searchable.

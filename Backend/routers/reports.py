@@ -10,6 +10,7 @@ from core.globals import (
 )
 from core.session_state import get_history, append_turn, get_route_log, log_route
 from services.report_agent import SharedContext
+from prompt_loader import load_prompt
 
 router = APIRouter(tags=["reports"])
 
@@ -27,25 +28,10 @@ async def generate_title(request: dict):
             f"{'User' if m.get('role') == 'user' else 'Assistant'}: {str(m.get('content', ''))[:150]}"
             for m in messages[:6]
         )
-        system = (
-            "You generate ultra-short conversation titles. "
-            "Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end. "
-            "Capture the TOPIC or ACTION — not the literal phrasing of the user. "
-            "For greetings in any language, summarise the tone/language, e.g. 'Casual French Greeting', 'Polite Good Morning', 'Friendly Hello'. "
-            "For questions, name the subject: 'Network Coverage Question', 'Revenue Chart Request', 'Telecom Site Survey Analysis'. "
-            "NEVER echo the user's words back verbatim. NEVER start with 'User' or 'What'. "
-            "Reply with ONLY the title, nothing else."
-        )
+        system = load_prompt("title_chat_system")
         prompt = f"Conversation:\n{excerpt}\n\nTitle:"
     else:
-        system = (
-            "You generate short, specific report titles. "
-            "Rules: 4-8 words, Title Case, NO quotes, NO punctuation at the end. "
-            "Must name the real subject/entity/metric — never start with 'Report', 'Analysis', 'Summary'. "
-            "Good: 'Telecom Site Survey Field Results', 'Network Infrastructure Cost Breakdown', 'Q3 Revenue by Region'. "
-            "Bad: 'Report on telecom_site_survey.txt', 'Analysis of the document', 'Summary Report'. "
-            "Reply with ONLY the title, nothing else."
-        )
+        system = load_prompt("title_report_system")
         prompt = f"Report request: \"{text}\"\n\nTitle:"
 
     try:
@@ -156,20 +142,7 @@ async def report_intent_check(request: dict):
         return None
 
     try:
-        system = (
-            "You are an intent and entity classifier for a document Q&A assistant. "
-            "Reply with ONLY a raw JSON object — no markdown fences, no explanation whatsoever. "
-            'Exact format: {"wants_report": true, "mentioned_files": ["filename.pdf"]} '
-            "Set wants_report=true ONLY when the user explicitly asks for a report, document, "
-            "summary document, or structured written output to download or read later. "
-            "TRUE examples: 'make a report on X', 'generate a report about X', "
-            "'create a PDF report', 'write a document summarising Y', 'do a report on file Z'. "
-            "FALSE examples: plain questions, 'what is X?', 'show me a chart', 'summarise this' "
-            "(quick summary, not a standalone document). "
-            "mentioned_files: list any filenames or file references the user typed. "
-            "Use partial names too (e.g. 'survey' if they said 'the survey file'). "
-            "Return [] if no files mentioned."
-        )
+        system = load_prompt("report_intent_classifier_system")
         doc_list = ", ".join(available_docs[:15]) if available_docs else "(none uploaded)"
         prompt = (
             f"Available documents: {doc_list}\n\n"

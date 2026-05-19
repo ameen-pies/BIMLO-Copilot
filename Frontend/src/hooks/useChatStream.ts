@@ -102,9 +102,9 @@ export function useChatStream(options: {
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const inputAreaRef = useRef<HTMLDivElement>(null);
 
-  type ModelProvider_type = "cf_primary" | "cf_backup" | "groq" | "nvidia";
-  const [selectedModel, setSelectedModel] = useState<ModelProvider_type>("cf_primary");
-  const selectedModelRef = useRef<ModelProvider_type>("cf_primary");
+  type ModelOption = { id: string; label: string; shortLabel: string; desc: string; color: string };
+  const [selectedModel, setSelectedModel] = useState<string>("cf_primary");
+  const selectedModelRef = useRef<string>("cf_primary");
   useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
 
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -120,12 +120,23 @@ export function useChatStream(options: {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const MODEL_OPTIONS: { id: ModelProvider_type; label: string; shortLabel: string; desc: string; color: string }[] = [
-    { id: "cf_primary",  label: "Cloudflare Primary",  shortLabel: "CF Primary",  desc: "Primary Cloudflare Workers AI",    color: "#f97316" },
-    { id: "cf_backup",   label: "Cloudflare Backup",   shortLabel: "CF Backup",   desc: "Backup Cloudflare Workers AI",     color: "#3b82f6" },
-    { id: "groq",        label: "Groq",                shortLabel: "Groq",        desc: "Groq (llama-3.3-70b-versatile)",   color: "#10b981" },
-    { id: "nvidia",      label: "MiniMax M2.7",         shortLabel: "MiniMax",     desc: "MiniMax M2.7 via NVIDIA NIM",      color: "#76b900" },
-  ];
+  const [MODEL_OPTIONS, setMODEL_OPTIONS] = useState<ModelOption[]>([]);
+  useEffect(() => {
+    import("@/services/api").then(m => m.default.getProviders()).then(providers => {
+      setMODEL_OPTIONS(providers.map(p => ({
+        id: p.id,
+        label: p.name,
+        shortLabel: p.name.split(" ").slice(0, 2).join(" "),
+        desc: p.description,
+        color: p.color,
+      })));
+    }).catch(err => {
+      console.error("[Stream] Failed to load providers:", err);
+      setMODEL_OPTIONS([
+        { id: "cf_primary", label: "Cloudflare Primary", shortLabel: "CF Primary", desc: "fast", color: "#f97316" },
+      ]);
+    });
+  }, []);
 
   useEffect(() => {
     if (isLoading) {
@@ -319,6 +330,19 @@ export function useChatStream(options: {
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: crypto.randomUUID?.() ?? `msg-${Date.now()}`,
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { }
@@ -424,6 +448,19 @@ export function useChatStream(options: {
                 timestamp:   new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: crypto.randomUUID?.() ?? `msg-${Date.now()}`,
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { }
@@ -502,6 +539,19 @@ export function useChatStream(options: {
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: crypto.randomUUID?.() ?? `msg-${Date.now()}`,
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { }

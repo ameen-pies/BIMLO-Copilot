@@ -13,6 +13,8 @@ from core.session_state import (
     commit_pending_docs,
 )
 from services.report_agent import SharedContext
+from services.llm_client import AllProvidersRateLimited
+from prompt_loader import load_prompt
 
 router = APIRouter(tags=["chat"])
 
@@ -28,15 +30,7 @@ def _generate_chat_title(session_id: str, messages: list) -> str:
         f"{'User' if m.get('role') == 'user' else 'Assistant'}: {str(m.get('content', ''))[:150]}"
         for m in messages[:6]
     )
-    system = (
-        "You generate ultra-short conversation titles. "
-        "Rules: 3-6 words, Title Case, NO quotes, NO punctuation at the end. "
-        "Capture the TOPIC or ACTION — not the literal phrasing of the user. "
-        "For greetings, summarise the tone/language. "
-        "For questions, name the subject. "
-        "NEVER echo the user's words back verbatim. "
-        "Reply with ONLY the title, nothing else."
-    )
+    system = load_prompt("title_chat_system")
     prompt = f"Conversation:\n{excerpt}\n\nTitle:"
 
     try:
@@ -196,6 +190,8 @@ async def query_documents(
             session_id=session_id,
             chat_title=chat_title,
         )
+    except AllProvidersRateLimited:
+        raise HTTPException(429, detail={"error": "rate_limited", "message": "All LLM providers are rate-limited. Please change model or retry later."})
     except Exception as e:
         print(f"\u274c Query error: {e}")
         raise HTTPException(500, f"Error processing query: {e}")
@@ -400,6 +396,9 @@ async def query_stream(
                 "chat_title":   chat_title,
             }
             q.put({"type": "result", "session_id": session_id, **safe_result})
+        except AllProvidersRateLimited:
+            if not cancel_event.is_set():
+                q.put({"type": "error", "error_type": "rate_limited", "message": "All LLM providers are rate-limited. Please change model or retry later."})
         except Exception as e:
             import traceback as _tb
             _tb.print_exc()

@@ -45,6 +45,8 @@ from typing import Dict, List, Literal, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
 
+from prompt_loader import load_prompt
+
 logger = logging.getLogger("intent_classifier")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -153,14 +155,7 @@ _cache = _BoundedCache(256)
 # LLM prompt templates  (unchanged content, just organised here)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_CLASSIFIER_SYSTEM = """\
-You are an expert intent classifier for Bimlo Copilot — the AI assistant of BIMLO TECHNOLOGIE.
-Users are BIM engineers, telecom infrastructure specialists, and construction (BTP) professionals.
-They upload technical documents (PDF specs, IFC models, study reports, telecom notes) and ask questions in any language.
-
-Your job: deeply analyse the user's intent with chain-of-thought reasoning, then output a structured JSON object.
-No hallucinating. If unsure, set ambiguity_score high and confidence low.
-"""
+_CLASSIFIER_SYSTEM = load_prompt("classifier_system")
 
 _CLASSIFIER_PROMPT_TEMPLATE = """\
 Analyse the following query in the context of the conversation history and output a JSON intent analysis.

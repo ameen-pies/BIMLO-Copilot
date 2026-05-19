@@ -10,6 +10,7 @@ import { ChartClarification, ChartMessage, ClarificationOptions } from "@/compon
 import { renderContent } from "@/components/chat/chatRenderers";
 import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import TypewriterText from "@/components/TypewriterText";
+import RateLimitCard from "@/components/chat/RateLimitCard";
 import { Message, ThinkingStep, Conversation, ReportRecord, createUniqueId } from "@/pages/chatTypes";
 import { Source } from "@/services/api";
 // Icons
@@ -44,6 +45,7 @@ interface ChatMessageListProps {
   thinkingSteps: ThinkingStep[];
   thinkingExpanded: boolean;
   setThinkingExpanded: (v: boolean) => void;
+  setModelDropdownOpen?: (v: boolean) => void;
   showNotifyBanner: boolean;
   conversations: Conversation[];
   reports: ReportRecord[];
@@ -66,6 +68,10 @@ interface ChatMessageListProps {
   handleEditCancel: () => void;
   handleRedo: (msgId: string) => Promise<void>;
   openDocumentAtExcerpt: (filename: string, excerpt: string) => void;
+  reports?: ReportRecord[];
+  activeReport?: ReportRecord | null;
+  handleDownloadReport?: (report: ReportRecord, fmt?: "pdf" | "md") => void;
+  downloadingReportId?: string | null;
   setMessages: (v: Message[] | ((prev: Message[]) => Message[])) => void;
   setThinkingSteps: (v: ThinkingStep[]) => void;
   setSuggestions: (v: string[]) => void;
@@ -122,6 +128,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   handleEditCancel,
   handleRedo,
   openDocumentAtExcerpt,
+  handleDownloadReport,
+  downloadingReportId,
   setMessages,
   setThinkingSteps,
   setSuggestions,
@@ -346,7 +354,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   </button>
                 )}
 
-                  {msg.role === "assistant" && msg.id === typingMessageId && !msg.content && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
+                  {msg.role === "assistant" && msg.isRateLimit ? (
+                    <RateLimitCard
+                      onRetry={() => {/* retry logic handled by parent */}}
+                      onOpenModelSelector={() => setModelDropdownOpen(true)}
+                    />
+                  ) : msg.role === "assistant" && msg.id === typingMessageId && !msg.content && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
                     /* ── Empty placeholder: invisible until real content arrives ── */
                     <span className="sr-only" />
                   ) : msg.role === "assistant" && msg.id === typingMessageId && (msg.rawAnswer || msg.content) && !(msg.analytics?.type === "chart_config" || msg.analytics?.type === "chart_error" || msg.analytics?.type === "chart_clarification" || msg.analytics?.type === "report_chart_clarification") ? (
@@ -680,9 +693,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     <div className="mt-2">
                       <ReportCard
                         report={rpt}
+                        reportId={msg.reportId}
                         inlineTitle={msg.reportTitle}
                         inlineMeta={msg.reportMeta}
                         isLoading={msg.reportGenerating === true && !msg.reportTitle}
+                        reports={reports}
+                        downloadingReportId={downloadingReportId}
+                        onActivate={r => { if (r) { setActiveReport?.(r); } }}
+                        onDownload={handleDownloadReport ? (r, fmt) => handleDownloadReport(r, fmt) : undefined}
                       />
                     </div>
                   );

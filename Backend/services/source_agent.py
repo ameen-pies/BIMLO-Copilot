@@ -65,6 +65,8 @@ import json
 import time
 from typing import Dict, List, Optional, Tuple
 
+from prompt_loader import load_prompt
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NUMERIC PATTERN  (kept from v10)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,27 +124,7 @@ def _find_overlap(a: str, b: str, max_check: int = 300) -> int:
 # STEP 1 — EXTRACT FACT CHIPS FROM THE AI ANSWER
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CHIP_SYSTEM = """You are a fact-chip extraction assistant.
-
-Given an AI-generated answer, extract every specific data point that has BOTH:
-  - a label (the field/property name)
-  - a value (a concrete number, measurement, or named quantity)
-
-Return a JSON array. Each element:
-{
-  "label"    : "<concise field name, e.g. 'Floors', 'Steel Weight', 'Fiber Length'>",
-  "value"    : "<exact value as stated, e.g. '12', '780 tons', '12.5 km'>",
-  "src_num"  : <N>,         // the [N] citation in the answer
-  "is_numeric": true/false  // true if value contains a digit
-}
-
-Rules:
-- Extract ONE entry per distinct (label, value) pair.
-- Prefer SHORT labels (1–4 words, title-case).
-- Include all numeric measurements, counts, identifiers, and named quantities.
-- Skip vague statements ("the system is efficient") — only concrete data points.
-- If a value is cited multiple times under different [N], emit once per [N].
-- Output ONLY the raw JSON array. No markdown, no explanation."""
+_CHIP_SYSTEM = load_prompt("chip_system")
 
 
 def _extract_fact_chips_from_answer(answer: str) -> List[Dict]:

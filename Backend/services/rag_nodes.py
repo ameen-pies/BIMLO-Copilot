@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 from datetime import datetime
 
 from rag_state import AgentState, MAX_RETRIES
+from prompt_loader import load_prompt, load_prompt_template
 from rag_helpers import (
     _detect_script_language,
     _build_context,
@@ -167,6 +168,7 @@ class RAGNodesMixin:
         # Scale max_tokens with document size — full docs need more room
         doc_len = len(clean_context)
         max_tokens = min(max(2000, doc_len // 2), 8000)
+        target_lang_upper = target_lang.upper()
 
         # ── Map-reduce for large documents ──────────────────────────────
         # If the document is too large for a single LLM call, batch it.
@@ -175,24 +177,7 @@ class RAGNodesMixin:
         BATCH_SIZE = 8  # chunks per batch
 
         def _build_transform_prompt(context: str) -> str:
-            return f"""You are a document assistant. Complete the following task exactly as instructed.
-
-🚨 LANGUAGE: You MUST write your output in {target_lang.upper()}. The document below may be in a different language — IGNORE its language. Your output must be in {target_lang.upper()}.
-
-TASK: {query}
-
-STRUCTURE RULES:
-- The document content below may have lost some formatting due to text extraction. Reconstruct a clean, well-structured document as output.
-- Identify sections, subsections, bullet points, and numbered lists from context clues in the text (e.g. "1.", "2.", "- ", all-caps titles, etc.) and render them properly using markdown: ## for section headings, - for bullets, numbered lists where appropriate.
-- ALL-CAPS phrases that look like section titles (e.g. "EXECUTIVE SUMMARY", "EQUIPMENT SPECIFICATIONS") should become ## headings.
-- Apply the task to the text content only — the structure and layout must be clean and readable in the output.
-- Preserve ALL content from the document. Do not summarize or skip sections.
-- Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
-
-DOCUMENT:
-{context}
-
-REMEMBER: Your entire output MUST be in {target_lang.upper()}. Do not keep any content in the original document language."""
+            return load_prompt_template("rag_transform_prompt", target_lang_upper=target_lang_upper, query=query, context=context)
 
         if doc_len > MAP_REDUCE_THRESHOLD and len(chunks) > BATCH_SIZE:
             # Map-reduce: transform each batch, concatenate results
@@ -686,41 +671,9 @@ SECTION SUMMARIES:
 
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
+        target_lang_upper = target_lang.upper()
 
-        prompt = f"""You are a knowledgeable assistant explaining a concept clearly and thoroughly.
-
-🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The source content below may be in a different language — IGNORE its language. Your answer must be in {target_lang.upper()}.
-
-Language: {target_lang.upper()} | Tone: {plan.target_tone}
-
-TASK: {query}
-
-OUTPUT FORMAT — write three sections separated by blank lines, in this exact order:
-
-SECTION A — Definition (2-3 sentences): A clear, direct definition of the concept. [1]
-
-SECTION B — How it works: Explain the mechanism, key properties, or main aspects. Write as a prose paragraph OR as bullet points (- item) when listing 3+ distinct items. Do NOT number items.
-
-SECTION C — Why it matters (1-2 sentences): Brief note on real-world significance or practical use.
-
-Do NOT label the sections with "SECTION A", "SECTION B", etc. — just write the content directly.
-Do NOT use any numbered lists (1. 2. 3.) anywhere in your response.
-
-CITATION RULES:
-- After every sentence drawn from Source 1 (Wikipedia), add [1].
-- Only cite when you actually used the source. Skip [1] on sentences from pure general knowledge.
-
-STYLE RULES:
-- Use blank lines between each section.
-- **Bold** the first mention of the key term and any critical sub-terms.
-- Use bullet points (- item [1]) when listing 3+ distinct items; prose otherwise.
-- Never write more than 3 consecutive sentences without a line break.
-- Do NOT use ## headings.
-- Output ONLY the explanation — no preamble, no "Here is...", no meta-commentary.
-
-{context_section}
-
-Remember: Answer in {target_lang.upper()}. Your ENTIRE answer must be in {target_lang.upper()}."""
+        prompt = load_prompt_template("rag_define_prompt", target_lang_upper=target_lang_upper, target_tone=plan.target_tone, query=query, context_section=context_section)
 
         if self.llm.enabled:
             answer = self._chat(
@@ -1000,22 +953,9 @@ Remember: Answer in {target_lang.upper()}. Your ENTIRE answer must be in {target
         # ── Synthesise answer from the stored visual description ──────────
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
+        target_lang_upper = target_lang.upper()
 
-        prompt = f"""You are an expert image analyst. You are looking at an image uploaded by the user.
-
-🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. The image details below may be in a different language — IGNORE their language. Your answer must be in {target_lang.upper()}.
-
-Language: {target_lang.upper()} | Tone: {plan.target_tone}
-
-Here is what you can see in the image:
-
-{context}
-
-User question: {query}
-
-Answer as if you are directly looking at the image. Say "I can see..." or "The image shows..." — never mention descriptions, metadata, or that you're reading text about the image.
-Be specific and reference what is visible. If multiple images are present, address each one.
-Remember: Answer in {target_lang.upper()}."""
+        prompt = load_prompt_template("rag_image_prompt", target_lang_upper=target_lang_upper, target_tone=plan.target_tone, context=context, query=query)
 
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]]
 
@@ -1509,26 +1449,7 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
             def _classify_chart_intent(text: str, is_clarif_answer: bool) -> dict:
                 """Ask the LLM what the user means re: charts. Fast, cheap call."""
                 try:
-                    _system = (
-                        "You are a precise intent classifier for a report-generation assistant. "
-                        "The user may write in any language, with typos or abbreviations. "
-                        "Reply with ONLY a raw JSON object — no markdown, no explanation.\n"
-                        'Format: {"wants_charts": bool, "already_specified": bool, "wants_all": bool, "wants_none": bool}\n\n'
-                        "Field definitions:\n"
-                        "  wants_charts: true if the user wants one or more charts/graphs/visuals in their report. "
-                        "    Catch any language or spelling: 'graphe', 'grafico', 'diagramme', 'визуализация', 'رسم بياني', etc.\n"
-                        "  already_specified: true ONLY if the user has named both (a) what metric/data to chart "
-                        "    AND left nothing ambiguous — e.g. 'bar chart of trenching meters', "
-                        "    'camembert des coûts', 'grafico a linee del throughput'. "
-                        "    False if the request is vague like 'include charts' or 'add some graphs'.\n"
-                        "  wants_all: true if this is a clarification answer meaning 'include all charts' "
-                        "    (e.g. 'all of them', 'tous', 'todas', 'كلها', 'все').\n"
-                        "  wants_none: true if this is a clarification answer meaning 'no charts at all' "
-                        "    (e.g. 'no charts', 'sans graphiques', 'sin gráficos', 'بدون مخططات').\n"
-                        f"  is_clarification_answer: {is_clarif_answer} — "
-                        "    set to true context: the system previously asked which charts to include, "
-                        "    and this text is the user's reply to that question."
-                    )
+                    _system = load_prompt_template("rag_chart_intent_system", is_clarif_answer=is_clarif_answer)
                     _prompt = f'User message: """{text}"""'
                     _raw = call_llm(
                         _prompt,

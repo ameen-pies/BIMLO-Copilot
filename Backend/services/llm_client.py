@@ -2,30 +2,16 @@
 llm_client.py — Shared LLM gateway for all Bimlo services
 
 User-selectable providers:
-  "cf_primary"  — Cloudflare Workers AI primary worker
-  "cf_backup"   — Cloudflare Workers AI backup worker
-  "cf_backup2"  — Cloudflare Workers AI third worker
-  "groq"        — Groq API (llama-3.3-70b-versatile / llama-3.1-8b-instant)
-  "nvidia"      — NVIDIA NIM API (minimaxai/minimax-m2.7)
+  Configured in providers.json via provider_manager.
 
 When preferred_provider is set, that provider is tried first. If it fails,
 the call falls through to the standard priority chain so responses are never lost.
 
 Standard priority chain (when no preference is set):
-  1. Cloudflare Workers AI — Primary   (CF_API_KEY  / CF_API_URL)
-  2. Cloudflare Workers AI — Backup    (CF_BACKUP_API_KEY / CF_BACKUP_URL)
-  3. Cloudflare Workers AI — Backup2   (CF_BACKUP2_API_KEY / CF_BACKUP2_URL)
-  4. Groq API                          (GROQ_API_KEY)
+  Driven by provider_manager.get_available_providers() sorted by fallback_order.
 
 Env vars:
-  CF_API_KEY          — primary worker bearer token
-  CF_API_URL          — primary worker URL       (default: bimloapi.medhelaliamin125.workers.dev)
-  CF_BACKUP_URL       — backup worker URL        (default: bimlo.amepies3.workers.dev)
-  CF_BACKUP_API_KEY   — backup worker token      (falls back to CF_API_KEY if omitted)
-  CF_BACKUP2_URL      — third worker URL
-  CF_BACKUP2_API_KEY  — third worker token       (falls back to CF_API_KEY if omitted)
-  GROQ_API_KEY        — Groq last-resort key
-  NVIDIA_API_KEY      — NVIDIA NIM API key (nvapi-...)
+  See providers.json for each provider's api_key_env and fallback_api_key_env.
 """
 
 from __future__ import annotations
@@ -36,21 +22,7 @@ import time
 import requests
 from typing import List, Dict, Optional
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-_CF_DEFAULT_URL      = "https://bimloapi.medhelaliamin125.workers.dev"
-_CF_BACKUP_URL       = "https://bimlo.amepies3.workers.dev/"
-_GROQ_API_URL        = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL_PRIMARY  = "llama-3.3-70b-versatile"
-_GROQ_MODEL_FAST     = "llama-3.1-8b-instant"
-_NVIDIA_API_URL      = "https://integrate.api.nvidia.com/v1/chat/completions"
-_NVIDIA_MODEL        = "minimaxai/minimax-m2.7"
-
-# ── OpenRouter (TEMP — testing only, remove after stress test) ──────────────
-_OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-_OPENROUTER_MODEL   = "openai/gpt-oss-20b:free"
+from provider_manager import provider_manager, ProviderConfig
 
 # ---------------------------------------------------------------------------
 # Circuit breaker — per-provider trip state
@@ -95,9 +67,13 @@ class _CircuitBreaker:
                 return False
             return True
 
-_cb_primary  = _CircuitBreaker("cf_primary")
-_cb_backup   = _CircuitBreaker("cf_backup")
-_cb_backup2  = _CircuitBreaker("cf_backup2")
+# Dynamic circuit breakers keyed by provider id
+_circuit_breakers: Dict[str, _CircuitBreaker] = {}
+
+def _get_breaker(provider_id: str) -> _CircuitBreaker:
+    if provider_id not in _circuit_breakers:
+        _circuit_breakers[provider_id] = _CircuitBreaker(provider_id)
+    return _circuit_breakers[provider_id]
 
 
 def _is_fatal_cf_error(response_text: str) -> bool:
@@ -105,16 +81,18 @@ def _is_fatal_cf_error(response_text: str) -> bool:
     return any(code in response_text for code in _FATAL_CF_CODES)
 
 
+class AllProvidersRateLimited(Exception):
+    """Raised when every available provider has been rate-limited (429)."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Internal: single CF worker call
 # ---------------------------------------------------------------------------
 
 def _call_cf_worker(
-    url: str,
-    api_key: str,
+    provider: ProviderConfig,
     payload: dict,
-    label: str,
-    breaker: "_CircuitBreaker | None" = None,
 ) -> tuple[str | None, str | None]:
     """
     Attempt one CF worker and return the response text on success.
@@ -123,11 +101,20 @@ def _call_cf_worker(
         (text, None)       on success
         (None, reason)     on failure — caller moves to next provider
 
-    If `breaker` is provided and the response contains a fatal quota/auth error
-    code, the breaker is tripped so future calls skip this provider immediately.
+    If the response contains a fatal quota/auth error code, the breaker
+    is tripped so future calls skip this provider immediately.
     """
+    url = provider.api_url
+    api_key = provider_manager.get_api_key(provider)
+    label = provider.name
+    breaker = _get_breaker(provider.id)
+
+    # No key configured — skip entirely
+    if not api_key:
+        return None, f"CF {label} — no API key configured"
+
     # Fast-path: skip the network call entirely if the breaker is open
-    if breaker and breaker.is_open():
+    if breaker.is_open():
         reason = f"CF {label} circuit breaker open — skipping"
         return None, reason
 
@@ -155,7 +142,7 @@ def _call_cf_worker(
                 reason = f"CF {label} returned {resp.status_code}: {resp.text[:80]}"
                 print(f"⚠️  llm_client: {reason}")
                 # Trip the breaker for fatal quota/auth errors — no point retrying
-                if breaker and _is_fatal_cf_error(resp.text):
+                if _is_fatal_cf_error(resp.text):
                     breaker.trip(reason)
                 return None, reason
 
@@ -173,7 +160,7 @@ def _call_cf_worker(
 
 
 # ---------------------------------------------------------------------------
-# Internal: Groq call (last resort)
+# Internal: Groq call
 # ---------------------------------------------------------------------------
 
 _groq_fallback_logged = False
@@ -183,16 +170,22 @@ def _call_groq(
     max_tokens: int,
     temperature: float,
     reason: str,
-) -> str:
+) -> tuple[str | None, str | None]:
+    """
+    Call Groq API. Returns (text, None) on success or (None, reason) on failure.
+    """
     global _groq_fallback_logged
-    groq_key = os.getenv("GROQ_API_KEY", "").strip()
-    if not groq_key:
-        print("⚠️  llm_client: no provider available (both CF workers down, GROQ_API_KEY not set)")
-        return ""
+    provider = provider_manager.get_provider("groq")
+    if not provider:
+        return None, "groq provider not configured"
 
-    model = _GROQ_MODEL_FAST if max_tokens <= 50 else _GROQ_MODEL_PRIMARY
+    groq_key = provider_manager.get_api_key(provider)
+    if not groq_key:
+        return None, "GROQ_API_KEY not set"
+
+    model = provider.fast_model if (max_tokens <= 50 and provider.fast_model) else provider.model
     if not _groq_fallback_logged:
-        print(f"⚡ llm_client: both CF workers unavailable — routing via Groq [{model}]")
+        print(f"⚡ llm_client: routing via Groq [{model}]")
         _groq_fallback_logged = True
 
     payload = {
@@ -208,25 +201,28 @@ def _call_groq(
 
     for attempt in range(3):
         try:
-            resp = requests.post(_GROQ_API_URL, headers=headers, json=payload, timeout=(10, 45))
+            resp = requests.post(provider.api_url, headers=headers, json=payload, timeout=(10, 45))
             if resp.status_code == 200:
                 raw = resp.json()["choices"][0]["message"]["content"]
-                return raw if isinstance(raw, str) else str(raw)
+                return (raw if isinstance(raw, str) else str(raw)), None
             elif resp.status_code == 429:
                 time.sleep(min(2 ** attempt, 2))
             else:
-                print(f"⚠️  llm_client: Groq {resp.status_code}: {resp.text[:120]}")
-                break
+                reason_str = f"Groq {resp.status_code}: {resp.text[:120]}"
+                print(f"⚠️  llm_client: {reason_str}")
+                return None, reason_str
         except Exception as e:
             if attempt < 2:
                 time.sleep(1)
             else:
-                print(f"⚠️  llm_client: Groq request failed — {e}")
-    return ""
+                reason_str = f"Groq request failed — {e}"
+                print(f"⚠️  llm_client: {reason_str}")
+                return None, reason_str
+    return None, "Groq rate-limited after 3 retries"
 
 
 # ---------------------------------------------------------------------------
-# Internal: NVIDIA NIM call (deepseek-v4-pro)
+# Internal: NVIDIA NIM call
 # ---------------------------------------------------------------------------
 
 def _call_nvidia(
@@ -234,18 +230,21 @@ def _call_nvidia(
     max_tokens: int,
     temperature: float,
     reason: str,
-) -> str:
+) -> tuple[str | None, str | None]:
     """
-    Call NVIDIA NIM endpoint (minimaxai/minimax-m2.7) via the OpenAI-compatible REST API.
-    Uses NVIDIA_API_KEY env var. Returns "" on failure so the caller can fall through.
+    Call NVIDIA NIM endpoint via the OpenAI-compatible REST API.
+    Returns (text, None) on success or (None, reason) on failure.
     """
-    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
+    provider = provider_manager.get_provider("nvidia")
+    if not provider:
+        return None, "nvidia provider not configured"
+
+    nvidia_key = provider_manager.get_api_key(provider)
     if not nvidia_key:
-        print("⚠️  llm_client: NVIDIA_API_KEY not set — skipping NVIDIA provider")
-        return ""
+        return None, "NVIDIA_API_KEY not set"
 
     payload = {
-        "model":       _NVIDIA_MODEL,
+        "model":       provider.model,
         "messages":    messages,
         "max_tokens":  min(max_tokens, 8192),  # MiniMax M2.7 output cap
         "temperature": temperature,
@@ -258,14 +257,14 @@ def _call_nvidia(
     }
 
     masked_key = nvidia_key[:8] + "..." + nvidia_key[-4:]
-    print(f"🟢 [llm_client] NVIDIA NIM → model={_NVIDIA_MODEL} | key={masked_key} | reason={reason}")
+    print(f"🟢 [llm_client] NVIDIA NIM → model={provider.model} | key={masked_key} | reason={reason}")
 
     for attempt in range(2):  # 2 attempts max — NVIDIA is slow, don't triple-wait
         try:
             # Split timeout: 15s to connect, 60s to read the full response body.
             # A single 90s timeout was hiding slow-connect failures as read hangs.
             resp = requests.post(
-                _NVIDIA_API_URL, headers=headers, json=payload,
+                provider.api_url, headers=headers, json=payload,
                 timeout=(15, 60),
             )
             if resp.status_code == 200:
@@ -280,31 +279,154 @@ def _call_nvidia(
 
                 if not raw:
                     print(f"⚠️  llm_client: NVIDIA responded 200 but content is empty — full msg: {msg}")
-                    return ""
+                    return None, "NVIDIA responded 200 but content empty"
 
-                print(f"✅ [llm_client] NVIDIA NIM responded ({len(raw)} chars) — model={_NVIDIA_MODEL}")
-                return raw
+                print(f"✅ [llm_client] NVIDIA NIM responded ({len(raw)} chars) — model={provider.model}")
+                return raw, None
             elif resp.status_code == 429:
                 wait = 3 * (attempt + 1)
                 print(f"⚠️  llm_client: NVIDIA rate-limited — retrying in {wait}s ({attempt + 1}/2)")
                 time.sleep(wait)
             else:
                 # Log the FULL error body so failures are never silent
-                print(f"❌ llm_client: NVIDIA returned HTTP {resp.status_code} — {resp.text[:300]}")
-                break
+                reason_str = f"NVIDIA returned HTTP {resp.status_code} — {resp.text[:300]}"
+                print(f"❌ llm_client: {reason_str}")
+                return None, reason_str
         except requests.exceptions.ConnectTimeout:
             print(f"❌ llm_client: NVIDIA connect timeout (15s) on attempt {attempt + 1}")
             if attempt < 1:
                 time.sleep(2)
         except requests.exceptions.ReadTimeout:
-            print(f"❌ llm_client: NVIDIA read timeout (60s) on attempt {attempt + 1} — model may be overloaded")
-            break  # don't retry a read timeout — it will just hang again
+            reason_str = f"NVIDIA read timeout (60s) on attempt {attempt + 1} — model may be overloaded"
+            print(f"❌ llm_client: {reason_str}")
+            return None, reason_str  # don't retry a read timeout — it will just hang again
         except Exception as e:
             if attempt < 1:
                 time.sleep(1)
             else:
-                print(f"❌ llm_client: NVIDIA request exception — {e}")
-    return ""
+                reason_str = f"NVIDIA request exception — {e}"
+                print(f"❌ llm_client: {reason_str}")
+                return None, reason_str
+    return None, "NVIDIA failed after retries"
+
+
+# ---------------------------------------------------------------------------
+# Internal: OpenRouter call
+# ---------------------------------------------------------------------------
+
+def _call_openrouter(
+    messages: List[Dict],
+    max_tokens: int,
+    temperature: float,
+) -> tuple[str | None, str | None]:
+    """
+    Call OpenRouter API. Returns (text, None) on success or (None, reason) on failure.
+    """
+    provider = provider_manager.get_provider("openrouter")
+    if not provider:
+        return None, "openrouter provider not configured"
+
+    or_key = provider_manager.get_api_key(provider)
+    if not or_key:
+        return None, "OPENROUTER_API_KEY not set"
+
+    payload = {
+        "model":       provider.model,
+        "messages":    messages,
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+    }
+    headers = {
+        "Authorization": f"Bearer {or_key}",
+        "Content-Type":  "application/json",
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.post(provider.api_url, headers=headers, json=payload, timeout=(10, 45))
+            if resp.status_code == 200:
+                raw = resp.json()["choices"][0]["message"]["content"]
+                result = raw if isinstance(raw, str) else str(raw)
+                if result:
+                    print(f"✅ llm_client: OpenRouter responded ({len(result)} chars) — model={provider.model}")
+                else:
+                    print("⚠️  llm_client: OpenRouter responded 200 but content empty")
+                return result, None
+            elif resp.status_code == 429:
+                time.sleep(min(2 ** attempt, 2))
+            else:
+                reason_str = f"OpenRouter {resp.status_code}: {resp.text[:120]}"
+                print(f"⚠️  llm_client: {reason_str}")
+                return None, reason_str
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                reason_str = f"OpenRouter request failed — {e}"
+                print(f"⚠️  llm_client: {reason_str}")
+                return None, reason_str
+    return None, "OpenRouter rate-limited after 3 retries"
+
+
+# ---------------------------------------------------------------------------
+# Internal: dispatch a single provider call
+# ---------------------------------------------------------------------------
+
+def _try_provider(
+    provider: ProviderConfig,
+    messages: List[Dict],
+    cf_payload: dict,
+    max_tokens: int,
+    temperature: float,
+    last_reason: str,
+) -> tuple[str | None, str | None]:
+    """
+    Dispatch a call to the appropriate handler based on provider type.
+    Returns (text, None) on success or (None, reason) on failure.
+    """
+    if provider.is_cf_worker:
+        return _call_cf_worker(provider, cf_payload)
+
+    # OpenAI-compatible providers
+    if provider.id == "groq":
+        return _call_groq(messages, max_tokens, temperature, last_reason)
+    elif provider.id == "nvidia":
+        return _call_nvidia(messages, max_tokens, temperature, last_reason)
+    elif provider.id == "openrouter":
+        return _call_openrouter(messages, max_tokens, temperature)
+    else:
+        # Future OpenAI-compatible providers — generic path
+        api_key = provider_manager.get_api_key(provider)
+        if not api_key:
+            return None, f"{provider.api_key_env} not set"
+
+        model = provider.fast_model if (max_tokens <= 50 and provider.fast_model) else provider.model
+        payload = {
+            "model":       model,
+            "messages":    messages,
+            "max_tokens":  max_tokens,
+            "temperature": temperature,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        }
+        for attempt in range(3):
+            try:
+                resp = requests.post(provider.api_url, headers=headers, json=payload, timeout=(10, 45))
+                if resp.status_code == 200:
+                    raw = resp.json()["choices"][0]["message"]["content"]
+                    result = raw if isinstance(raw, str) else str(raw)
+                    return result, None
+                elif resp.status_code == 429:
+                    time.sleep(min(2 ** attempt, 2))
+                else:
+                    return None, f"{provider.name} {resp.status_code}: {resp.text[:120]}"
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    return None, f"{provider.name} request failed — {e}"
+        return None, f"{provider.name} rate-limited after 3 retries"
 
 
 # ---------------------------------------------------------------------------
@@ -323,22 +445,24 @@ def call_llm(
     """
     Send a prompt to the LLM.
 
-    Priority: preferred_provider (if set) → CF Primary → CF Backup → Groq
+    Priority: preferred_provider (if set) → fallback chain by fallback_order.
     Fallback is always attempted if the preferred provider fails.
 
     Args:
         prompt:             The current user turn / instruction.
         system_prompt:      Optional system instruction.
         history:            Prior [{role, content}] turns (capped by worker at 10).
-        max_tokens:         Token budget. ≤50 → fast model on both providers.
+        max_tokens:         Token budget. <=50 triggers fast model where available.
         temperature:        Sampling temperature.
-        task:               Hint for the CF worker (synthesise / plan / classify …).
-        preferred_provider: One of "cf_primary", "cf_backup", "groq", "nvidia".
+        task:               Hint for the CF worker (synthesise / plan / classify ...).
+        preferred_provider: Provider id (e.g. "cf_primary", "groq", "nvidia").
                             If set, that provider is tried first; falls back on failure.
-                            "nvidia" uses minimaxai/minimax-m2.7 via NVIDIA NIM.
 
     Returns:
         Generated text string, or "" if all providers fail.
+
+    Raises:
+        AllProvidersRateLimited if every available provider returns 429.
     """
     messages: List[Dict] = []
     if system_prompt:
@@ -357,190 +481,57 @@ def call_llm(
         "task":         task,
     }
 
-    # Resolve CF keys once — used across all CF routing below
-    cf_primary_key  = os.getenv("CF_API_KEY", "").strip()
-    cf_primary_url  = os.getenv("CF_API_URL", _CF_DEFAULT_URL)
-    cf_backup_key   = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
-    cf_backup_url   = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
-    cf_backup2_key  = os.getenv("CF_BACKUP2_API_KEY", cf_primary_key).strip()
-    cf_backup2_url  = os.getenv("CF_BACKUP2_URL", "").strip()
-
     print(f"🧠 llm_client: call_llm preferred_provider={preferred_provider or 'auto'} max_tokens={max_tokens} task={task}")
-    last_reason: str = "no providers tried"
 
-    # ── OpenRouter (primary) ───────────────────────────────────────────────
-    or_result = _call_openrouter(messages, max_tokens, temperature)
-    if or_result:
-        return or_result
-    print("⚠️  llm_client: OpenRouter failed — falling through to other providers")
-
-    # ── User-preferred provider (tried first) ─────────────────────────────────
-    if preferred_provider == "cf_primary":
-        if cf_primary_key:
-            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary", _cb_primary)
-            if text is not None:
-                return text
-            last_reason = reason or "cf_primary failed"
-            print(f"⚠️  llm_client: preferred cf_primary failed ({last_reason}) — falling through to backup")
-        else:
-            last_reason = "CF_API_KEY not set"
-            print(f"⚠️  llm_client: preferred cf_primary requested but {last_reason}")
-
-    elif preferred_provider == "cf_backup":
-        if cf_backup_key:
-            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup", _cb_backup)
-            if text is not None:
-                return text
-            last_reason = reason or "cf_backup failed"
-            print(f"⚠️  llm_client: preferred cf_backup failed ({last_reason}) — falling through")
-        else:
-            last_reason = "no CF backup key available"
-            print(f"⚠️  llm_client: preferred cf_backup requested but {last_reason}")
-
-    elif preferred_provider == "cf_backup2":
-        if cf_backup2_key and cf_backup2_url:
-            text, reason = _call_cf_worker(cf_backup2_url, cf_backup2_key, cf_payload, "backup2", _cb_backup2)
-            if text is not None:
-                return text
-            last_reason = reason or "cf_backup2 failed"
-            print(f"⚠️  llm_client: preferred cf_backup2 failed ({last_reason}) — falling through")
-        else:
-            last_reason = "CF_BACKUP2_URL or CF_BACKUP2_API_KEY not set"
-            print(f"⚠️  llm_client: preferred cf_backup2 requested but {last_reason}")
-
-    elif preferred_provider == "groq":
-        groq_key = os.getenv("GROQ_API_KEY", "").strip()
-        if groq_key:
-            result = _call_groq(messages, max_tokens, temperature, "user-selected groq")
-            if result:
-                return result
-            last_reason = "groq returned empty"
-            print(f"⚠️  llm_client: preferred groq failed — falling through to CF workers")
-        else:
-            last_reason = "GROQ_API_KEY not set"
-            print(f"⚠️  llm_client: preferred groq requested but {last_reason}")
-
-    elif preferred_provider == "nvidia":
-        nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
-        if nvidia_key:
-            result = _call_nvidia(messages, max_tokens, temperature, "user-selected nvidia")
-            if result:
-                return result
-            last_reason = "nvidia returned empty or failed"
-            print(f"⚠️  llm_client: preferred nvidia failed — falling through to CF workers")
-        else:
-            last_reason = "NVIDIA_API_KEY not set"
-            print(f"⚠️  llm_client: preferred nvidia requested but {last_reason}")
-
-    # ── Standard priority fallback chain ──────────────────────────────────────
-    # Each provider is skipped if it was already tried as preferred_provider above.
-    # This prevents double-calling and keeps the log honest.
-
-    if preferred_provider and preferred_provider not in ("cf_primary", "cf_backup", "cf_backup2", "groq", "nvidia"):
-        print(f"⚠️  llm_client: unknown preferred_provider={preferred_provider!r} — using auto chain")
-
-    # CF Primary
-    if preferred_provider != "cf_primary":
-        if cf_primary_key:
-            text, reason = _call_cf_worker(cf_primary_url, cf_primary_key, cf_payload, "primary", _cb_primary)
-            if text is not None:
-                return text
-            last_reason = reason or "cf_primary failed"
-            print(f"⚠️  llm_client: CF primary failed ({last_reason}) — trying backup worker")
-        else:
-            print("⚠️  llm_client: CF_API_KEY not set — skipping primary, trying backup")
-
-    # CF Backup
-    if preferred_provider != "cf_backup":
-        if cf_backup_key:
-            text, reason = _call_cf_worker(cf_backup_url, cf_backup_key, cf_payload, "backup", _cb_backup)
-            if text is not None:
-                print("✅ llm_client: CF backup worker answered")
-                return text
-            last_reason = reason or "cf_backup failed"
-            print(f"⚠️  llm_client: CF backup also failed ({last_reason}) — trying backup2 worker")
-        else:
-            last_reason = "no CF key available for backup worker"
-            print(f"⚠️  llm_client: {last_reason}")
-
-    # CF Backup2
-    if preferred_provider != "cf_backup2":
-        if cf_backup2_key and cf_backup2_url:
-            text, reason = _call_cf_worker(cf_backup2_url, cf_backup2_key, cf_payload, "backup2", _cb_backup2)
-            if text is not None:
-                print("✅ llm_client: CF backup2 worker answered")
-                return text
-            last_reason = reason or "cf_backup2 failed"
-            print(f"⚠️  llm_client: CF backup2 also failed ({last_reason}) — falling back to Groq")
-        else:
-            print("⚠️  llm_client: CF_BACKUP2_URL/KEY not set — skipping backup2")
-
-    # OpenRouter — tried before Groq in the fallback chain
-    or_result = _call_openrouter(messages, max_tokens, temperature)
-    if or_result:
-        return or_result
-
-    # Groq — skip if already tried as preferred OR if nvidia was preferred (keep nvidia opt-in only)
-    if preferred_provider not in ("groq", "nvidia"):
-        result = _call_groq(messages, max_tokens, temperature, last_reason)
-        if result:
-            return result
-        last_reason = "groq also failed"
-    elif preferred_provider == "groq":
-        pass  # already tried above, skip
-    # nvidia preferred but failed → still fall through to Groq as last resort
-    elif preferred_provider == "nvidia":
-        print(f"⚠️  llm_client: NVIDIA preferred but failed — falling back to Groq as last resort")
-        result = _call_groq(messages, max_tokens, temperature, last_reason)
-        if result:
-            return result
-
-    # NVIDIA is NOT in the automatic fallback chain for non-nvidia requests.
-    # It is opt-in only via preferred_provider to avoid burning free-tier quota silently.
-    return ""
-
-
-# ── OpenRouter (TEMP — testing only, remove after stress test) ──────────────
-
-def _call_openrouter(
-    messages: List[Dict],
-    max_tokens: int,
-    temperature: float,
-) -> str:
-    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not or_key:
+    # Get available providers sorted by fallback_order
+    available = provider_manager.get_available_providers()
+    if not available:
+        print("⚠️  llm_client: no providers available (no API keys configured)")
         return ""
-    payload = {
-        "model":       _OPENROUTER_MODEL,
-        "messages":    messages,
-        "max_tokens":  max_tokens,
-        "temperature": temperature,
-    }
-    headers = {
-        "Authorization": f"Bearer {or_key}",
-        "Content-Type":  "application/json",
-    }
-    for attempt in range(3):
-        try:
-            resp = requests.post(_OPENROUTER_API_URL, headers=headers, json=payload, timeout=(10, 45))
-            if resp.status_code == 200:
-                raw = resp.json()["choices"][0]["message"]["content"]
-                result = raw if isinstance(raw, str) else str(raw)
-                if result:
-                    print(f"✅ llm_client: OpenRouter responded ({len(result)} chars) — model={_OPENROUTER_MODEL}")
-                else:
-                    print(f"⚠️  llm_client: OpenRouter responded 200 but content empty")
-                return result
-            elif resp.status_code == 429:
-                time.sleep(min(2 ** attempt, 2))
-            else:
-                print(f"⚠️  llm_client: OpenRouter {resp.status_code}: {resp.text[:120]}")
-                break
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
-            else:
-                print(f"⚠️  llm_client: OpenRouter request failed — {e}")
+
+    # If preferred_provider is set, move it to the front of the list
+    if preferred_provider:
+        preferred = provider_manager.get_provider(preferred_provider)
+        if preferred and preferred in available:
+            available = [preferred] + [p for p in available if p.id != preferred_provider]
+        elif preferred:
+            # Provider exists in config but has no API key — still try it first
+            available = [preferred] + available
+            print(f"⚠️  llm_client: preferred provider '{preferred_provider}' has no API key configured")
+        else:
+            print(f"⚠️  llm_client: unknown preferred_provider={preferred_provider!r} — using auto chain")
+
+    # Try each provider in order
+    last_reason: str = "no providers tried"
+    all_rate_limited = True
+    tried_any = False
+
+    for provider in available:
+        # Skip if circuit breaker is open (CF workers only)
+        if provider.is_cf_worker:
+            breaker = _get_breaker(provider.id)
+            if breaker.is_open():
+                print(f"⚠️  llm_client: {provider.name} circuit breaker open — skipping")
+                continue
+
+        tried_any = True
+        text, reason = _try_provider(
+            provider, messages, cf_payload, max_tokens, temperature, last_reason,
+        )
+
+        if text is not None:
+            return text
+
+        last_reason = reason or f"{provider.name} failed"
+        print(f"⚠️  llm_client: {provider.name} failed ({last_reason}) — trying next")
+
+        # Track whether ALL failures were rate-limits (429)
+        if reason and "rate-limited" not in reason and "429" not in reason:
+            all_rate_limited = False
+
+    # All providers exhausted
+    if tried_any and all_rate_limited:
+        raise AllProvidersRateLimited("All available providers returned 429")
     return ""
 
 
@@ -553,63 +544,32 @@ def check_llm_available() -> tuple[bool, str]:
     Ping providers in priority order and return the first reachable one.
     Returns (is_available, provider_name). Never raises.
     """
-    cf_primary_key = os.getenv("CF_API_KEY", "").strip()
-    cf_primary_url = os.getenv("CF_API_URL", _CF_DEFAULT_URL)
+    for provider in provider_manager.get_available_providers():
+        api_key = provider_manager.get_api_key(provider)
+        if not api_key:
+            continue
 
-    if cf_primary_key:
+        # Build a minimal probe payload
+        if provider.is_cf_worker:
+            probe = {"prompt": "hi", "max_tokens": 5}
+        else:
+            probe = {
+                "model": provider.model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5,
+            }
+
         try:
             resp = requests.post(
-                cf_primary_url,
-                headers={"Authorization": f"Bearer {cf_primary_key}", "Content-Type": "application/json"},
-                json={"prompt": "hi", "max_tokens": 5},
+                provider.api_url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=probe,
                 timeout=10,
             )
             if resp.status_code == 200:
-                return True, "Cloudflare Workers AI (primary)"
-            print(f"⚠️  llm_client: CF primary responded {resp.status_code} — checking backup")
+                return True, provider.name
+            print(f"⚠️  llm_client: {provider.name} responded {resp.status_code} — checking next")
         except Exception as e:
-            print(f"⚠️  llm_client: CF primary unreachable ({e}) — checking backup")
-
-    cf_backup_key = os.getenv("CF_BACKUP_API_KEY", cf_primary_key).strip()
-    cf_backup_url = os.getenv("CF_BACKUP_URL", _CF_BACKUP_URL)
-
-    if cf_backup_key:
-        try:
-            resp = requests.post(
-                cf_backup_url,
-                headers={"Authorization": f"Bearer {cf_backup_key}", "Content-Type": "application/json"},
-                json={"prompt": "hi", "max_tokens": 5},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return True, "Cloudflare Workers AI (backup)"
-            print(f"⚠️  llm_client: CF backup responded {resp.status_code} — checking backup2")
-        except Exception as e:
-            print(f"⚠️  llm_client: CF backup unreachable ({e}) — checking backup2")
-
-    cf_backup2_key = os.getenv("CF_BACKUP2_API_KEY", cf_primary_key).strip()
-    cf_backup2_url = os.getenv("CF_BACKUP2_URL", "").strip()
-
-    if cf_backup2_key and cf_backup2_url:
-        try:
-            resp = requests.post(
-                cf_backup2_url,
-                headers={"Authorization": f"Bearer {cf_backup2_key}", "Content-Type": "application/json"},
-                json={"prompt": "hi", "max_tokens": 5},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return True, "Cloudflare Workers AI (backup2)"
-            print(f"⚠️  llm_client: CF backup2 responded {resp.status_code} — checking Groq")
-        except Exception as e:
-            print(f"⚠️  llm_client: CF backup2 unreachable ({e}) — checking Groq")
-
-    groq_key = os.getenv("GROQ_API_KEY", "").strip()
-    if groq_key:
-        return True, "Groq (last resort)"
-
-    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
-    if nvidia_key:
-        return True, "NVIDIA NIM (deepseek-v4-pro)"
+            print(f"⚠️  llm_client: {provider.name} unreachable ({e}) — checking next")
 
     return False, "none"

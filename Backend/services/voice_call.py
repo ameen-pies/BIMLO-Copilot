@@ -27,6 +27,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from prompt_loader import load_prompt
+
 router = APIRouter(tags=["voice_call"])
 
 # ── Groq chat (answer rewriting only — NOT used for TTS) ─────────────────────
@@ -234,13 +236,7 @@ async def _rewrite_for_speech(transcript: str, rag_answer: str) -> str:
     # Strip markdown BEFORE sending to the LLM so it rewrites clean text
     clean = _ensure_plain(_strip_markdown(rag_answer))
 
-    system_prompt = (
-        "You convert written answers into natural spoken phone responses. "
-        "Your output goes directly into a text-to-speech engine. "
-        "Any asterisk, underscore, hash, backtick, dash used as a bullet, "
-        "or numbered list will be read aloud verbatim and sound broken — "
-        "so NEVER use them. Output plain prose only."
-    )
+    system_prompt = load_prompt("voice_rewrite_system")
 
     user_prompt = (
         "Rewrite the answer below as a short, natural spoken response.\n\n"

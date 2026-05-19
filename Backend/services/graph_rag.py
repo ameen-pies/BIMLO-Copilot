@@ -43,6 +43,8 @@ import uuid
 import time
 from typing import List, Dict, Optional, Any
 
+from prompt_loader import load_prompt
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Neo4j connection — reuse the driver from neo4j_auth to avoid double-connect
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,46 +77,7 @@ def _run_graph(cypher: str, params: dict = None) -> List[Dict]:
 # Entity extraction via LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ENTITY_SYSTEM = """You are a knowledge graph extraction assistant for telecom and BIM engineering documents.
-
-Extract entities and relationships from the provided text.
-
-Entity types to look for:
-- SITE: physical locations, sites, towers, rooftops, pylons
-- NODE: network nodes, fiber nodes, distribution nodes
-- SWITCH: network switches, core switches, aggregation switches
-- ROUTER: routers, PE routers, CE routers
-- FIBER_CABLE: fiber cables, optical cables, fiber spans
-- PORT: ports, interfaces, connectors
-- RACK: equipment racks, cabinets
-- ANTENNA: antennas, sectors, panels
-- BBU: baseband units
-- RRH: remote radio heads, radio units
-- STOREY: floors, levels, storeys in a building
-- ROOM: rooms, technical rooms, server rooms
-- WALL: walls, partitions
-- BEAM: structural beams
-- COLUMN: structural columns
-- MATERIAL: materials (concrete, steel, glass, etc.)
-- ZONE: zones, areas, coverage zones
-- SPEC: specifications, standards, norms
-- PARAMETER: technical parameters, measurements, values
-- ORGANIZATION: companies, operators, vendors
-- PERSON: engineers, project managers, contacts
-
-Return ONLY a valid JSON object with this exact structure:
-{
-  "entities": [
-    {"name": "Switch A", "type": "SWITCH", "description": "Core aggregation switch"},
-    {"name": "Node 12", "type": "NODE", "description": "Distribution fiber node"}
-  ],
-  "relationships": [
-    {"source": "Node 12", "relation": "CONNECTS_TO", "target": "Switch A", "description": "via 48-fiber cable"}
-  ]
-}
-
-If no clear entities are found, return {"entities": [], "relationships": []}.
-Do NOT include any text outside the JSON."""
+_ENTITY_SYSTEM = load_prompt("entity_system")
 
 
 def _extract_entities_from_chunk(text: str, filename: str) -> Dict:
@@ -216,28 +179,7 @@ def is_graph_query(query: str) -> bool:
 # Cypher generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CYPHER_SYSTEM = """You are a Neo4j Cypher expert for a telecom and BIM knowledge graph.
-
-Graph schema:
-  (:Entity {id, name, type, doc_id, filename, description})
-  (:GraphChunk {id, doc_id, filename, text_preview})
-  (:Entity)-[:RELATES_TO {relation, description}]->(:Entity)
-  (:Entity)-[:MENTIONED_IN]->(:GraphChunk)
-
-Entity types: SITE, NODE, SWITCH, ROUTER, FIBER_CABLE, PORT, RACK, ANTENNA, BBU, RRH,
-              STOREY, ROOM, WALL, BEAM, COLUMN, MATERIAL, ZONE, SPEC, PARAMETER,
-              ORGANIZATION, PERSON
-
-Given the user's natural language question, generate a Cypher READ query.
-Rules:
-- Use MATCH, OPTIONAL MATCH, WHERE, RETURN only — NO CREATE/MERGE/DELETE
-- Use case-insensitive matching: WHERE toLower(e.name) CONTAINS toLower($term)
-- Always LIMIT results to 20 max
-- Return human-readable fields: entity names, types, relations, descriptions
-- If the query asks about connections, traverse [:RELATES_TO] edges
-- If you cannot generate a safe read-only query, return exactly: SKIP
-
-Return ONLY the Cypher query or "SKIP", nothing else."""
+_CYPHER_SYSTEM = load_prompt("cypher_system")
 
 
 def _generate_cypher(query: str) -> Optional[str]:

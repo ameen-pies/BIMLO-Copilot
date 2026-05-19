@@ -1,0 +1,73 @@
+{
+  "providers": [
+    {
+      "id": "cf_primary",
+      "name": "Cloudflare Primary",
+      "api_url": "https://bimloapi.medhelaliamin125.workers.dev",
+      "model": "@cf/meta/llama-3.3-70b-instruct",
+      "description": "fast",
+      "api_key_env": "CF_API_KEY",
+      "color": "#f97316",
+      "is_cf_worker": true,
+      "fallback_order": 1
+    },
+    {
+      "id": "cf_backup",
+      "name": "Cloudflare Backup",
+      "api_url": "https://bimlo.amepies3.workers.dev/",
+      "model": "@cf/meta/llama-3.3-70b-instruct",
+      "description": "fast",
+      "api_key_env": "CF_BACKUP_API_KEY",
+      "fallback_api_key_env": "CF_API_KEY",
+      "color": "#3b82f6",
+      "is_cf_worker": true,
+      "fallback_order": 2
+    },
+    {
+      "id": "cf_backup2",
+      "name": "Cloudflare Backup 2",
+      "api_url_env": "CF_BACKUP2_URL",
+      "model": "@cf/meta/llama-3.3-70b-instruct",
+      "description": "fast",
+      "api_key_env": "CF_BACKUP2_API_KEY",
+      "fallback_api_key_env": "CF_API_KEY",
+      "color": "#6366f1",
+      "is_cf_worker": true,
+      "fallback_order": 3
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "api_url": "https://openrouter.ai/api/v1/chat/completions",
+      "model": "openai/gpt-oss-20b:free",
+      "description": "expert",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "color": "#8b5cf6",
+      "is_cf_worker": false,
+      "fallback_order": 4
+    },
+    {
+      "id": "groq",
+      "name": "Groq",
+      "api_url": "https://api.groq.com/openai/v1/chat/completions",
+      "model": "llama-3.3-70b-versatile",
+      "fast_model": "llama-3.1-8b-instant",
+      "description": "reliable",
+      "api_key_env": "GROQ_API_KEY",
+      "color": "#10b981",
+      "is_cf_worker": false,
+      "fallback_order": 5
+    },
+    {
+      "id": "nvidia",
+      "name": "MiniMax M2.7",
+      "api_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "model": "minimaxai/minimax-m2.7",
+      "description": "expert",
+      "api_key_env": "NVIDIA_API_KEY",
+      "color": "#76b900",
+      "is_cf_worker": false,
+      "fallback_order": 6
+    }
+  ]
+}

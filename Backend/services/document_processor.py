@@ -5,6 +5,8 @@ import requests
 from typing import List, Dict, Optional
 from io import BytesIO
 
+from prompt_loader import load_prompt
+
 
 class DocumentProcessor:
     """
@@ -38,16 +40,7 @@ class DocumentProcessor:
     # FIX: switched from deprecated @cf/llava-hf/llava-1.5-7b-hf (returned empty /
     # metadata-only responses) to the actively supported Llama-3.2-11b-Vision model.
     _DEFAULT_VISION_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"
-    _VISION_PROMPT = (
-        "You are analysing a page image or embedded figure from a technical document. "
-        "Provide a thorough, structured description:\n"
-        "1. What type of visual is this? (diagram, chart, table, schematic, floor plan, photo, etc.)\n"
-        "2. What is the main subject or content?\n"
-        "3. Describe all visible text, labels, numbers, or annotations verbatim.\n"
-        "4. Describe the layout, structure, and key visual elements.\n"
-        "5. If it shows data (chart/table), describe the values and trends.\n"
-        "Be thorough — your description is the only way this image's content becomes searchable."
-    )
+    _VISION_PROMPT = load_prompt("vision_prompt")
 
     def __init__(self, chunk_size: int = 1500, chunk_overlap: int = 300):
         self.chunk_size      = chunk_size
@@ -66,18 +59,7 @@ class DocumentProcessor:
     IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 
     # Vision prompt for standalone user-uploaded images (screenshots, photos, diagrams)
-    _IMAGE_UPLOAD_PROMPT = (
-        "You are analysing a user-uploaded image — it could be a screenshot, photo, "
-        "diagram, chart, floor plan, whiteboard, or any visual content. "
-        "Provide a thorough, structured description:\n"
-        "1. What type of image is this? (screenshot, photo, diagram, chart, etc.)\n"
-        "2. What is the main subject or content?\n"
-        "3. Describe all visible text, labels, numbers, or annotations verbatim.\n"
-        "4. Describe the layout, structure, colours, and key visual elements.\n"
-        "5. If it shows data (chart/table), describe the values and trends.\n"
-        "6. If it shows UI/software, describe what interface or state is shown.\n"
-        "Be thorough — your description is the only way this image's content becomes searchable."
-    )
+    _IMAGE_UPLOAD_PROMPT = load_prompt("image_upload_prompt")
 
     # ── Public entry point ────────────────────────────────────────────────
 

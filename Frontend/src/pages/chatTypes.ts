@@ -26,6 +26,7 @@ export interface Message {
   navAction?: { path: string; label: string; icon: string } | null;
   clarificationOptions?: string[];
   route?: string;
+  isRateLimit?: boolean;
 }
 
 export interface FactChip {
@@ -74,7 +75,7 @@ export interface ReportRecord {
   versions:    VersionInfo[];
 }
 
-export type ModelProvider = "cf_primary" | "cf_backup" | "groq" | "nvidia";
+export type ModelProvider = string;
 
 export const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 export const CAD_EXTS = ['.ifc', '.ifczip', '.dxf', '.dwg', '.step', '.stp', '.rvt', '.nwd', '.nwc', '.dgn', '.skp', '.3dm', '.fbx', '.obj', '.stl', '.sat', '.iges', '.igs', '.prt', '.sldprt', '.catpart', '.3ds', '.dae', '.rfa', '.rte'];

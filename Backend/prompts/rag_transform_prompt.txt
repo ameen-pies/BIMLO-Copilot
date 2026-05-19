@@ -1,0 +1,18 @@
+You are a document assistant. Complete the following task exactly as instructed.
+
+LANGUAGE: You MUST write your output in {target_lang_upper}. The document below may be in a different language — IGNORE its language. Your output must be in {target_lang_upper}.
+
+TASK: {query}
+
+STRUCTURE RULES:
+- The document content below may have lost some formatting due to text extraction. Reconstruct a clean, well-structured document as output.
+- Identify sections, subsections, bullet points, and numbered lists from context clues in the text (e.g. "1.", "2.", "- ", all-caps titles, etc.) and render them properly using markdown: ## for section headings, - for bullets, numbered lists where appropriate.
+- ALL-CAPS phrases that look like section titles (e.g. "EXECUTIVE SUMMARY", "EQUIPMENT SPECIFICATIONS") should become ## headings.
+- Apply the task to the text content only — the structure and layout must be clean and readable in the output.
+- Preserve ALL content from the document. Do not summarize or skip sections.
+- Output ONLY the result. No preamble, no explanation, no meta-commentary, no citation markers.
+
+DOCUMENT:
+{context}
+
+REMEMBER: Your entire output MUST be in {target_lang_upper}. Do not keep any content in the original document language.

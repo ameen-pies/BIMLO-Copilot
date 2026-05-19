@@ -269,16 +269,34 @@ export function useChatPage() {
   const [bubbleViewer, setBubbleViewer] = useState<ViewerState | null>(null);
   const bubbleViewerRef = useRef<ViewerState | null>(null);
   // ── Model selector ──────────────────────────────────────────────────────
-  type ModelProvider = "cf_primary" | "cf_backup" | "groq" | "nvidia";
-  const [selectedModel, setSelectedModel] = useState<ModelProvider>("cf_primary");
+  type ModelOption = { id: string; label: string; shortLabel: string; desc: string; color: string };
+  const [selectedModel, setSelectedModel] = useState<string>("cf_primary");
   // Ref always tracks latest selectedModel so runStreamingQuery's useCallback
   // can read it without a stale closure — avoids adding selectedModel to the
   // dep array which would break in-flight streams on every model switch.
-  const selectedModelRef = useRef<ModelProvider>("cf_primary");
+  const selectedModelRef = useRef<string>("cf_primary");
   useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
 
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+
+  const [MODEL_OPTIONS, setMODEL_OPTIONS] = useState<ModelOption[]>([]);
+  useEffect(() => {
+    import("@/services/api").then(m => m.default.getProviders()).then(providers => {
+      setMODEL_OPTIONS(providers.map(p => ({
+        id: p.id,
+        label: p.name,
+        shortLabel: p.name.split(" ").slice(0, 2).join(" "),
+        desc: p.description,
+        color: p.color,
+      })));
+    }).catch(err => {
+      console.error("[Chat] Failed to load providers:", err);
+      setMODEL_OPTIONS([
+        { id: "cf_primary", label: "Cloudflare Primary", shortLabel: "CF Primary", desc: "fast", color: "#f97316" },
+      ]);
+    });
+  }, []);
 
   useEffect(() => {
     console.log("[Chat] selected model:", selectedModel);
@@ -294,13 +312,6 @@ export function useChatPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-
-  const MODEL_OPTIONS: { id: ModelProvider; label: string; shortLabel: string; desc: string; color: string }[] = [
-    { id: "cf_primary",  label: "Cloudflare Primary",  shortLabel: "CF Primary",  desc: "Primary Cloudflare Workers AI",    color: "#f97316" },
-    { id: "cf_backup",   label: "Cloudflare Backup",   shortLabel: "CF Backup",   desc: "Backup Cloudflare Workers AI",     color: "#3b82f6" },
-    { id: "groq",        label: "Groq",                shortLabel: "Groq",        desc: "Groq (llama-3.3-70b-versatile)",   color: "#10b981" },
-    { id: "nvidia",      label: "MiniMax M2.7",         shortLabel: "MiniMax",     desc: "MiniMax M2.7 via NVIDIA NIM",      color: "#76b900" },
-  ];
 
   const isLoading_ref = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -1938,6 +1949,19 @@ export function useChatPage() {
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: createUniqueId("msg-"),
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { /* malformed SSE line */ }
@@ -2056,6 +2080,19 @@ export function useChatPage() {
                 timestamp:   new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: createUniqueId("msg-"),
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { /* malformed SSE line */ }
@@ -2139,6 +2176,19 @@ export function useChatPage() {
                 timestamp: new Date(),
               };
             } else if (event.type === "error") {
+              if (event.error_type === "rate_limited") {
+                const rateLimitMsg: Message = {
+                  id: createUniqueId("msg-"),
+                  role: "assistant",
+                  content: "__RATE_LIMIT_CARD__",
+                  sources: [],
+                  confidence: 0,
+                  timestamp: new Date(),
+                  isRateLimit: true,
+                };
+                setMessages(prev => [...prev, rateLimitMsg]);
+                return;
+              }
               throw new Error(event.message);
             }
           } catch { /* malformed SSE line */ }

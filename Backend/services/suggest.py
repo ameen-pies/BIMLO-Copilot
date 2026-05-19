@@ -22,6 +22,8 @@ from typing import List
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from prompt_loader import load_prompt
+
 # ── Load .env so CF_API_KEY is available when running standalone ─────────────
 try:
     from dotenv import load_dotenv
@@ -56,21 +58,7 @@ class SuggestResponse(BaseModel):
 _CF_API_KEY  = os.getenv("CF_API_KEY", "")
 _CF_API_URL  = os.getenv("CF_API_URL", "https://bimloapi.medhelaliamin125.workers.dev")
 
-SYSTEM_PROMPT = """You are a smart assistant helping users explore document knowledge.
-
-Given the user's last question, the AI's answer, and the list of available documents, generate follow-up prompt suggestions in TWO categories:
-
-CATEGORY 1 — "contextual" (2-3 chips): Directly about what was just discussed. Based on specific terms, numbers, names, or concepts in the answer. What would a curious person naturally ask next about THIS specific answer?
-
-CATEGORY 2 — "general" (1-2 chips): Broader questions that go beyond the current answer — comparing with other uploaded documents, asking about the overall project, or exploring a related topic not yet covered.
-
-Rules:
-- Return ONLY a raw JSON object with two keys. No markdown, no backticks, no explanation.
-- Each chip must be 2-5 words, actionable, specific.
-- "general" chips should naturally reference other documents or broader scope.
-
-Return exactly this format:
-{"contextual": ["chip 1", "chip 2", "chip 3"], "general": ["chip 1", "chip 2"]}"""
+SYSTEM_PROMPT = load_prompt("suggest_system")
 
 
 def _call_cf(user_query: str, assistant_reply: str, available_docs: List[str], max_retries: int = 2) -> List[str]:

@@ -50,6 +50,7 @@ if _services_dir not in sys.path:
 
 # ── Extracted modules ──────────────────────────────────────────────────────
 from rag_state import AgentState, MAX_ITER, MAX_RETRIES, MIN_CHUNKS, RELEVANCE_THRESHOLD
+from prompt_loader import load_prompt_template
 from rag_helpers import (
     _detect_script_language,
     _build_context,
@@ -781,21 +782,15 @@ Now generate for: "{q}" """
 
         user_lang = _detect_script_language(query)
         target_lang = plan.target_language or user_lang
+        target_lang_upper = target_lang.upper()
         lang_rule = (
-            f"🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang.upper()}. "
-            f"The user asked in {user_lang.upper()}. Every single sentence must be in {target_lang.upper()}. "
+            f"🚨 LANGUAGE REQUIREMENT: You MUST write your ENTIRE answer in {target_lang_upper}. "
+            f"The user asked in {user_lang.upper()}. Every single sentence must be in {target_lang_upper}. "
             f"This is the most important rule."
         )
 
         if no_docs:
-            system_content = (
-                f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
-                f"Respond in {target_lang.upper()} using a {plan.target_tone} tone. "
-                f"{lang_rule} "
-                f"The user asked a question that would normally use uploaded documents, but there are no files uploaded in this chat session yet. "
-                f"Mention this clearly in your answer, and offer to help further once they upload a document. "
-                f"Keep the reply friendly and concise."
-            )
+            system_content = load_prompt_template("rag_direct_answer_nodocs_system", target_lang_upper=target_lang_upper, target_tone=plan.target_tone, lang_rule=lang_rule)
         else:
             # Serialize the route log as plain text and give it directly to the LLM.
             # The LLM understands context — no need to hardcode what each route means.
@@ -827,17 +822,7 @@ Now generate for: "{q}" """
                     "\n\nNote: No documents have been uploaded to this chat session yet."
                 )
 
-            system_content = (
-                f"You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE — a company specialising in BIM engineering (3D to 7D digital models), Scan to BIM, BIM 4D construction planning, telecom infrastructure studies (rooftop, pylons, calculation notes), and DeepTwin AI digital twins for predictive maintenance. "
-                f"You help professionals in construction, BTP, and telecom industries with technical questions and document analysis. "
-                f"Respond in {target_lang.upper()} using a {plan.target_tone} tone. "
-                f"{lang_rule} "
-                f"You are one single assistant — the conversation history and action log below "
-                f"are all yours. Use them freely to answer follow-up questions, recall what was "
-                f"said or done, and modify previous answers when asked."
-                f"{session_context}"
-                f"{doc_status_note}"
-            )
+            system_content = load_prompt_template("rag_direct_answer_system", target_lang_upper=target_lang_upper, target_tone=plan.target_tone, lang_rule=lang_rule, session_context=session_context, doc_status_note=doc_status_note)
 
         messages: List[Dict] = [{"role": "system", "content": system_content}]
 
@@ -1129,19 +1114,7 @@ Now generate for: "{q}" """
         else:
             retrieved_info = "\nProblem: no relevant chunks were retrieved at all."
 
-        prompt = f"""You are helping a technical document search system improve its query.
-
-ORIGINAL QUERY: {original}
-{retrieved_info}
-
-Your job: rewrite the query to find DIFFERENT, more relevant content.
-Strategies:
-- Use different keywords or synonyms for the same concept
-- Break a complex question into its most searchable core
-- Use domain-specific terminology a technical document would use
-- If the original is a question, rewrite as the kind of phrase that would appear as an answer in a document
-
-Reply with ONLY the rewritten search query. No explanation."""
+        prompt = load_prompt_template("rag_rewrite_query_prompt", original=original, retrieved_info=retrieved_info)
 
         rewritten = self._chat(
             [{"role": "user", "content": prompt}],
@@ -1379,16 +1352,17 @@ Reply with ONLY the rewritten search query. No explanation."""
             user_language = _detect_script_language(query)
         # Use plan.target_language as the authoritative choice (judge may have overridden)
         target_lang = plan.target_language or user_language
+        target_lang_upper = target_lang.upper()
 
         # ── Strong language mirroring instruction ──────────────────────────────
         # This is the #1 issue: the model tends to answer in the document's language
         # rather than the user's language. We need a very explicit, hard-to-ignore rule.
         language_rule = (
             f"\n🚨 LANGUAGE REQUIREMENT (CRITICAL): The user asked you in {user_language.upper()}. "
-            f"You MUST write your ENTIRE answer in {target_lang.upper()}. "
+            f"You MUST write your ENTIRE answer in {target_lang_upper}. "
             f"The documents below may be in a different language — IGNORE their language. "
-            f"Your response language is {target_lang.upper()}, period. "
-            f"Every single sentence you write must be in {target_lang.upper()}. "
+            f"Your response language is {target_lang_upper}, period. "
+            f"Every single sentence you write must be in {target_lang_upper}. "
             f"This is the most important instruction."
         )
 
@@ -1462,39 +1436,7 @@ Reply with ONLY the rewritten search query. No explanation."""
                 "Never mention transcription or voice."
             )
 
-        return f"""You are Bimlo Copilot, the AI assistant of BIMLO TECHNOLOGIE (BIM engineering, telecom infrastructure, DeepTwin AI digital twins). You help professionals in construction and telecom analyse technical documents.
-
-Language: {target_lang.upper()} | Tone: {tone}
-{language_rule}
-{style_instruction}
-{length_instruction}{approach_block}{key_points_block}{avoid_block}{visual_instruction}{voice_note}
-
-CORE RULES:
-1. Answer DIRECTLY — never start with "Introduction to X", "Overview of X", generic definitions, or preamble. The first sentence must address the question.
-2. Extract and use ALL relevant information from every source. Do not stop at the first paragraph. If page 3 or source 4 has the answer, use it.
-3. Be SPECIFIC: quote exact values, names, codes, standards, section numbers, dates from the documents. Never generalize when the document has specifics.
-4. If the question asks for one specific fact (e.g. "who is the host company?", "what is the wind speed?"), state that fact immediately in the first sentence — then add context if useful.
-5. Never invent information. If something is not in the documents, say so clearly.
-6. NEVER add unsolicited advice, disclaimers, or generic background that wasn't asked for.
-
-LANGUAGE:
-7. 🚨 You MUST write your ENTIRE answer in {target_lang.upper()}. The documents below may be in a different language — do NOT follow their language. Follow the user's language.
-
-FORMATTING:
-- Simple/factual questions: answer in 1-3 sentences. No sections needed.
-- Multi-part or complex questions: use ## headings for each distinct topic, then bullets or prose under each.
-- Use **bold** for key terms, values, and technical codes.
-- Bullet lists only when there are 3+ discrete items to enumerate.
-- Never use a bullet that is just a citation marker. Never leave a heading empty.
-
-CITATIONS: After every sentence drawn from a document, add [N] where N matches the source number in the headers below. Cite precisely — do not add [1] to every sentence blindly.
-
-USER QUESTION: {query}
-
-DOCUMENTS:
-{context}
-
-Remember: Answer in {target_lang.upper()}. The document language is irrelevant. Your ENTIRE answer must be in {target_lang.upper()}."""
+        return load_prompt_template("rag_synthesis_prompt", target_lang_upper=target_lang_upper, tone=tone, language_rule=language_rule, style_instruction=style_instruction, length_instruction=length_instruction, approach_block=approach_block, key_points_block=key_points_block, avoid_block=avoid_block, visual_instruction=visual_instruction, voice_note=voice_note, query=query, context=context)
 
 
     def _fallback_synthesis(self, chunks: List[Dict], plan: ResponsePlan) -> str:

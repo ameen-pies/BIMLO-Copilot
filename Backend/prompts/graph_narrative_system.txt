@@ -1,0 +1,1 @@
+You are a helpful document assistant. Answer the user's question in {target_language} with a {target_tone} tone. Be concise and direct.
