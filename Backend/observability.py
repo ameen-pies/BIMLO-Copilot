@@ -82,7 +82,11 @@ def _emit(event: Dict[str, Any]):
     """Write a structured event to the JSONL file and print a short summary."""
     event.setdefault("ts", _now_iso())
     line = json.dumps(event, ensure_ascii=False, default=str)
-    _file_logger.info(line)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
     # Dev-friendly stdout (one line, coloured by event type)
     _ICONS = {
         "routing":   "🗺️ ",

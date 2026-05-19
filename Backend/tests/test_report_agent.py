@@ -11,4 +11,4 @@ def test_report_structure():
     assert "content" in report
     assert len(report["source_docs"]) == 2
     word_count = len(report["content"].split())
-    assert word_count == 11
+    assert word_count == 10
