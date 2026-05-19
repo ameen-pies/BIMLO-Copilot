@@ -408,11 +408,11 @@ export const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>["componen
     </span>
   ),
   table: ({ children }) => (
-    <div className="overflow-x-auto my-3">
+    <div className="overflow-x-auto my-3 rounded-lg" style={{ border: "1px solid rgba(148,163,184,0.25)", background: "rgba(30,41,59,0.5)" }}>
       <table className="text-xs border-collapse w-full">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted font-semibold text-start">{children}</th>,
-  td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
+  th: ({ children }) => <th style={{ borderBottom: "2px solid rgba(148,163,184,0.35)", background: "rgba(51,65,85,0.6)", color: "#e2e8f0", padding: "8px 12px", fontWeight: 700, textAlign: "start" }}>{children}</th>,
+  td: ({ children }) => <td style={{ borderBottom: "1px solid rgba(148,163,184,0.15)", padding: "8px 12px", color: "rgba(226,232,240,0.85)" }}>{children}</td>,
   br: () => <br />,
 };

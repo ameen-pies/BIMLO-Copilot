@@ -2207,6 +2207,7 @@ export function useChatPage() {
             "recent update","what's happening","what is happening","current event",
             "today's update","industry news","sector news","market news",
             "go to news","take me to news","open news","news page","show news",
+            "أخبار","آخر الأخبار","العناوين","الأخبار","اخبار","حدث","أحداث","مقالات","أثراء",
           ],
           teaser: () =>
             `I can give you a quick take here, but honestly our **News page** has a dedicated agent built specifically for this — it tracks live updates, lets you filter by topic, and goes way deeper than I can in a chat window.\n\nWant me to take you there, or would you rather I answer from what I know right now?`,
@@ -2224,7 +2225,7 @@ export function useChatPage() {
             "hop on a call","jump on a call","get on a call","have a call","do a call",
             "call me","audio call","voice chat","talk to you","speak to you","chat verbally",
             "on appelle","on se call","appel vocal","appelez","parler de vive voix",
-            "يمكننا الاتصال","نتصل","مكالمة صوتية","اتصال",
+            "يمكننا الاتصال","نتصل","مكالمة صوتية","اتصال","هاتف","أتكلم","كلمني","نتحدث","تعال نتكلم",
           ],
           teaser: () =>
             `Sounds like you'd prefer a voice conversation! There's a **Voice Call page** set up exactly for that — real-time audio with the agent, no typing needed.\n\nWant to head there, or are you good staying in chat?`,
@@ -2232,7 +2233,22 @@ export function useChatPage() {
       ];
 
       for (const page of softPages) {
-        if (page.signals.some(s => q.includes(s))) {
+        const matched = page.signals.find(s => {
+          // Multi-word signals: exact substring match (always intentional)
+          if (s.includes(" ")) return q.includes(s);
+          // Non-Latin signals (Arabic, etc): substring match — \b doesn't work for these
+          if (/[^\u0000-\u007F]/.test(s)) return q.includes(s);
+          // Single-word Latin signals: word-boundary match to avoid false positives
+          const re = new RegExp(`(?:^|[\\s,;.!?]|\\b)${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[\\s,;.!?]|\\b)`);
+          return re.test(q);
+        });
+        if (matched) {
+          // Guard: if conversation has history (active chat), only trigger on
+          // strong/explicit signals — skip ambiguous single words mid-chat.
+          const isExplicit = page.signals.filter(s => s.includes(" ")).some(s => q.includes(s))
+            || q.length <= 20; // short messages are more likely intentional
+          const hasHistory = messages.length > 1;
+          if (hasHistory && !isExplicit) continue;
           return page;
         }
       }
