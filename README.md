@@ -1,127 +1,152 @@
-# BIMLO
+```
+██████╗ ██╗███╗   ███╗██╗      ██████╗
+██╔══██╗██║████╗ ████║██║     ██╔═══██╗
+██████╔╝██║██╔████╔██║██║     ██║   ██║
+██╔══██╗██║██║╚██╔╝██║██║     ██║   ██║
+██████╔╝██║██║ ╚═╝ ██║███████╗╚██████╔╝
+╚═════╝ ╚═╝╚═╝     ╚═╝╚══════╝ ╚═════╝
+```
 
-> An AI copilot for telecom and BIM workflows that can chat over documents, generate reports, track industry news, handle voice interactions, and plug into CAD/IFC context.
+<h3 align="center">AI Copilot for Telecom & BIM Workflows</h3>
+
+<p align="center">
+  Chat over documents · Generate reports · Track industry news · Voice interactions · CAD/IFC context
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/React-18-61DAFB?logo=react" alt="React">
+  <img src="https://img.shields.io/badge/FastAPI-0.109-009688?logo=fastapi" alt="FastAPI">
+  <img src="https://img.shields.io/badge/TypeScript-5-blue?logo=typescript" alt="TypeScript">
+  <img src="https://img.shields.io/badge/LangChain-Latest-omidou?logo=langchain" alt="LangChain">
+  <img src="https://img.shields.io/badge/Neo4j-5-018BFF?logo=neo4j" alt="Neo4j">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker" alt="Docker">
+  <img src="https://img.shields.io/badge/i18n-EN%20%7C%20FR%20%7C%20AR-green" alt="i18n">
+</p>
+
+---
 
 ## Why This Exists
 
-BIMLO is built for teams that deal with dense technical information and do not have time to dig through PDFs, project docs, knowledge graphs, and market updates by hand.
+Teams dealing with dense technical information don't have time to dig through PDFs, project docs, knowledge graphs, and market updates by hand.
 
-Instead of shipping a basic chatbot, this project pulls together:
+BIMLO pulls together document-aware RAG, graph-backed memory, report generation, news intelligence, voice interfaces, and CAD/IFC-aware flows into one workspace. Upload material, ask hard questions, keep session context, get answers with sources.
 
-- document-aware RAG
-- graph-backed memory and auth
-- report generation
-- news intelligence
-- voice interfaces
-- CAD/IFC-aware assistant flows
+## Features
 
-The result is a workspace where users can upload material, ask hard questions, keep session context, and get answers with sources instead of vibes.
+| Surface | What It Does |
+|---|---|
+| **Chat** (`/chat`) | RAG over uploaded documents with per-session memory, citations, confidence scores |
+| **News** (`/news`) | Industry news intelligence with dedicated chat agent |
+| **Call** (`/call`) | Voice transcription and call-oriented flows |
+| **Admin** (`/admin`) | System health monitoring, session stats, provider status |
+| **Reports** | Structured report generation from retrieved context |
+| **CAD/IFC** | BIM-aware assistant through dedicated agent services |
 
-## What It Can Do
+**Backend capabilities:**
 
-- Chat with uploaded project documents using retrieval-augmented generation
-- Keep per-session memory so conversations stay coherent across turns
-- Generate reports from retrieved context
-- Surface citations and confidence with answers
-- Run telecom/news-specific flows through dedicated agents
-- Support voice transcription and call-oriented routes
-- Handle authentication and conversation persistence with Neo4j
-- Extend into CAD/IFC workflows through dedicated backend services
+- Multi-provider LLM routing (Cloudflare Workers, Groq, OpenRouter) with automatic fallback
+- 35+ prompt templates for specialized agents (RAG, reports, news, graph, vision, voice)
+- LangGraph-powered document ingestion pipeline
+- ChromaDB vector retrieval with reranking
+- Neo4j auth, session persistence, and graph memory
+- LLM judge for answer quality evaluation
+- Autocomplete and suggestion flows
+- Image/PDF vision support in RAG answers
 
 ## Stack
 
-**Frontend**
-
-- React 18
-- TypeScript
-- Vite
-- Tailwind CSS
-- TanStack Query
-- Radix UI
-- Framer Motion / GSAP / 3D visual libraries
-
-**Backend**
-
-- FastAPI
-- LangChain + LangGraph
-- ChromaDB
-- Sentence Transformers
-- Neo4j
-- Groq-backed LLM calls
+| Layer | Tech |
+|---|---|
+| **Frontend** | React 18, TypeScript, Vite, Tailwind CSS, TanStack Query, Radix UI, Framer Motion |
+| **Backend** | FastAPI, LangChain + LangGraph, ChromaDB, Sentence Transformers, Neo4j |
+| **LLM Providers** | Cloudflare Workers (Llama 3.3 70B), Groq, OpenRouter |
+| **Infra** | Docker Compose, Doppler (secrets), observability hooks |
 
 ## Architecture
 
-```text
-Frontend (React/Vite)
-    |
-    v
-FastAPI API layer
-    |
-    +--> Auth + session persistence (Neo4j)
-    +--> Document ingestion pipeline (LangGraph)
-    +--> Vector retrieval (ChromaDB)
-    +--> RAG / routing / report / news / voice / CAD agents
-    |
-    v
-Answers, sources, reports, session memory
+```
+Frontend (React/Vite :5173)
+        │
+        ▼
+   FastAPI API (:8000)
+        │
+        ├─► Auth + Sessions ────────► Neo4j (:7687)
+        ├─► Document Ingestion ─────► LangGraph pipeline
+        ├─► Vector Retrieval ───────► ChromaDB (:8001)
+        ├─► RAG / Routing ──────────► Multi-provider LLM
+        ├─► Report Agent ───────────► Structured output
+        ├─► News Pipeline ──────────► News chat agent
+        ├─► Graph Agent ────────────► Data extraction + charts
+        ├─► Voice / Call ───────────► Transcription + rewrite
+        └─► CAD/IFC Agent ──────────► BIM context bridge
 ```
 
-## Project Layout
+## Project Structure
 
-```text
+```
 BIMLO/
-|- Backend/        FastAPI app, agents, ingestion, auth, retrieval, reports
-|- Frontend/       React app, routes, UI system, API client
-|- data/           Runtime data, uploads, generated artifacts
-`- docker-compose.yml
+├── Backend/
+│   ├── routers/          API endpoints (chat, documents, news, reports, sessions, providers, health)
+│   ├── services/         Core logic (RAG engine, ingestion, agents, vector store, news, voice, CAD)
+│   ├── prompts/          35+ LLM prompt templates
+│   ├── models/           Data models
+│   ├── core/             Config and shared utilities
+│   ├── evals/            Evaluation harness
+│   ├── providers.json    Multi-provider LLM config
+│   ├── main.py           FastAPI entry point
+│   └── docker-compose.yml
+├── Frontend/
+│   ├── src/
+│   │   ├── pages/        Chat, News, Call, Admin, Landing
+│   │   ├── components/   UI system (Radix primitives, chat, effects)
+│   │   ├── services/     API client
+│   │   ├── locales/      en.json, fr.json, ar.json
+│   │   ├── hooks/        Custom React hooks
+│   │   └── context/      React context providers
+│   └── package.json
+└── data/                 Runtime data, uploads, generated artifacts
 ```
 
-## Main Product Surfaces
+## Quick Start
 
-- `/` landing page
-- `/chat` document-aware copilot experience
-- `/news` news intelligence interface
-- `/call` voice/call experience
-
-Backend services include document processing, autocomplete, suggestion flows, voice routes, report generation, news pipelines, and CAD/IFC agent support.
-
-## Local Setup
-
-### 1. Prerequisites
+### Prerequisites
 
 - Node.js 18+
 - Python 3.10+
-- Neo4j instance
-- API credentials for the LLM providers you plan to use
+- Docker + Docker Compose
+- API key for at least one LLM provider
 
-### 2. Configure environment variables
+### Environment Setup
 
-Create your local env files and provide values for the variables used by the app.
+Create `Backend/.env` with:
 
-Common variables referenced in this repo:
+```env
+# LLM providers (at least one)
+GROQ_API_KEY=...
+CF_API_KEY=...
 
-- `GROQ_API_KEY`
-- `CF_API_KEY`
-- `DATA_DIR`
-- `NEO4J_URI`
-- `NEO4J_USER`
-- `NEO4J_PASSWORD`
-- `NEO4J_DATABASE`
-- `VITE_API_URL`
+# Database
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=...
 
-Keep secrets in local env files and out of version control.
+# Storage
+DATA_DIR=./data
 
-### 3. Start the backend
+# Frontend
+VITE_API_URL=http://localhost:8000
+```
+
+### Run with Docker (recommended)
 
 ```bash
 cd Backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+docker compose up --build
 ```
 
-### 4. Start the frontend
+Spins up: Neo4j, ChromaDB, and the FastAPI backend.
+
+Then start the frontend separately:
 
 ```bash
 cd Frontend
@@ -129,82 +154,61 @@ npm install
 npm run dev
 ```
 
-Frontend default dev URL:
-
-- `http://localhost:5173`
-
-Backend default dev URL:
-
-- `http://localhost:8000`
-
-## Docker
-
-The repo includes a `docker-compose.yml` with:
-
-- backend service
-- frontend development profile
-- frontend production profile
-
-Typical usage:
+### Run without Docker
 
 ```bash
-docker compose --profile dev up --build
+# Backend
+cd Backend
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Frontend (separate terminal)
+cd Frontend
+npm install
+npm run dev
 ```
 
-If you use Docker on a case-sensitive environment, make sure the service build paths match your actual folder names.
+| Service | URL |
+|---|---|
+| Frontend | `http://localhost:5173` |
+| Backend API | `http://localhost:8000` |
+| Neo4j Browser | `http://localhost:7474` |
+| ChromaDB | `http://localhost:8001` |
 
-## API Notes
+## Internationalization
 
-Representative backend capabilities include:
+Full i18n support with per-message RTL detection:
 
-- `POST /upload`
-- `GET /documents`
-- `DELETE /documents/{document_id}`
-- `POST /query`
-- `POST /generate-report`
-- `GET /health`
+- **English** (en)
+- **French** (fr)
+- **Arabic** (ar) — full RTL layout support
 
-Additional routes are mounted for auth, suggestions, voice, reports, news chat, and CAD/IFC flows.
+## API Reference
 
-## Frontend Highlights
+| Endpoint | Method | Description |
+|---|---|---|
+| `/upload` | POST | Upload documents for RAG ingestion |
+| `/documents` | GET | List uploaded documents |
+| `/documents/{id}` | DELETE | Remove a document |
+| `/query` | POST | Ask a question over documents |
+| `/generate-report` | POST | Generate structured report |
+| `/health` | GET | System health check |
+| `/news-conversations` | GET | News chat sessions |
+| `/sessions` | GET | User sessions |
+| `/providers` | GET | Available LLM providers |
 
-The frontend is more than a dashboard shell. It includes:
-
-- route-based product areas for chat, news, and calls
-- a custom visual layer with motion and interactive effects
-- auth-aware API access
-- reusable UI primitives under `src/components/ui`
-
-## Backend Highlights
-
-The backend centers around a modular services layer:
-
-- `document_processor.py` for ingestion prep
-- `vector_store.py` for retrieval storage
-- `rag_engine.py` for answer generation
-- `ingestion_graph.py` for pipeline orchestration
-- `report_agent.py` for structured report output
-- `news_pipeline.py` and `news_chat_agent.py` for news workflows
-- `cad_ifc_agent.py` for CAD/IFC-specific capabilities
-- `neo4j_auth.py` for auth, tokens, and persisted conversation state
-
-## Current Positioning
-
-BIMLO already reads like a serious applied AI product:
-
-- multi-surface frontend
-- agent-style backend
-- persistent graph memory
-- retrieval and reporting
-- domain-specific expansion points
-
-That makes it a strong base for internal ops tooling, technical knowledge copilots, or client-facing expert assistants.
+Additional routes for auth, suggestions, voice, autocomplete, and CAD/IFC flows.
 
 ## Developer Notes
 
-- The root project uses `Backend/` and `Frontend/` directory names with capital letters.
-- The checked-in frontend README started as a generated placeholder and has been replaced with project-specific docs.
-- There are active env-driven integrations here, so be careful not to leak credentials in commits, screenshots, or issue threads.
+- Directory names are capitalized: `Backend/`, `Frontend/`
+- Secrets management: `.env` for dev, Doppler for production (`docker compose --profile doppler up`)
+- LLM provider config lives in `Backend/providers.json` — add/remove providers without code changes
+- Prompt templates in `Backend/prompts/` — 35+ specialized prompts for different agents
+- Never commit credentials, API keys, or `.env` files
 
+## License
 
-
+Proprietary. All rights reserved.
