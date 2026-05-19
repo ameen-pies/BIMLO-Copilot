@@ -65,7 +65,7 @@ apscheduler==3.10.4
 # Auth & config
 bcrypt==4.1.2
 python-dotenv==1.0.0
-pydantic==2.5.3
+pydantic==2.7.4
 pydantic-settings==2.1.0
 
 # LLM provider
