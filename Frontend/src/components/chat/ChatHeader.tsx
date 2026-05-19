@@ -166,7 +166,7 @@ export function ChatHeader({
         <Logo className="h-7 w-7" />
         <span className="font-heading font-semibold text-sm text-foreground">Bimlo Copilot</span>
       </div>
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4 pointer-events-none">
+      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 max-w-[calc(100%-18rem)] w-full text-center px-4 pointer-events-none hidden md:block">
         {editingTitle ? (
           <input
             ref={editTitleRef}

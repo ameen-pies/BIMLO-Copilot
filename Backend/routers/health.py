@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from datetime import datetime
+import json
 import os
 
 from core import globals as g
@@ -26,19 +27,25 @@ async def health_check():
     try:
         stats = g.vector_store.get_global_stats()
 
-        cf_primary_ok  = bool(os.getenv("CF_API_KEY", "").strip())
-        cf_backup_ok   = bool(os.getenv("CF_BACKUP_API_KEY", os.getenv("CF_API_KEY", "")).strip())
-        groq_ok        = bool(os.getenv("GROQ_API_KEY"))
-        nvidia_ok      = bool(os.getenv("NVIDIA_API_KEY"))
         elevenlabs_ok  = bool(os.getenv("ELEVENLABS_API_KEY"))
 
-        llm_providers = {
-            "cf_primary":  "configured" if cf_primary_ok  else "not_configured",
-            "cf_backup":   "configured" if cf_backup_ok   else "not_configured",
-            "groq":        "configured" if groq_ok        else "not_configured",
-            "nvidia_nim":  "configured" if nvidia_ok      else "not_configured",
-        }
-        llm_status = "ok" if any([cf_primary_ok, cf_backup_ok, groq_ok, nvidia_ok]) else "degraded"
+        # Dynamic provider check from providers.json
+        llm_providers = {}
+        any_provider_ok = False
+        try:
+            providers_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "providers.json")
+            with open(providers_path) as f:
+                providers_cfg = json.load(f).get("providers", [])
+            for p in providers_cfg:
+                key_env = p.get("api_key_env", "")
+                fallback_env = p.get("fallback_api_key_env", "")
+                ok = bool(os.getenv(key_env, "").strip()) or (fallback_env and bool(os.getenv(fallback_env, "").strip()))
+                llm_providers[p["id"]] = "configured" if ok else "not_configured"
+                if ok:
+                    any_provider_ok = True
+        except Exception:
+            pass
+        llm_status = "ok" if any_provider_ok else "degraded"
 
         neo4j_status = "unknown"
         try:

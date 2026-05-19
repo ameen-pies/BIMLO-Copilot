@@ -71,10 +71,19 @@ const CardNav = ({
     return w;
   };
 
-  // Fixed expanded width — wider for Arabic since labels are longer
-  const isRtl = typeof document !== "undefined" && document.documentElement.dir === "rtl";
-  const EXPANDED_WIDTH = isRtl ? 640 : 610;
-  const getExpandedWidth = () => EXPANDED_WIDTH;
+  // Measure actual content width for expanded state — dynamic for translated labels
+  const getExpandedWidth = () => {
+    const navEl = navRef.current;
+    if (!navEl) return 610;
+    const saved = navEl.style.width;
+    const savedOverflow = navEl.style.overflow;
+    navEl.style.width = 'max-content';
+    navEl.style.overflow = 'visible';
+    const w = Math.ceil(navEl.getBoundingClientRect().width) + 8;
+    navEl.style.width = saved;
+    navEl.style.overflow = savedOverflow;
+    return Math.max(w, 300);
+  };
 
   const buildTimeline = (resetPositions = true) => {
     const navEl = navRef.current;

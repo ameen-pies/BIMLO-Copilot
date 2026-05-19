@@ -42,11 +42,13 @@ interface Stats {
   users_with_reports:       number;
 }
 
-interface LLMProviders {
-  cf_primary?: string;
-  cf_backup?:  string;
-  groq?:       string;
-  nvidia_nim?: string;
+type LLMProviders = Record<string, string>;
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  description?: string;
+  color?: string;
 }
 
 interface NewsPipelineInfo {
@@ -835,6 +837,7 @@ export default function AdminPage() {
   const [stats, setStats]       = useState<Stats | null>(null);
   const [health, setHealth]     = useState<HealthData | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [logs, setLogs]         = useState<LogEntry[]>([]);
   const [monitorActive, setMonitorActive]     = useState<any[]>([]);
   const [monitorRecent, setMonitorRecent]     = useState<any[]>([]);
@@ -951,8 +954,15 @@ export default function AdminPage() {
   const loadHealth = useCallback(async () => {
     setHealthLoading(true);
     try {
-      const res = await fetch(`${API}/health`);
-      if (res.ok) setHealth(await res.json());
+      const [healthRes, provRes] = await Promise.all([
+        fetch(`${API}/health`),
+        fetch(`${API}/providers`),
+      ]);
+      if (healthRes.ok) setHealth(await healthRes.json());
+      if (provRes.ok) {
+        const data = await provRes.json();
+        setProviders(data.providers ?? []);
+      }
     } finally { setHealthLoading(false); }
   }, []);
 
@@ -1486,19 +1496,16 @@ export default function AdminPage() {
                   </div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {([
-                    { key: "cf_primary",  label: t("admin.health_cf_primary"),      icon: Zap,      color: "#f97316" },
-                    { key: "cf_backup",   label: t("admin.health_cf_backup"),       icon: Zap,      color: "#f97316" },
-                    { key: "groq",        label: t("admin.health_groq"),   icon: Cpu,      color: "#8b5cf6" },
-                    { key: "nvidia_nim",  label: t("admin.health_nvidia"),   icon: Activity, color: "#76b900" },
-                  ] as const).map(p => {
-                    const val = health?.llm_providers?.[p.key as keyof LLMProviders];
+                  {providers.length > 0 ? providers.map(p => {
+                    const val = health?.llm_providers?.[p.id];
                     const st = val === "configured" ? "ok" : val === "not_configured" ? "warn" : "unknown";
                     return (
-                      <ServiceBadge key={p.key} label={p.label} status={st} icon={p.icon}
+                      <ServiceBadge key={p.id} label={p.name} status={st} icon={Zap}
                         detail={val === "configured" ? t("admin.health_key_set") : t("admin.health_key_not_set")} />
                     );
-                  })}
+                  }) : (
+                    <span style={{ fontSize: 12, color: "hsl(var(--muted-foreground))" }}>{t("admin.health_loading")}</span>
+                  )}
                 </div>
               </div>
             </div>
