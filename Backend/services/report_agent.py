@@ -855,9 +855,15 @@ class SharedContext:
 # PERSISTENCE  (in-memory + optional JSON file backing)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_DATA_DIR    = os.getenv("DATA_DIR", "/home/claude/bimlo-copilot/data")
+_DATA_DIR    = os.getenv("DATA_DIR", os.path.join(os.path.expanduser("~"), "bimlo-copilot", "data"))
 _REPORTS_DIR = os.path.join(_DATA_DIR, "reports")
-os.makedirs(_REPORTS_DIR, exist_ok=True)
+try:
+    os.makedirs(_REPORTS_DIR, exist_ok=True)
+except PermissionError:
+    import tempfile
+    _DATA_DIR    = os.path.join(tempfile.gettempdir(), "bimlo-copilot", "data")
+    _REPORTS_DIR = os.path.join(_DATA_DIR, "reports")
+    os.makedirs(_REPORTS_DIR, exist_ok=True)
 
 _reports_store: Dict[str, Dict] = {}
 

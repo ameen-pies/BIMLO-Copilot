@@ -23,7 +23,7 @@ neo4j==5.17.0
 pdfplumber==0.10.3
 PyPDF2==3.0.1
 python-docx==1.1.0
-Pillow==10.3.0
+Pillow==12.2.0
 
 # CAD / IFC
 ifcopenshell==0.7.10
