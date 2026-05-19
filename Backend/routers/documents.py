@@ -1,9 +1,9 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header
 from fastapi.responses import StreamingResponse, Response
-from typing import Dict, List, Optional, Any
+from typing import Optional
 from io import BytesIO
-import os, uuid, json, hashlib
-from datetime import datetime
+import os
+import hashlib
 
 from core import globals as g
 
@@ -89,7 +89,7 @@ async def upload_document(
 
         if is_cad:
             if not g._cad_ifc_available:
-                raise HTTPException(400, f"CAD/IFC support is not available on this server.")
+                raise HTTPException(400, "CAD/IFC support is not available on this server.")
             try:
                 from cad_ifc_agent import _parse_file, CadSharedContext
 
@@ -400,7 +400,7 @@ async def get_document_content(
                     fname, content = _assemble(results2, fallback_filename)
                     print(f"\u2705 [content] {len(results2['ids'])} chunks via filename for '{fname}'")
                     return {"document_id": doc_id, "filename": fname, "content": content}
-                print(f"\u26a0\ufe0f  [content] filename-based session mismatch")
+                print("\u26a0\ufe0f  [content] filename-based session mismatch")
 
         print(f"\u274c [content] no chunks found anywhere for doc_id={doc_id}")
         raise HTTPException(status_code=404, detail="Document not found")
@@ -409,7 +409,8 @@ async def get_document_content(
         raise
     except Exception as e:
         print(f"\u274c [content] exception: {e}")
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Error reading document: {e}")
 
 

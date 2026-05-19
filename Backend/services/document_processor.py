@@ -112,7 +112,6 @@ class DocumentProcessor:
         Returns the description string, or "" on failure.
         """
         from PIL import Image
-        ext = os.path.splitext(filename)[1].lower()
         try:
             img = Image.open(BytesIO(image_bytes)).convert("RGB")
         except Exception as e:
@@ -409,7 +408,6 @@ class DocumentProcessor:
         descriptions: List[str] = []
         try:
             from PIL import Image
-            from docx.oxml.ns import qn
 
             for rel in doc.part.rels.values():
                 if "image" not in rel.reltype:

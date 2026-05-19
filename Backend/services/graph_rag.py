@@ -39,9 +39,8 @@ from __future__ import annotations
 import os
 import re
 import json
-import uuid
 import time
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional
 
 from prompt_loader import load_prompt
 
@@ -109,7 +108,7 @@ def _extract_entities_from_chunk(text: str, filename: str) -> Dict:
         parsed = json.loads(clean)
         return parsed
 
-    except (json.JSONDecodeError, Exception) as e:
+    except (json.JSONDecodeError, Exception):
         # Non-fatal — skip this chunk
         return {"entities": [], "relationships": []}
 

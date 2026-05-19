@@ -16,7 +16,6 @@ NO hardcoding. NO if-statements for language/tone. The LLM is the brain.
 
 import os
 import json
-import requests
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from prompt_loader import load_prompt_template
@@ -207,7 +206,7 @@ class LLMJudge:
 
         history_section = ""
         if conversation_history and len(conversation_history) > 0:
-            history_section = f"\n\nRECENT CONVERSATION:\n" + "\n".join(str(h)[:300] for h in conversation_history[-4:])
+            history_section = "\n\nRECENT CONVERSATION:\n" + "\n".join(str(h)[:300] for h in conversation_history[-4:])
 
         # Pre-detected language hint — gives the judge a strong anchor
         lang_hint = ""
@@ -383,8 +382,6 @@ class LLMJudge:
         Uses simple heuristics to detect common languages, but defaults to 'en' 
         as a safe fallback since most technical/programming content is in English.
         """
-        query_lower = user_query.lower()
-        
         # Simple script-based detection (works without LLM)
         # Arabic script
         if any('\u0600' <= c <= '\u06FF' for c in user_query):
@@ -457,7 +454,7 @@ if __name__ == "__main__":
     plan = judge.plan_response(query)
     
     print(f"\nQuery: {query}")
-    print(f"\n🎯 RESPONSE PLAN:")
+    print("\n🎯 RESPONSE PLAN:")
     print(f"   Language: {plan.target_language} (confidence: {plan.target_language_confidence})")
     print(f"   Tone: {plan.target_tone}")
     print(f"   Reasoning: {plan.reasoning}")

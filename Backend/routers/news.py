@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
-import re, logging
+import re
+import logging
 
 from core.globals import _news_pipeline_available
 

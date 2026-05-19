@@ -26,7 +26,6 @@ import re
 import math
 import logging
 import tempfile
-import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -337,8 +336,8 @@ def _are_collinear(l1: dict, l2: dict, tol: float = 1e-4) -> bool:
         return False
 
     # Check direction vectors parallel
-    def vec(l):
-        return [l["end"][0]-l["start"][0], l["end"][1]-l["start"][1]]
+    def vec(ln):
+        return [ln["end"][0]-ln["start"][0], ln["end"][1]-ln["start"][1]]
 
     v1, v2 = vec(l1), vec(l2)
     cross = abs(v1[0]*v2[1] - v1[1]*v2[0])
@@ -385,17 +384,17 @@ def _merge_collinear(lines: List[dict]) -> List[dict]:
 def _dedup_lines(lines: List[dict], tol: float = 1e-4) -> List[dict]:
     """Remove duplicate or near-zero-length lines."""
     seen = []
-    for l in lines:
-        if _pt_dist(l["start"], l["end"]) < tol:
+    for ln in lines:
+        if _pt_dist(ln["start"], ln["end"]) < tol:
             continue   # zero-length
         duplicate = False
         for s in seen:
-            if ((_pt_dist(l["start"], s["start"]) < tol and _pt_dist(l["end"], s["end"]) < tol) or
-                (_pt_dist(l["start"], s["end"]) < tol and _pt_dist(l["end"], s["start"]) < tol)):
+            if ((_pt_dist(ln["start"], s["start"]) < tol and _pt_dist(ln["end"], s["end"]) < tol) or
+                (_pt_dist(ln["start"], s["end"]) < tol and _pt_dist(ln["end"], s["start"]) < tol)):
                 duplicate = True
                 break
         if not duplicate:
-            seen.append(l)
+            seen.append(ln)
     return seen
 
 

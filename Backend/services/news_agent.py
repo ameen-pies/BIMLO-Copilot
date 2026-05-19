@@ -42,8 +42,7 @@ import urllib.parse
 import calendar
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Generator, Iterator, List, Optional, TypedDict, Annotated
-import operator
+from typing import Iterator, List, Optional, TypedDict
 
 logging.basicConfig(
     level=logging.INFO,

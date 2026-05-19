@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import os, logging
+import os
+import logging
 
 from neo4j_auth import router as auth_router, init_neo4j
 from slowapi import _rate_limit_exceeded_handler
@@ -21,14 +22,14 @@ cf_status   = f"{CHECK} configured" if cf_ok   else "\u26a0\ufe0f  missing CF_AP
 print(f"\U0001f4e1 Groq API: {groq_status}")
 print(f"\U0001f4e1 CF API:   {cf_status}")
 
-from services.document_processor import DocumentProcessor
-from services.vector_store import VectorStoreManager
-from services.rag_engine import RAGEngine
-from services.suggest import router as suggest_router
-from services.voice_transcriber import router as voice_router
-from services.voice_call import router as voice_call_router
-from services.autocomplete import router as autocomplete_router
-from services.report_agent import router as report_router, SharedContext
+from services.document_processor import DocumentProcessor  # noqa: E402
+from services.vector_store import VectorStoreManager  # noqa: E402
+from services.rag_engine import RAGEngine  # noqa: E402
+from services.suggest import router as suggest_router  # noqa: E402
+from services.voice_transcriber import router as voice_router  # noqa: E402
+from services.voice_call import router as voice_call_router  # noqa: E402
+from services.autocomplete import router as autocomplete_router  # noqa: E402
+from services.report_agent import router as report_router, SharedContext  # noqa: E402
 
 try:
     from services.ingestion_graph import run_ingestion_pipeline
@@ -45,9 +46,9 @@ except ImportError:
 g.run_ingestion_pipeline = run_ingestion_pipeline
 
 try:
-    from news_pipeline import (
-        run_news_pipeline, pipeline_is_running, get_meta, get_page,
-        get_status as _pipeline_get_status, CACHE_DIR as NEWS_CACHE_DIR,
+    from news_pipeline import (  # noqa: F401
+        run_news_pipeline, pipeline_is_running, get_meta, get_page,  # noqa: F401
+        get_status as _pipeline_get_status, CACHE_DIR as NEWS_CACHE_DIR,  # noqa: F401
     )
     g._news_pipeline_available = True
 except ImportError:
@@ -115,7 +116,7 @@ g.rag_engine    = RAGEngine(g.vector_store)
 
 SharedContext.set_vector_store(g.vector_store)
 
-from routers import health, documents, chat, sessions, reports, news, providers
+from routers import health, documents, chat, sessions, reports, news, providers  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(health.router)
@@ -138,7 +139,7 @@ if g._cad_ifc_available:
 os.makedirs(g.UPLOAD_DIR, exist_ok=True)
 os.makedirs(g.REPORTS_DIR, exist_ok=True)
 
-from routers.health import detailed_health_router
+from routers.health import detailed_health_router  # noqa: E402
 
 app.include_router(detailed_health_router)
 
@@ -158,7 +159,7 @@ async def startup_event():
     print(f"\U0001f4c1 Data dir:    {g.DATA_DIR}")
     print(f"\U0001f4c1 Uploads:     {g.UPLOAD_DIR}")
     print(f"\U0001f4c4 Reports:     {g.REPORTS_DIR}")
-    print(f"\U0001f578\ufe0f  Graph routes: direct | rag | iterative_rag | analytics")
+    print("\U0001f578\ufe0f  Graph routes: direct | rag | iterative_rag | analytics")
     try:
         s = g.vector_store.get_global_stats()
         print(f"\U0001f4ca Vector store: {s['total_documents']} docs, {s['total_chunks']} chunks")

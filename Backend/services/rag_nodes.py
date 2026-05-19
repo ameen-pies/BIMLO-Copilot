@@ -11,12 +11,10 @@ from __future__ import annotations
 import os
 import re
 import json
-import threading
-from typing import Any, Dict, List
-from datetime import datetime
+from typing import Dict, List
 
-from rag_state import AgentState, MAX_RETRIES
-from prompt_loader import load_prompt, load_prompt_template
+from rag_state import AgentState
+from prompt_loader import load_prompt_template
 from rag_helpers import (
     _detect_script_language,
     _build_context,
@@ -39,7 +37,7 @@ except ImportError:
     _RELEVANCE_EXTRACTOR_AVAILABLE = False
 
 try:
-    from graph_agent import GraphAgent, is_graph_request
+    from graph_agent import GraphAgent, is_graph_request  # noqa: F401
     _GRAPH_AGENT_AVAILABLE = True
 except ImportError:
     _GRAPH_AGENT_AVAILABLE = False
@@ -77,7 +75,7 @@ class RAGNodesMixin:
         query   = state["query"]
         chunks  = state["retrieved_chunks"]
 
-        print(f"🔀 Transform → ", end="")
+        print("🔀 Transform → ", end="")
 
         if not chunks:
             print("no documents")
@@ -253,9 +251,9 @@ class RAGNodesMixin:
         history_msgs = [{"role": m["role"], "content": m["content"]} for m in history[-10:]] if history else []
 
         # Build options text for the prompt
-        options_text = ""
+        _options_text = ""
         if options:
-            options_text = "\n".join(f"- {opt}" for opt in options)
+            _options_text = "\n".join(f"- {opt}" for opt in options)
 
         # Build context hint
         doc_hint = ""
@@ -642,7 +640,7 @@ SECTION SUMMARIES:
         query   = state["query"]
         history = state.get("conversation_history", [])
 
-        print(f"📖 Define (Wikipedia-only) → ", end="")
+        print("📖 Define (Wikipedia-only) → ", end="")
 
         # Ask the judge to plan language/tone — no chunks needed for planning
         history_texts = [f"{m['role'].upper()}: {m['content'][:150]}" for m in history[-6:]]
@@ -720,9 +718,9 @@ SECTION SUMMARIES:
                 "cited_facts":   [wiki_ctx.term],
                 "wiki_url":      wiki_ctx.url,
             })
-            print(f"   📎 Wikipedia source card added")
+            print("   📎 Wikipedia source card added")
         else:
-            print(f"   ℹ️  Wikipedia not cited in answer — card suppressed")
+            print("   ℹ️  Wikipedia not cited in answer — card suppressed")
 
         return {
             **state,
@@ -1007,7 +1005,7 @@ SECTION SUMMARIES:
         """
         query      = state["query"]
         session_id = state.get("session_id", "")
-        user_id    = state.get("user_id")
+        _user_id   = state.get("user_id")
         history    = state.get("conversation_history", [])
         doc_scope  = state.get("doc_scope_hint", "")
 
@@ -1087,7 +1085,8 @@ SECTION SUMMARIES:
             print("⚠️  cad_node: cad_ifc_agent not installed — falling back to RAG")
             return self.retrieve_vector({**state, "route": "rag"})
         except Exception as e:
-            import traceback as _tb; _tb.print_exc()
+            import traceback as _tb
+            _tb.print_exc()
             err = f"CAD analysis failed: {e}"
             print(f"❌ cad_node: {err}")
             return {
@@ -1113,7 +1112,7 @@ SECTION SUMMARIES:
         chunks = state["retrieved_chunks"]
         plan = state.get("response_plan")
 
-        print(f"📊 Analytics generation → ", end="")
+        print("📊 Analytics generation → ", end="")
 
         if not chunks:
             print("no documents")
@@ -1169,7 +1168,7 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
             analytics_data = self._build_fallback_analytics(chunks, target_lang)
             narrative = analytics_data.get("summary", "")
 
-        print(f"done")
+        print("done")
 
         return {
             **state,
@@ -1312,7 +1311,7 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
                         print(f"      ⚠️  group probe failed for '{hint}' (kept): {_ve}")
 
                 if not valid_groups:
-                    print(f"   ⚠️  graph_node: no valid chart groups found after validation")
+                    print("   ⚠️  graph_node: no valid chart groups found after validation")
                     fallback_answer = (
                         "I couldn't find numeric or structured data in your documents "
                         "that's ready to chart right now. Make sure your documents contain "
@@ -1471,7 +1470,8 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
                         task="classify",
                         preferred_provider=state.get("preferred_provider"),
                     )
-                    import json as _j, re as _re2
+                    import json as _j
+                    import re as _re2
                     _clean = _re2.sub(r"```(?:json)?|```", "", _raw).strip()
                     # extract first {...} in case the LLM adds preamble
                     _m = _re2.search(r'\{[^}]+\}', _clean)
@@ -1505,7 +1505,8 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
 
             # Helper: resolve GraphAgent module once
             def _load_graph_agent_mod():
-                import importlib as _il, sys as _s
+                import importlib as _il
+                import sys as _s
                 if "services.graph_agent" in _s.modules:
                     return _s.modules["services.graph_agent"]
                 try:
@@ -1640,7 +1641,7 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
             _cancel_ev = getattr(self, "_cancel_event", None)
             while not done_event.wait(timeout=5):
                 if _cancel_ev and _cancel_ev.is_set():
-                    print(f"   🛑 report_node: cancelled by stop event — aborting wait")
+                    print("   🛑 report_node: cancelled by stop event — aborting wait")
                     error_box[0] = RuntimeError("Cancelled by user")
                     done_event.set()
                     break
@@ -1702,7 +1703,8 @@ Remember: ALL text fields must be in {target_lang.upper()}."""
             }
 
         except Exception as e:
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             err = f"Report generation failed: {e}"
             print(f"   ❌ report_node: {err}")
             return {

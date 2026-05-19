@@ -83,7 +83,6 @@ async def health_check():
 
         judge_ok = False
         try:
-            from llm_judge import LLMJudge
             judge_ok = True
         except Exception:
             pass

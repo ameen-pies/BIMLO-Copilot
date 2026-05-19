@@ -276,7 +276,6 @@ def _age_filter_node(state: PipelineState) -> PipelineState:
             continue
         try:
             # Handle ISO strings with or without trailing 'Z' / timezone offset
-            pub_clean = pub.rstrip("Z").split("+")[0].split("-")
             # re-join only the date+time part (YYYY-MM-DDTHH:MM:SS)
             pub_dt = datetime.fromisoformat(pub.rstrip("Z").split("+")[0])
             if pub_dt >= cutoff:

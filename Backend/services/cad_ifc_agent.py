@@ -63,21 +63,21 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import queue
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from prompt_loader import load_prompt
 
 # Internal CAD → IFC conversion pipeline (transparent to user)
+logger = logging.getLogger("cad_ifc_agent")
+
 try:
     from cad_to_ifc import convert_cad_to_ifc
     _CAD_TO_IFC_AVAILABLE = True
 except ImportError:
     _CAD_TO_IFC_AVAILABLE = False
     logger.warning("[cad_ifc_agent] cad_to_ifc module not found — silent conversion disabled")
-
-logger = logging.getLogger("cad_ifc_agent")
 router = APIRouter()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -373,9 +373,12 @@ def _parse_ifc(file_bytes: bytes, ext: str) -> dict:
     for label, items in elements_raw.items():
         for el in items[:50]:   # cap to avoid huge payloads
             parts = [f"{el['type']}"]
-            if el.get("material"): parts.append(f"material: {el['material']}")
-            if el.get("level"):    parts.append(f"level: {el['level']}")
-            if el.get("height"):   parts.append(f"height: {el['height']}")
+            if el.get("material"):
+                parts.append(f"material: {el['material']}")
+            if el.get("level"):
+                parts.append(f"level: {el['level']}")
+            if el.get("height"):
+                parts.append(f"height: {el['height']}")
             embed_strings.append(", ".join(parts))
 
     # ── Unknown / missing logs ────────────────────────────────────────────────
@@ -429,7 +432,7 @@ def _parse_dxf(file_bytes: bytes) -> dict:
     """Parse DXF file with ezdxf."""
     try:
         import ezdxf
-        from ezdxf.enums import UnitsCode
+        from ezdxf.enums import UnitsCode  # noqa: F401
     except ImportError:
         raise RuntimeError("ezdxf not installed — run: pip install ezdxf")
 
@@ -671,9 +674,12 @@ def _build_context_block(summary: dict) -> str:
             for lbl, items in list(samples.items())[:6]:
                 for el in items[:3]:
                     parts = [f"[{lbl}]"]
-                    if el.get("name"):     parts.append(f"name={el['name']}")
-                    if el.get("material"): parts.append(f"material={el['material']}")
-                    if el.get("level"):    parts.append(f"level={el['level']}")
+                    if el.get("name"):
+                        parts.append(f"name={el['name']}")
+                    if el.get("material"):
+                        parts.append(f"material={el['material']}")
+                    if el.get("level"):
+                        parts.append(f"level={el['level']}")
                     lines.append("  " + " | ".join(parts))
 
     elif context_pipeline == "cad":

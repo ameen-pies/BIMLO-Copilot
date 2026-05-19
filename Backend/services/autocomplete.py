@@ -29,8 +29,7 @@ from __future__ import annotations
 import os
 import re
 import time
-import requests
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse

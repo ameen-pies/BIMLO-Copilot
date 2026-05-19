@@ -1,4 +1,3 @@
-import pytest
 from services.vector_store import VectorStoreManager
 
 

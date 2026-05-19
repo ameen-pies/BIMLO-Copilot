@@ -1,4 +1,3 @@
-import pytest
 from neo4j_auth import _hash_password, _verify_password
 
 
@@ -18,7 +17,8 @@ def test_bcrypt_wrong_password():
 
 
 def test_sha256_legacy_compatibility():
-    import hashlib, secrets
+    import hashlib
+    import secrets
     pw = "legacy_password"
     salt = secrets.token_hex(16)
     digest = hashlib.sha256((salt + pw).encode()).hexdigest()

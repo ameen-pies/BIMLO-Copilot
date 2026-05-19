@@ -31,7 +31,6 @@ Run:
 from __future__ import annotations
 
 import io
-import os
 import time
 import uuid
 import json
@@ -506,7 +505,8 @@ class TestObservability:
             entries = m.obs.tail_logs(n=5, event_filter="routing")
             assert entries and entries[-1]["route"] == "define"
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_judge_event_written(self):
         import observability as m
@@ -517,7 +517,8 @@ class TestObservability:
             entries = m.obs.tail_logs(n=5, event_filter="judge")
             assert entries and entries[-1]["passed"] is True
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_ingestion_event_written(self):
         import observability as m
@@ -528,7 +529,8 @@ class TestObservability:
             entries = m.obs.tail_logs(n=5, event_filter="ingestion")
             assert entries and entries[-1]["node"] == "index_vector_store"
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_query_end_event_written(self):
         import observability as m
@@ -540,7 +542,8 @@ class TestObservability:
             entries = m.obs.tail_logs(n=5, event_filter="query_end")
             assert entries and entries[-1]["route"] == "rag"
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_stats_judge_counts(self):
         import observability as m
@@ -555,7 +558,8 @@ class TestObservability:
             assert stats["judge_fail"] == 1
             assert abs(stats["judge_pass_rate"] - (2/3)) < 0.01
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_alert_fires_after_consecutive_judge_failures(self):
         import observability as m
@@ -581,7 +585,8 @@ class TestObservability:
                 time.sleep(0.05)
             assert t.elapsed_ms >= 45.0
         finally:
-            m.LOG_FILE = orig; tmp.unlink(missing_ok=True)
+            m.LOG_FILE = orig
+            tmp.unlink(missing_ok=True)
 
     def test_pipeline_logs_endpoint_blocked_for_user(self, auth_token: str):
         """Non-admin must get 401/403 on pipeline-logs API."""
@@ -629,5 +634,6 @@ class TestStreaming:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    import subprocess, sys
+    import subprocess
+    import sys
     sys.exit(subprocess.call(["pytest", __file__, "-v", "--tb=short", "-x"]))

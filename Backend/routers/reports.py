@@ -1,14 +1,18 @@
 from fastapi import APIRouter, Header, HTTPException
-from typing import Optional, Dict, List
-import re, json, ast, os, uuid
+from typing import Optional, List
+import re
+import json
+import ast
+import os
+import uuid
 from datetime import datetime
 
 from models.query import QueryRequest
 from core.globals import (
-    _session_user_context, _session_routes, _conversation_cache,
+    _session_user_context, _conversation_cache,
     rag_engine, REPORTS_DIR,
 )
-from core.session_state import get_history, append_turn, get_route_log, log_route
+from core.session_state import get_history, append_turn
 from services.report_agent import SharedContext
 from prompt_loader import load_prompt
 

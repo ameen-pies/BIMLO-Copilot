@@ -15,8 +15,6 @@ from __future__ import annotations
 import os
 import re
 import json
-import time
-import requests
 from typing import List
 
 from fastapi import APIRouter
@@ -141,11 +139,11 @@ def _parse_suggestions(raw: str) -> List[str]:
         re.sub(r"^[\d\.\-\*\•\s]+", "", line).strip()
         for line in clean.splitlines() if line.strip()
     ]
-    result = [l[:50] for l in lines if 2 <= len(l.split()) <= 7][:5]
+    result = [ln[:50] for ln in lines if 2 <= len(ln.split()) <= 7][:5]
     if result:
         print(f"✅ suggest parsed (lines): {result}")
     else:
-        print(f"⚠️  suggest: could not parse response")
+        print("⚠️  suggest: could not parse response")
     return result
 
 

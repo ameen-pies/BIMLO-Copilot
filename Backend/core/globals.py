@@ -1,7 +1,7 @@
-from collections import deque
 from cachetools import TTLCache, LRUCache
-from typing import Dict, List, Optional, Any
-import os, threading
+from typing import Dict, List
+import os
+import threading
 from core.config import settings
 
 MAX_UPLOAD_SIZE = int(settings.max_upload_mb) * 1024 * 1024

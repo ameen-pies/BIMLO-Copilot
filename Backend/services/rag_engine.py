@@ -20,10 +20,8 @@ import os
 import sys
 import re
 import json
-import requests
 import time
-from typing import Any, Dict, List, Literal, Optional, TypedDict
-from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 # ── Load .env so CF_API_KEY / CF_API_URL are always available ──────────────
 try:
@@ -49,9 +47,9 @@ if _services_dir not in sys.path:
     sys.path.insert(0, _services_dir)
 
 # ── Extracted modules ──────────────────────────────────────────────────────
-from rag_state import AgentState, MAX_ITER, MAX_RETRIES, MIN_CHUNKS, RELEVANCE_THRESHOLD
-from prompt_loader import load_prompt_template
-from rag_helpers import (
+from rag_state import AgentState, MAX_ITER, MAX_RETRIES  # noqa: E402
+from prompt_loader import load_prompt_template  # noqa: E402
+from rag_helpers import (  # noqa: E402
     _detect_script_language,
     _build_context,
     _build_sources_from_brackets,
@@ -60,8 +58,8 @@ from rag_helpers import (
     _is_good_retrieval,
     _resolve_doc_scope,
 )
-from rag_client import CloudflareClient, GroqClient
-from rag_nodes import RAGNodesMixin
+from rag_client import GroqClient  # noqa: E402
+from rag_nodes import RAGNodesMixin  # noqa: E402
 
 # ── Observability (structured pipeline logging) ────────────────────────────────
 try:
@@ -82,7 +80,7 @@ except ImportError:
 
 # Graph Agent — chart generation
 try:
-    from graph_agent import GraphAgent, is_graph_request
+    from graph_agent import GraphAgent, is_graph_request  # noqa: F401
     _GRAPH_AGENT_AVAILABLE = True
 except ImportError:
     _GRAPH_AGENT_AVAILABLE = False
@@ -91,7 +89,7 @@ except ImportError:
 # Import the new judge
 try:
     from llm_judge import LLMJudge, ResponsePlan, ResponseEvaluation
-except ImportError as e:
+except ImportError:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     if current_dir not in sys.path:
         sys.path.insert(0, current_dir)
@@ -99,7 +97,7 @@ except ImportError as e:
 
 # Relevance Extractor — map-reduce chunk filtering for full-document Q&A
 try:
-    from relevance_extractor import extract_relevant_chunks
+    from relevance_extractor import extract_relevant_chunks  # noqa: F401
     _RELEVANCE_EXTRACTOR_AVAILABLE = True
 except ImportError:
     _RELEVANCE_EXTRACTOR_AVAILABLE = False
@@ -394,7 +392,7 @@ Now generate for: "{q}" """
                     pass
 
             if isinstance(parsed, dict):
-                icons = {k: v[0] for k, v in self._DEFAULT_STATUS_MSGS.items()}
+                _icons = {k: v[0] for k, v in self._DEFAULT_STATUS_MSGS.items()}
                 result = {}
                 for node, default in self._DEFAULT_STATUS_MSGS.items():
                     msg = parsed.get(node, "")
@@ -511,11 +509,16 @@ Now generate for: "{q}" """
 
         def _router_dispatch(s):
             route = s.get("route", "rag")
-            if route == "direct":   return "direct_answer"
-            if route == "define":   return "define_node"
-            if route == "image":    return "image_node"
-            if route == "cad":      return "cad_node"
-            if route == "clarify":  return "clarify_node"
+            if route == "direct":
+                return "direct_answer"
+            if route == "define":
+                return "define_node"
+            if route == "image":
+                return "image_node"
+            if route == "cad":
+                return "cad_node"
+            if route == "clarify":
+                return "clarify_node"
             # full_scope: query needs ALL chunks — divert to map-reduce node
             # Only for rag/iterative_rag. Other routes (transform, analytics, etc.)
             # have their own full-doc handling.
@@ -527,7 +530,8 @@ Now generate for: "{q}" """
                 if _RELEVANCE_EXTRACTOR_AVAILABLE:
                     return "relevance_node"
                 return "full_doc_node"
-            if route in _RETRIEVAL_ROUTES: return "retrieve_vector"
+            if route in _RETRIEVAL_ROUTES:
+                return "retrieve_vector"
             print(f"⚠️  unknown route '{route}' → retrieve_vector")
             return "retrieve_vector"
 
@@ -713,7 +717,7 @@ Now generate for: "{q}" """
         # Guard: full_scope requires session to have documents
         full_scope = getattr(intent, "full_scope", False)
         if full_scope and not session_has_docs:
-            print(f"⚠️  classify_intent: full_scope blocked — no docs in session")
+            print("⚠️  classify_intent: full_scope blocked — no docs in session")
             full_scope = False
 
         print(f"{route} (conf={intent.confidence:.2f}, scope={intent.doc_scope!r}, full_scope={full_scope})")
@@ -1093,7 +1097,7 @@ Now generate for: "{q}" """
         original = state["query"]
         existing_chunks = state.get("retrieved_chunks", [])
 
-        print(f"🔄 Rewriting query for better retrieval → ", end="")
+        print("🔄 Rewriting query for better retrieval → ", end="")
 
         if not self.llm.enabled:
             print("(LLM disabled)")
@@ -1158,7 +1162,7 @@ Now generate for: "{q}" """
             print("⚡ judge_plan: voice_mode preset (conversational/concise/no-cite)")
             return {**state, "response_plan": plan}
 
-        print(f"🧠 Judge planning response → ", end="")
+        print("🧠 Judge planning response → ", end="")
 
         # Pass more history context — 300 chars per message, last 6 messages
         history_texts = [
@@ -1220,7 +1224,7 @@ Now generate for: "{q}" """
         chunks = state["retrieved_chunks"]
         plan = state["response_plan"]
         retry_count = state.get("retry_count", 0)
-        evaluation = state.get("response_evaluation")
+        _evaluation = state.get("response_evaluation")
 
         if not plan:
             print("❌ No response plan available")
@@ -1329,7 +1333,7 @@ Now generate for: "{q}" """
             print(f"📋 Sources built: {len(built_sources)}")
         else:
             built_sources = []
-            print(f"📋 Sources skipped (plan: should_cite_sources=False)")
+            print("📋 Sources skipped (plan: should_cite_sources=False)")
 
         return {
             **state,
@@ -1498,7 +1502,6 @@ Now generate for: "{q}" """
             # Create a synthetic passing evaluation so _should_retry returns "done"
             evaluation = self.judge.evaluate_response.__func__  # just need the class
             # Build a minimal passing object without calling the LLM
-            from dataclasses import dataclass
             # Re-use the ResponseEvaluation class but with all-pass values
             try:
                 passing_eval = ResponseEvaluation(
@@ -1524,7 +1527,7 @@ Now generate for: "{q}" """
             print("❌ No plan to evaluate against")
             return state
 
-        print(f"⚖️  Judge evaluating → ", end="")
+        print("⚖️  Judge evaluating → ", end="")
 
         # Get judge's evaluation
         evaluation = self.judge.evaluate_response(query, plan, answer, chunks)
@@ -1533,7 +1536,6 @@ Now generate for: "{q}" """
         # The LLM judge tends to be overly strict — a score of 0.6-0.7 is fine.
         # Hallucination is the only hard rejection regardless of score.
         if evaluation.overall_score >= 0.5 and not evaluation.has_hallucination:
-            from dataclasses import replace as _replace
             evaluation = type(evaluation)(
                 **{**evaluation.__dict__, "is_acceptable": True}
             )
@@ -1608,7 +1610,7 @@ Now generate for: "{q}" """
             ).strip().upper()
 
             if reroute_check.startswith("YES"):
-                print(f"🔀 Judge + LLM detected wrong route — switching to direct_answer")
+                print("🔀 Judge + LLM detected wrong route — switching to direct_answer")
                 state["route"] = "direct"
                 return "reroute_direct"
 

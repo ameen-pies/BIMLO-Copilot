@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Header, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse
-from typing import Optional, Dict
-import uuid, json, asyncio, threading, queue, re
+from typing import Optional
+import uuid
+import json
+import asyncio
+import threading
+import queue
+import re
 
 from models.query import QueryRequest, QueryResponse
 from core.globals import (

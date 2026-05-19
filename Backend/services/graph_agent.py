@@ -52,10 +52,8 @@ from __future__ import annotations
 import os
 import re
 import json
-import time
-import requests
 from typing import Any, Dict, List, Optional, Tuple
-from prompt_loader import load_prompt, load_prompt_template
+from prompt_loader import load_prompt
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -348,7 +346,7 @@ class GraphAgent:
                     }
                 elif len(validated_groups) == 1:
                     # Only one valid group — build it silently without asking
-                    print(f"   📊 GraphAgent: only 1 valid group after validation — building directly")
+                    print("   📊 GraphAgent: only 1 valid group after validation — building directly")
                     query = validated_groups[0]["hint"]
                 # else: nothing validated — fall through to normal extraction with original query
 
@@ -501,7 +499,7 @@ DOCUMENTS:
 
         parsed = _parse_json(raw)
         if not parsed or not isinstance(parsed, dict):
-            print(f"   ⚠️  GraphAgent: could not parse extraction response")
+            print("   ⚠️  GraphAgent: could not parse extraction response")
             print(f"      Raw: {raw[:200]}")
             # Fallback: try regex extraction directly on chunk text
             return self._regex_extract_fallback(chunks)
@@ -511,12 +509,12 @@ DOCUMENTS:
             print(f"   ℹ️  GraphAgent: LLM reported no_data — {reason}; trying regex fallback")
             fallback = self._regex_extract_fallback(chunks)
             if fallback:
-                print(f"   ✅ GraphAgent: regex fallback succeeded")
+                print("   ✅ GraphAgent: regex fallback succeeded")
             return fallback
 
         # Validate required fields
         if not parsed.get("labels") or not parsed.get("datasets"):
-            print(f"   ⚠️  GraphAgent: extraction missing labels/datasets — trying regex fallback")
+            print("   ⚠️  GraphAgent: extraction missing labels/datasets — trying regex fallback")
             fallback = self._regex_extract_fallback(chunks)
             return fallback if fallback else None
 
@@ -1029,7 +1027,7 @@ DOCUMENTS:
             if isinstance(parsed, dict) and "groups" in parsed:
                 parsed = parsed["groups"]
             else:
-                print(f"   ⚠️  GraphAgent._discover_metric_groups: unexpected shape")
+                print("   ⚠️  GraphAgent._discover_metric_groups: unexpected shape")
                 return []
 
         # Validate each entry
@@ -1430,7 +1428,8 @@ STATUS_MSG_ADDITION = {
 # ────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import os, json
+    import os
+    import json
 
     print("=== GraphAgent standalone test ===\n")
 

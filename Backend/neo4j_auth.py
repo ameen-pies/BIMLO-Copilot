@@ -21,13 +21,13 @@ Mount in main.py:
     # and in startup call init_neo4j() ONCE
 """
 
-import os
+import json
 import uuid
 import hashlib
 import secrets
 import time
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from cachetools import LRUCache
 
@@ -37,16 +37,16 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 load_dotenv()  # must run before os.getenv() calls below
 
-from core.config import settings
+from core.config import settings  # noqa: E402
 
-import logging
+import logging  # noqa: E402
 logger = logging.getLogger("auth")
 # Suppress Neo4j notification spam (INFO/WARNING about missing props/relations
 # on empty databases â€” harmless, just noisy during first-run)
 logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
 
 try:
-    from neo4j import GraphDatabase, exceptions as neo4j_exc
+    from neo4j import GraphDatabase, exceptions as neo4j_exc  # noqa: F401
     _NEO4J_AVAILABLE = True
 except ImportError:
     _NEO4J_AVAILABLE = False
@@ -550,7 +550,8 @@ def google_token_auth(req: GoogleTokenRequest, response: Response):
     Verifies the token is valid by hitting Google's tokeninfo endpoint,
     then find-or-create the user in Neo4j.
     """
-    import urllib.request, json as _json
+    import urllib.request
+    import json as _json
 
     # Verify the access token is genuine
     try:
@@ -670,7 +671,8 @@ def contact(req: ContactRequest):
     Forwards the message to BIMLO's inbox via SMTP.
     Uses the same SMTP env vars as the admin email sender.
     """
-    import smtplib, ssl
+    import smtplib
+    import ssl
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     from email.utils import formataddr
@@ -1290,10 +1292,10 @@ def init_neo4j():
                 print("  Checklist:")
                 print("  1. Is Neo4j running? (neo4j start  or  check Desktop)")
                 print(f"  2. Is the URI correct? Current: {NEO4J_URI}")
-                print(f"     â€¢ Local:  bolt://127.0.0.1:7687")
-                print(f"     â€¢ AuraDB: neo4j+s://<id>.databases.neo4j.io")
-                print(f"  3. Is NEO4J_PASSWORD set correctly in .env?")
-                print(f"  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
+                print("     â€¢ Local:  bolt://127.0.0.1:7687")
+                print("     â€¢ AuraDB: neo4j+s://<id>.databases.neo4j.io")
+                print("  3. Is NEO4J_PASSWORD set correctly in .env?")
+                print("  4. Community Edition? Set NEO4J_DATABASE=neo4j in .env")
                 print("â”€" * 60)
 
 
@@ -1454,13 +1456,17 @@ def admin_update_user(
     sets = []
     params: Dict[str, Any] = {"id": user_id}
     if req.username:
-        sets.append("u.username = $username"); params["username"] = req.username.strip()
+        sets.append("u.username = $username")
+        params["username"] = req.username.strip()
     if req.email:
-        sets.append("u.email = $email"); params["email"] = req.email.strip().lower()
+        sets.append("u.email = $email")
+        params["email"] = req.email.strip().lower()
     if req.password:
-        sets.append("u.password_hash = $ph"); params["ph"] = _hash_password(req.password)
+        sets.append("u.password_hash = $ph")
+        params["ph"] = _hash_password(req.password)
     if req.role in ("user", "admin"):
-        sets.append("u.role = $role"); params["role"] = req.role
+        sets.append("u.role = $role")
+        params["role"] = req.role
     if not sets:
         raise HTTPException(400, "Nothing to update")
 
@@ -1522,7 +1528,8 @@ def admin_send_email(req: AdminSendEmailRequest, admin: Dict = Depends(require_a
     Uses SMTP settings from env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.
     Falls back to logging if SMTP is not configured.
     """
-    import smtplib, ssl
+    import smtplib
+    import ssl
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
 
@@ -1658,10 +1665,10 @@ async def admin_monitor_stream(admin: Dict = Depends(require_admin)):
 # IN-MEMORY LOG BUFFER (captured from stdout for admin panel)
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-import sys
-import threading
-from collections import deque
-from datetime import datetime as _dt
+import sys  # noqa: E402
+import threading  # noqa: E402
+from collections import deque  # noqa: E402
+from datetime import datetime as _dt  # noqa: E402
 
 _log_buffer: deque = deque(maxlen=500)
 _log_subscribers: list = []   # SSE response queues
@@ -1704,7 +1711,8 @@ if not isinstance(sys.stdout, _LogCapture):
 @router.get("/admin/logs/stream")
 async def admin_logs_stream(admin: Dict = Depends(require_admin)):
     """SSE stream of live log lines for the admin dashboard."""
-    import asyncio, queue as _queue
+    import asyncio
+    import queue as _queue
     from fastapi.responses import StreamingResponse as _SR
 
     q: _queue.Queue = _queue.Queue(maxsize=200)

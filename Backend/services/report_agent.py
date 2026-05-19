@@ -33,10 +33,7 @@ import os
 import re
 import json
 import uuid
-import time
-import subprocess
 import tempfile
-import textwrap
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -53,14 +50,12 @@ from pydantic import BaseModel
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from reportlab.lib.units import cm, mm
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY, TA_RIGHT
+from reportlab.lib.units import cm
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, HRFlowable, KeepTogether, ListFlowable, ListItem, Image,
+    PageBreak, HRFlowable, ListFlowable, ListItem, Image,
 )
-from reportlab.platypus import Frame, PageTemplate
-from reportlab.lib.utils import ImageReader
 
 from prompt_loader import load_prompt, load_prompt_template
 
@@ -690,7 +685,6 @@ def _minimal_pdf_fallback(title: str, content: str) -> bytes:
     Should only ever be reached if the full builder crashes on exotic input.
     """
     buf = BytesIO()
-    from reportlab.lib.styles import getSampleStyleSheet
     styles = getSampleStyleSheet()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     story = [
@@ -1374,8 +1368,8 @@ def _generate_report_content(
             placeholder = _embed_chart(chart_cfg, "analytics")
             if placeholder:
                 sections_md.append(
-                    f"## Data Visualisation\n\n"
-                    f"The following chart was generated from the data in your documents."
+                    "## Data Visualisation\n\n"
+                    "The following chart was generated from the data in your documents."
                     + placeholder
                 )
 
@@ -1523,8 +1517,8 @@ async def report_stream(req: GenerateReportRequest):
             )
 
             word_count    = len(result["content"].split())
-            section_count = len([l for l in result["content"].splitlines()
-                                  if l.startswith("# ") or l.startswith("## ")])
+            section_count = len([ln for ln in result["content"].splitlines()
+                                  if ln.startswith("# ") or ln.startswith("## ")])
 
             q.put({
                 "type":          "result",
@@ -1544,7 +1538,8 @@ async def report_stream(req: GenerateReportRequest):
             })
 
         except Exception as exc:
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             q.put({"type": "error", "message": str(exc)})
         finally:
             q.put(DONE)
@@ -1612,7 +1607,8 @@ async def create_report(req: GenerateReportRequest):
             analytics      = analytics if req.include_charts else None,
         )
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Report generation failed: {e}")
 
     now       = datetime.now().isoformat()

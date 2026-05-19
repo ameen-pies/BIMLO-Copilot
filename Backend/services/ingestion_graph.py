@@ -30,7 +30,6 @@ Usage (from main.py) — unchanged:
 from __future__ import annotations
 
 import atexit
-import re
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -176,7 +175,7 @@ def _detect_language(text: str) -> str:
 
     # Count unicode script characters
     arabic = sum(1 for c in sample if "\u0600" <= c <= "\u06ff")
-    latin  = sum(1 for c in sample if c.isalpha() and ord(c) < 256)
+    _latin = sum(1 for c in sample if c.isalpha() and ord(c) < 256)
 
     if arabic > len(sample) * 0.15:
         return "ar"
@@ -347,7 +346,7 @@ def _node_ingest_graph_rag(state: IngestionState) -> IngestionState:
         return {**state, "graph_ingested": True, "graph_stats": stats}
 
     except ImportError:
-        print(f"ℹ️  [ingestion:ingest_graph_rag] graph_rag module not found — skipping")
+        print("ℹ️  [ingestion:ingest_graph_rag] graph_rag module not found — skipping")
         if _OBS_AVAILABLE:
             _obs.log_ingestion(doc_id, filename, "ingest_graph_rag", "skipped",
                                details={"reason": "graph_rag not installed"})

@@ -129,7 +129,7 @@ class ClassifierState(TypedDict):
 # Warm result cache  (in-process, bounded at 256 entries)
 # ══════════════════════════════════════════════════════════════════════════════
 
-from collections import OrderedDict as _OD
+from collections import OrderedDict as _OD  # noqa: E402
 
 class _BoundedCache:
     def __init__(self, maxsize: int = 256):
@@ -449,10 +449,10 @@ def _node_llm_classify(state: ClassifierState) -> ClassifierState:
             )
 
         attached_hint = (
-            f"\n\nATTACHED TO THIS MESSAGE:\n"
+            "\n\nATTACHED TO THIS MESSAGE:\n"
             + "\n".join(file_type_lines)
             + mixed_note
-            + f"\n\nFor doc_scope: set to the specific filename that the query is asking about. "
+            + "\n\nFor doc_scope: set to the specific filename that the query is asking about. "
             "Only set doc_scope to a CAD file if the query is explicitly about BIM/IFC content. "
             "Do NOT set doc_scope if the scope is unclear or the user is asking generally."
         )

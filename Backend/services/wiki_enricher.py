@@ -18,12 +18,10 @@ Design principles:
 
 from __future__ import annotations
 
-import os
 import re
 import requests
-import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 
 # ────────────────────────────────────────────────────────────────────────────

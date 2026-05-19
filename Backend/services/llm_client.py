@@ -16,8 +16,6 @@ Env vars:
 
 from __future__ import annotations
 
-import json
-import os
 import time
 import requests
 from typing import List, Dict, Optional

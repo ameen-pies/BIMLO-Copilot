@@ -1,15 +1,15 @@
 from collections import deque
-from typing import Dict, List, Optional, Any
-import threading, time, uuid, os, tempfile, hashlib
-from datetime import datetime
+from typing import List, Optional
+import time
+import os
+import tempfile
 
 from core.globals import (
     _sessions, _session_routes, _session_route_log,
     _session_user_context, _conversation_cache,
-    _cancel_events, _session_file_stack,
+    _session_file_stack,
     DOCUMENT_FILE_CACHE, MAX_HISTORY_TURNS,
     doc_processor, vector_store,
-    _ingestion_graph_available, run_ingestion_pipeline,
 )
 
 

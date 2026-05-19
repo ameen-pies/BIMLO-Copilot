@@ -29,7 +29,7 @@ import os
 import math
 import time
 import threading
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 _RERANKER_MODEL   = os.getenv("RERANKER_MODEL",   "BAAI/bge-reranker-v2-m3")
 _RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "1").strip() != "0"

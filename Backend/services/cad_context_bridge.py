@@ -18,9 +18,8 @@ cad_ifc_agent calls at the end of every /api/cad/query response.  It writes:
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Optional
+import sys
 
 from core.session_state import append_turn, log_route, get_history
 

@@ -244,9 +244,15 @@ def _find_section_in_doc(full_text: str, section_title: str) -> str:
     while total < 400:
         added = False
         if hi < len(sentences) and total + len(sentences[hi]) < 500:
-            result.append(sentences[hi]); total += len(sentences[hi]); hi += 1; added = True
+            result.append(sentences[hi])
+            total += len(sentences[hi])
+            hi += 1
+            added = True
         if lo >= 0 and total + len(sentences[lo]) < 500:
-            result.insert(0, sentences[lo]); total += len(sentences[lo]); lo -= 1; added = True
+            result.insert(0, sentences[lo])
+            total += len(sentences[lo])
+            lo -= 1
+            added = True
         if not added:
             break
     out = ' '.join(result)
@@ -456,7 +462,7 @@ def _resolve_doc_scope(scope_hint: str, all_docs: List[Dict], query: str = "") -
         "third": 2,   "3rd": 2,   "3": 2,
         "fourth": 3,  "4th": 3,   "4": 3,
         "premier": 0, "première": 0,
-        "deuxième": 1, "second": 1,
+        "deuxième": 1,
         "troisième": 2,
         "الأول": 0, "الأولى": 0,
         "الثاني": 1, "الثانية": 1,
