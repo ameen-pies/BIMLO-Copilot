@@ -173,8 +173,21 @@ def _extract_fact_chips_from_answer(answer: str) -> List[Dict]:
                         "is_numeric": bool(item.get("is_numeric", False)),
                     })
             if valid:
-                print(f"   🔑 Chip extraction: {len(valid)} chips from answer (LLM)")
-                return valid
+                # Validate: each chip value must actually appear in the answer
+                answer_norm = re.sub(r'[\s,.]+', '', answer.lower())
+                validated = []
+                for item in valid:
+                    val_norm = re.sub(r'[\s,.]+', '', item['value'].lower())
+                    if val_norm and val_norm in answer_norm:
+                        validated.append(item)
+                    else:
+                        # Partial match: try just digits for numeric chips
+                        digits = re.sub(r'[^\d]', '', item['value'])
+                        if digits and digits in re.sub(r'[^\d]', '', answer_norm):
+                            validated.append(item)
+                if validated:
+                    print(f"   🔑 Chip extraction: {len(validated)} chips from answer (LLM, {len(valid)-len(validated)} dropped)")
+                    return validated
     except Exception as e:
         print(f"   ⚠️  Chip LLM call failed: {e}")
 
@@ -263,7 +276,7 @@ def _find_raw_line_for_chip(label: str, value: str, is_numeric: bool, doc_text: 
                     break
         if candidates:
             # Prefer shortest sentence that contains the number
-            return min(candidates, key=len)[:300]
+            return min(candidates, key=len)[:200]
 
     # Fallback: label keyword overlap
     label_tokens = set(re.findall(r'[a-zA-Z\d]{3,}', label.lower()))
@@ -279,8 +292,8 @@ def _find_raw_line_for_chip(label: str, value: str, is_numeric: bool, doc_text: 
         if score > best_score:
             best_score, best_sent = score, sent
 
-    threshold = max(2, int(len(search_tokens) * 0.4))
-    return best_sent[:300] if best_sent and best_score >= threshold else None
+    threshold = max(2, int(len(search_tokens) * 0.5))
+    return best_sent[:200] if best_sent and best_score >= threshold else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

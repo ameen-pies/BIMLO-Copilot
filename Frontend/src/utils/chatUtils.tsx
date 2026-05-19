@@ -423,21 +423,21 @@ export function findExcerptRange(content: string, excerpt: string): [number, num
   const exactM = exactRe.exec(content);
   if (exactM) return [exactM.index, exactM.index + exactM[0].length];
 
-  // Strategy 2: sliding window of 5 consecutive words — finds partial matches
+  // Strategy 2: sliding window of 8 consecutive words — finds partial matches
   const words = needle.split(/\s+/).filter(Boolean);
-  const windowSize = Math.min(5, words.length);
+  const windowSize = Math.min(8, words.length);
   for (let start = 0; start <= words.length - windowSize; start++) {
     const probe = words.slice(start, start + windowSize);
-    const re = new RegExp('(' + probe.map(esc).join('[\\s.,;:-]{0,6}') + ')', 'i');
+    const re = new RegExp('(' + probe.map(esc).join('[\\s.,;:-]{0,3}') + ')', 'i');
     const m = re.exec(content);
     if (m) return [m.index, m.index + m[0].length];
   }
 
-  // Strategy 3: two longest significant words together
+  // Strategy 3: two longest significant words together (tighter gap)
   const stop = new Set(['the','and','for','are','was','with','this','that','from','have','been','they','will','has']);
   const sig = words.filter(w => w.length >= 4 && !stop.has(w.toLowerCase())).sort((a,b) => b.length - a.length);
   if (sig.length >= 2) {
-    const re = new RegExp('(' + esc(sig[0]) + '[\\s\\S]{0,30}' + esc(sig[1]) + '|'  + esc(sig[1]) + '[\\s\\S]{0,30}' + esc(sig[0]) + ')', 'i');
+    const re = new RegExp('(' + esc(sig[0]) + '[\\s\\S]{0,15}' + esc(sig[1]) + '|'  + esc(sig[1]) + '[\\s\\S]{0,15}' + esc(sig[0]) + ')', 'i');
     const m = re.exec(content);
     if (m) return [m.index, m.index + m[0].length];
   }

@@ -125,7 +125,7 @@ export function renderDocumentContent(
       <mark key={`hl-${highlightKey}-${idx}`}
         ref={idx === 0 ? (highlightRef as React.RefObject<HTMLElement>) : undefined}
         className="doc-highlight doc-highlight-active"
-        style={{ background: 'none', color: 'inherit', display: 'inline', boxDecorationBreak: 'clone', WebkitBoxDecorationBreak: 'clone' } as React.CSSProperties}>
+        style={{ color: 'inherit', display: 'inline', boxDecorationBreak: 'clone', WebkitBoxDecorationBreak: 'clone' } as React.CSSProperties}>
         {content.slice(start, end)}
       </mark>
     );

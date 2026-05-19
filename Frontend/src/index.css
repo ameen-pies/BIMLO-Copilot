@@ -133,11 +133,10 @@
 @keyframes highlight-fade {
   0%   { background-color: hsl(var(--primary) / 0.55); }
   40%  { background-color: hsl(var(--primary) / 0.45); }
-  100% { background-color: hsl(48 96% 70% / 0); }
+  100% { background-color: hsl(var(--primary) / 0.25); }
 }
 
 .doc-highlight {
-  background-color: hsl(48 96% 70% / 0);
   border-radius: 2px;
   padding: 1px 0;
   /* will be toggled on via .doc-highlight-active */

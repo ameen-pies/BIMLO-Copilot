@@ -51,8 +51,11 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, hi
     if (!needle.trim()) return [];
     const cleanNeedle = needle.replace(/\*\*/g, '').replace(/\[\d+\]/g, '').trim();
     const needleLo = cleanNeedle.toLowerCase().replace(/\s+/g, " ");
-    const probe = needleLo.slice(0, 60).trim();
+    // Use up to 120 chars — long enough to be unique, short enough for OCR gaps
+    const probe = needleLo.slice(0, Math.min(120, needleLo.length)).trim();
     const hit = new Set<number>();
+
+    // Strategy A: direct substring match on joined text items
     for (const sep of [" ", ""]) {
       const joined   = items.map(i => i.str).join(sep);
       const joinedLo = joined.toLowerCase();
@@ -65,6 +68,18 @@ export const PdfViewer: React.FC<PdfViewerProps> = ({ blobUrl, highlightText, hi
         if (end > idx && start < idx + probe.length) hit.add(i);
       }
       if (hit.size > 0) break;
+    }
+    if (hit.size > 0) return [...hit];
+
+    // Strategy B: word-based fallback — find items containing 3+ significant words
+    const sigWords = needleLo.split(/\s+/).filter(w => w.length >= 4);
+    if (sigWords.length >= 2) {
+      const need = Math.min(3, sigWords.length);
+      for (let i = 0; i < items.length; i++) {
+        const itemLo = items[i].str.toLowerCase();
+        const matches = sigWords.filter(w => itemLo.includes(w)).length;
+        if (matches >= need) hit.add(i);
+      }
     }
     return [...hit];
   };
