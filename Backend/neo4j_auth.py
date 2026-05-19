@@ -75,7 +75,7 @@ NEO4J_PASSWORD = settings.neo4j_password
 # On Community, keep this as "neo4j" and use labels to separate data.
 NEO4J_DATABASE = settings.neo4j_database
 
-print(f"ðŸ” NEO4J DEBUG â€” URI={NEO4J_URI} USER={NEO4J_USER} PASS={NEO4J_PASSWORD[:3]}***")
+print(f"🔍 NEO4J DEBUG — URI={NEO4J_URI} USER={NEO4J_USER}")
 
 # Token TTL
 TOKEN_TTL_HOURS = 72
