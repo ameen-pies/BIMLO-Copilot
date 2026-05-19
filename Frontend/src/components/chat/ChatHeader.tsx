@@ -1028,7 +1028,7 @@ export function ChatHeader({
           className="flex items-center gap-1.5 ps-3 pe-3.5 py-1.5 rounded-full text-xs font-medium border border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 transition-all"
         >
           <Phone className="h-3.5 w-3.5 shrink-0" />
-          <span>Call</span>
+          <span>{t("nav.call")}</span>
         </button>
         <LangToggle />
         <ThemeToggle />

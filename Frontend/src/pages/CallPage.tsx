@@ -982,7 +982,7 @@ const CallPage: React.FC = () => {
   return (
     <motion.div
       className="min-h-screen flex flex-col items-center justify-between px-4 py-6 select-none overflow-hidden"
-      style={{ background: getStateBg(callState, isDark), transition: "background 0.6s ease" }}
+      style={{ background: getStateBg(callState, isDark), transition: "background 0.15s ease" }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.4, ease: "easeOut" }}

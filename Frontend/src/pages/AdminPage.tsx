@@ -371,6 +371,7 @@ function ServiceBadge({ label, status, icon: Icon, detail }: {
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
 
 function ExpandedChart({ data: rawData, color, label }: { data: number[]; color: string; label: string }) {
+  const { t } = useTranslation();
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
   // Sanitize: replace non-finite values with 0, require at least 1 point
@@ -501,6 +502,7 @@ function KpiCard({ icon: Icon, label, value, sub, accent, trend, sparkData }: {
   icon: React.ElementType; label: string; value: number | string; sub?: string; accent: string;
   trend?: number; sparkData?: number[];
 }) {
+  const { t } = useTranslation();
   const [hovered, setHovered]   = useState(false);
   const [leaving, setLeaving]   = useState(false);
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -932,7 +934,7 @@ export default function AdminPage() {
     if (!currentUser?.token) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API}/auth/admin/users`, { headers: authHeaders(currentUser.token) });
+      const res = await fetch(`${API}/auth/admin/users`, { headers: authHeaders(currentUser.token), credentials: "include" });
       if (res.ok) setUsers(await res.json());
     } finally { setLoading(false); }
   }, [currentUser?.token]);
@@ -941,7 +943,7 @@ export default function AdminPage() {
     if (!currentUser?.token) return;
     setStatsLoading(true);
     try {
-      const res = await fetch(`${API}/auth/admin/stats`, { headers: authHeaders(currentUser.token) });
+      const res = await fetch(`${API}/auth/admin/stats`, { headers: authHeaders(currentUser.token), credentials: "include" });
       if (res.ok) setStats(await res.json());
     } finally { setStatsLoading(false); }
   }, [currentUser?.token]);
@@ -978,7 +980,7 @@ export default function AdminPage() {
   useEffect(() => {
     if (tab !== "logs" || !currentUser?.token) return;
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    fetch(`${API}/auth/admin/logs?limit=200`, { headers: authHeaders(currentUser.token) })
+    fetch(`${API}/auth/admin/logs?limit=200`, { headers: authHeaders(currentUser.token), credentials: "include" })
       .then(r => r.json()).then(d => setLogs(d.logs || [])).catch(() => {});
     const es = new EventSource(`${API}/auth/admin/logs/stream?token=${currentUser.token}`);
     esRef.current = es;
@@ -1001,7 +1003,7 @@ export default function AdminPage() {
     if (tab !== "monitor" || !currentUser?.token) return;
     if (monEsRef.current) { monEsRef.current.close(); monEsRef.current = null; }
     // Initial fetch
-    fetch(`${API}/auth/admin/monitor`, { headers: authHeaders(currentUser.token) })
+    fetch(`${API}/auth/admin/monitor`, { headers: authHeaders(currentUser.token), credentials: "include" })
       .then(r => r.json()).then(d => {
         setMonitorActive(d.active || []);
         setMonitorRecent(d.recent || []);
@@ -1044,8 +1046,8 @@ export default function AdminPage() {
     setPipelineLoading(true);
     try {
       const [logsRes, statsRes] = await Promise.all([
-        fetch(`${API}/auth/admin/pipeline-logs?limit=300`, { headers: authHeaders(currentUser.token) }),
-        fetch(`${API}/auth/admin/pipeline-logs/stats`,     { headers: authHeaders(currentUser.token) }),
+        fetch(`${API}/auth/admin/pipeline-logs?limit=300`, { headers: authHeaders(currentUser.token), credentials: "include" }),
+        fetch(`${API}/auth/admin/pipeline-logs/stats`,     { headers: authHeaders(currentUser.token), credentials: "include" }),
       ]);
       if (logsRes.ok) {
         const d = await logsRes.json();

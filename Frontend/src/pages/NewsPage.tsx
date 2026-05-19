@@ -1578,8 +1578,8 @@ const NewsPage = () => {
                 bgColor: dark ? "#0a1628" : "#0f1f3d",
                 textColor: "#fff",
                 links: [
-                  { label: "All",        active: filter === "All",        onSelect: () => setFilter("All") },
-                  { label: "General",    active: filter === "General",    onSelect: () => setFilter("General") },
+                  { label: t("news.cat_all"),        active: filter === "All",        onSelect: () => setFilter("All") },
+                  { label: t("news.cat_general"),    active: filter === "General",    onSelect: () => setFilter("General") },
                 ],
               },
               {
@@ -1587,9 +1587,9 @@ const NewsPage = () => {
                 bgColor: dark ? "#0c1a2e" : "#122040",
                 textColor: "#fff",
                 links: [
-                  { label: "5G",         active: filter === "5G",         onSelect: () => setFilter("5G") },
-                  { label: "Fiber",      active: filter === "Fiber",      onSelect: () => setFilter("Fiber") },
-                  { label: "Regulation", active: filter === "Regulation", onSelect: () => setFilter("Regulation") },
+                  { label: t("news.cat_5g"),         active: filter === "5G",         onSelect: () => setFilter("5G") },
+                  { label: t("news.cat_fiber"),      active: filter === "Fiber",      onSelect: () => setFilter("Fiber") },
+                  { label: t("news.cat_regulation"), active: filter === "Regulation", onSelect: () => setFilter("Regulation") },
                 ],
               },
               {
@@ -1597,7 +1597,7 @@ const NewsPage = () => {
                 bgColor: dark ? "#10082a" : "#1a0f40",
                 textColor: "#fff",
                 links: [
-                  { label: "Construction", active: filter === "Construction", onSelect: () => setFilter("Construction") },
+                  { label: t("news.cat_construction"), active: filter === "Construction", onSelect: () => setFilter("Construction") },
                 ],
               },
               {
@@ -1605,9 +1605,9 @@ const NewsPage = () => {
                 bgColor: dark ? "#1a0a0a" : "#2d0f0f",
                 textColor: "#fff",
                 links: [
-                  { label: "BIM",          active: filter === "BIM",             onSelect: () => setFilter("BIM") },
-                  { label: "Digital Twin", active: filter === "Digital Twin",    onSelect: () => setFilter("Digital Twin") },
-                  { label: "AI",           active: filter === "AI Construction", onSelect: () => setFilter("AI Construction") },
+                  { label: t("news.cat_bim"),          active: filter === "BIM",             onSelect: () => setFilter("BIM") },
+                  { label: t("news.cat_digital_twin"), active: filter === "Digital Twin",    onSelect: () => setFilter("Digital Twin") },
+                  { label: t("news.cat_ai_construction"), active: filter === "AI Construction", onSelect: () => setFilter("AI Construction") },
                 ],
               },
             ]}

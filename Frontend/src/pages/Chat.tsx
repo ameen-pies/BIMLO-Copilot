@@ -211,7 +211,7 @@ const Chat = () => {
             >
               <div className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-950 border border-red-500/50 text-red-400 text-xs font-medium shadow-sm">
                 <span>😢</span>
-                <span>                  {t("chat.mic_issue")}</span>
+                <span>                  {t("chat.silence_warning")}</span>
                 <button onClick={() => setShowSilenceWarning(false)} className="ms-1 hover:text-red-300 transition-colors">
                   <X className="h-3 w-3" />
                 </button>
