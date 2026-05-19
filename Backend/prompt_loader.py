@@ -19,9 +19,9 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-# Resolve prompts/ directory relative to this file (Backend/services/../prompts)
+# Resolve prompts/ directory relative to this file (Backend/prompts)
 _PROMPTS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.abspath(__file__)),
     "prompts",
 )
 
