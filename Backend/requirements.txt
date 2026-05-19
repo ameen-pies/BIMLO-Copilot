@@ -10,11 +10,11 @@ chromadb==0.4.22
 sentence-transformers==2.3.1
 
 # LangGraph / LangChain
-langchain==0.2.16
-langchain-community==0.2.16
-langchain-core==0.2.38
+langchain==0.3.30
+langchain-community==0.3.27
+langchain-core==0.3.85
 langgraph==0.2.14
-langsmith==0.1.98
+langsmith==0.8.0
 
 # Graph database
 neo4j==5.17.0

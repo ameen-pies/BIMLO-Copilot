@@ -136,8 +136,16 @@ if g._news_chat_available:
 if g._cad_ifc_available:
     app.include_router(cad_ifc_router)
 
-os.makedirs(g.UPLOAD_DIR, exist_ok=True)
-os.makedirs(g.REPORTS_DIR, exist_ok=True)
+try:
+    os.makedirs(g.UPLOAD_DIR, exist_ok=True)
+    os.makedirs(g.REPORTS_DIR, exist_ok=True)
+except PermissionError:
+    import tempfile
+    g.DATA_DIR = os.path.join(tempfile.gettempdir(), "bimlo-copilot", "data")
+    g.UPLOAD_DIR = os.path.join(g.DATA_DIR, "uploads")
+    g.REPORTS_DIR = os.path.join(g.DATA_DIR, "reports")
+    os.makedirs(g.UPLOAD_DIR, exist_ok=True)
+    os.makedirs(g.REPORTS_DIR, exist_ok=True)
 
 from routers.health import detailed_health_router  # noqa: E402
 
