@@ -647,7 +647,7 @@ const Index = () => {
               <TypewriterText
                 key={i18n.language}
                 texts={t("landing.rotating_words", { returnObjects: true }) as string[]}
-                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-8 pb-2 inline-block"
+                className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gradient-blue leading-tight mt-8 pb-2 pt-1 inline-block"
                 speed={100}
                 deleteSpeed={50}
                 pauseDuration={2000}
