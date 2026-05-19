@@ -248,6 +248,7 @@ const Chat = () => {
           thinkingSteps={thinkingSteps}
           thinkingExpanded={thinkingExpanded}
           setThinkingExpanded={setThinkingExpanded}
+          setModelDropdownOpen={setModelDropdownOpen}
           showNotifyBanner={showNotifyBanner}
           conversations={conversations}
           reports={reports}
@@ -268,6 +269,8 @@ const Chat = () => {
           handleEditCancel={handleEditCancel}
           handleRedo={handleRedo}
           openDocumentAtExcerpt={openDocumentAtExcerpt}
+          handleDownloadReport={handleDownloadReport}
+          downloadingReportId={downloadingReportId}
           setMessages={setMessages}
           setThinkingSteps={setThinkingSteps}
           setSuggestions={setSuggestions}

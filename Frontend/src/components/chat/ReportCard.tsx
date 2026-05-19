@@ -1,9 +1,10 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Loader2, ScrollText } from "lucide-react";
 import { ReportRecord } from "@/pages/chatTypes";
 
 export const ReportCard = ({
     report,
+    reportId,
     inlineTitle,
     inlineMeta,
     isLoading: cardLoading = false,
@@ -13,6 +14,7 @@ export const ReportCard = ({
     onDownload,
 }: {
     report: ReportRecord | null;
+    reportId?: string | null;
     inlineTitle?: string | null;
     inlineMeta?: { word_count: number; section_count: number; source_docs: string[]; version: number } | null;
     isLoading?: boolean;
@@ -21,13 +23,26 @@ export const ReportCard = ({
     onActivate?: (report: ReportRecord | null) => void;
     onDownload?: (report: ReportRecord, fmt: "pdf" | "md") => void;
 }) => {
-    const isDownloading = report ? downloadingReportId === report.report_id : false;
+    // Self-fetch report if not in state but reportId exists
+    const [fetchedReport, setFetchedReport] = useState<ReportRecord | null>(null);
+    useEffect(() => {
+        if (!report && reportId && !fetchedReport) {
+            const base = import.meta.env.VITE_API_URL || "";
+            fetch(`${base}/reports/${reportId}`)
+                .then(r => r.ok ? r.json() : null)
+                .then(data => { if (data) setFetchedReport(data); })
+                .catch(() => {});
+        }
+    }, [report, reportId, fetchedReport]);
 
-    const title = report?.title ?? inlineTitle ?? null;
-    const wordCount = report ? report.content.split(/\s+/).length : (inlineMeta?.word_count ?? 0);
-    const sectionCount = report ? (report.content.match(/^#{1,2}\s/gm) || []).length : (inlineMeta?.section_count ?? 0);
-    const sourceDocs = report?.source_docs ?? inlineMeta?.source_docs ?? [];
-    const version = report?.version ?? inlineMeta?.version ?? 1;
+    const effectiveReport = report ?? fetchedReport;
+    const isDownloading = effectiveReport ? downloadingReportId === effectiveReport.report_id : false;
+
+    const title = effectiveReport?.title ?? inlineTitle ?? null;
+    const wordCount = effectiveReport ? effectiveReport.content.split(/\s+/).length : (inlineMeta?.word_count ?? 0);
+    const sectionCount = effectiveReport ? (effectiveReport.content.match(/^#{1,2}\s/gm) || []).length : (inlineMeta?.section_count ?? 0);
+    const sourceDocs = effectiveReport?.source_docs ?? inlineMeta?.source_docs ?? [];
+    const version = effectiveReport?.version ?? inlineMeta?.version ?? 1;
 
     if (cardLoading && !title) {
         return (
@@ -45,8 +60,8 @@ export const ReportCard = ({
             <div
                 className="flex-1 min-w-0 cursor-pointer"
                 onClick={() => {
-                    if (report) {
-                        onActivate?.(report);
+                    if (effectiveReport) {
+                        onActivate?.(effectiveReport);
                     } else if (inlineTitle) {
                         const fullReport = reports?.find(r => r.title === inlineTitle) ?? null;
                         if (fullReport) onActivate?.(fullReport);
@@ -66,17 +81,17 @@ export const ReportCard = ({
             <div className="flex items-center gap-1.5 shrink-0">
                 <button
                     className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors disabled:opacity-40"
-                    onClick={e => { e.stopPropagation(); if (report) onDownload?.(report, "md"); }}
-                    disabled={!report || isDownloading}
-                    title={report ? "Download Markdown" : "Report loading…"}
+                    onClick={e => { e.stopPropagation(); if (effectiveReport) onDownload?.(effectiveReport, "md"); }}
+                    disabled={!effectiveReport || isDownloading}
+                    title={effectiveReport ? "Download Markdown" : "Report loading…"}
                 >
                     MD
                 </button>
                 <button
                     className="text-xs font-medium text-primary hover:text-primary/70 px-2 py-1 rounded transition-colors disabled:opacity-40 flex items-center gap-1"
-                    onClick={e => { e.stopPropagation(); if (report) onDownload?.(report, "pdf"); }}
-                    disabled={!report || isDownloading}
-                    title={report ? "Download PDF" : "Report loading…"}
+                    onClick={e => { e.stopPropagation(); if (effectiveReport) onDownload?.(effectiveReport, "pdf"); }}
+                    disabled={!effectiveReport || isDownloading}
+                    title={effectiveReport ? "Download PDF" : "Report loading…"}
                 >
                     {isDownloading && <Loader2 className="h-3 w-3 animate-spin" />}
                     PDF

@@ -23,18 +23,7 @@
       "is_cf_worker": true,
       "fallback_order": 2
     },
-    {
-      "id": "cf_backup2",
-      "name": "Cloudflare Backup 2",
-      "api_url_env": "CF_BACKUP2_URL",
-      "model": "@cf/meta/llama-3.3-70b-instruct",
-      "description": "fast",
-      "api_key_env": "CF_BACKUP2_API_KEY",
-      "fallback_api_key_env": "CF_API_KEY",
-      "color": "#6366f1",
-      "is_cf_worker": true,
-      "fallback_order": 3
-    },
+    
     {
       "id": "openrouter",
       "name": "OpenRouter",
