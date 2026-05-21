@@ -466,7 +466,7 @@ Now generate for: "{q}" """
                                   │                               └→ retrieve_vector (loop)
                                   └─ synthesise → judge_plan → synthesise → judge_evaluate
                                                                   ├─ retry          → synthesise
-                                                                  ├─ reroute_direct → direct_answer
+                                                                  ├─ reroute → direct_answer / define_node / graph_node / ...
                                                                   ├─ analytics      → analytics_node
                                                                   └─ done           → END
         """
@@ -616,10 +616,16 @@ Now generate for: "{q}" """
             "judge_evaluate",
             lambda s: self._should_retry(s),
             {
-                "retry":          "synthesise",
-                "reroute_direct": "direct_answer",
-                "analytics":      "analytics_node",
-                "done":           END,
+                "retry":           "synthesise",
+                "done":            END,
+                "analytics_node":  "analytics_node",
+                "direct_answer":   "direct_answer",
+                "define_node":     "define_node",
+                "transform_node":  "transform_node",
+                "graph_node":      "graph_node",
+                "report_node":     "report_node",
+                "clarify_node":    "clarify_node",
+                "cad_node":        "cad_node",
             },
         )
 
@@ -1569,16 +1575,16 @@ Now generate for: "{q}" """
         Decide whether to retry based on judge's evaluation.
 
         On retry: mutate the ResponsePlan to directly encode the judge's fix.
-        On repeated failure: check if the route itself was wrong and re-route to direct.
+        On first failure: ask LLM which route fits best (multi-route reroute).
 
-        Returns: 'retry' | 'reroute_direct' | 'analytics' | 'done'
+        Returns: 'retry' | 'done' | '<node_name>' (e.g. 'graph_node', 'direct_answer')
         """
         evaluation = state.get("response_evaluation")
         retry_count = state.get("retry_count", 0)
         route = state["route"]
 
         def _next(r: str) -> str:
-            return "analytics" if r == "analytics" else "done"
+            return "analytics_node" if r == "analytics" else "done"
 
         if not evaluation:
             return _next(route)
@@ -1590,29 +1596,50 @@ Now generate for: "{q}" """
             print(f"⚠️  Max retries ({MAX_RETRIES}) reached — using best answer so far")
             return _next(route)
 
-        # ── Detect wrong-route situations via LLM ─────────────────────────
-        # Skip this extra LLM call in voice_mode — not worth the latency for a
-        # spoken answer, and the reroute check is a full round-trip.
+        # ── Detect wrong-route via LLM (multi-route) ─────────────────────
+        # Skip in voice_mode — not worth the latency for a spoken answer.
         if retry_count == 0 and self.llm.enabled and not state.get("voice_mode"):
+            _ROUTE_NODE = {
+                "direct":    "direct_answer",
+                "define":    "define_node",
+                "transform": "transform_node",
+                "analytics": "analytics_node",
+                "graph":     "graph_node",
+                "report":    "report_node",
+                "clarify":   "clarify_node",
+                "cad":       "cad_node",
+            }
+            route_desc = (
+                "direct — casual/chat, no docs needed\n"
+                "define — define a standalone term\n"
+                "transform — translate or reformat a whole document\n"
+                "analytics — numerical aggregation across docs\n"
+                "graph — build a chart/plot from data\n"
+                "report — produce a standalone written report\n"
+                "clarify — query is too vague to answer\n"
+                "cad — query about CAD/IFC/BIM model content\n"
+                "same — keep current route, just improve the answer"
+            )
             reroute_check = self._chat(
                 [{"role": "user", "content": (
                     f"A RAG system routed this query to document search: \"{state['query']}\"\n"
                     f"The judge rejected the answer with this feedback:\n"
                     f"Problems: {', '.join(evaluation.specific_problems or [])}\n"
                     f"Fix: {evaluation.how_to_fix}\n\n"
-                    f"Does this feedback suggest the query should NOT have used documents at all "
-                    f"and should be answered directly from conversation context instead?\n"
-                    f"Reply with YES or NO only."
+                    f"Available routes:\n{route_desc}\n\n"
+                    f"Which route fits this query best? Reply with ONE word only."
                 )}],
                 temperature=0.0,
-                max_tokens=5,
+                max_tokens=10,
                 task="classify",
-            ).strip().upper()
+            ).strip().lower()
 
-            if reroute_check.startswith("YES"):
-                print("🔀 Judge + LLM detected wrong route — switching to direct_answer")
-                state["route"] = "direct"
-                return "reroute_direct"
+            chosen = reroute_check.split()[0] if reroute_check else "same"
+            if chosen in _ROUTE_NODE and chosen != route:
+                target_node = _ROUTE_NODE[chosen]
+                print(f"🔀 Judge detected wrong route — rerouting {route} → {chosen} ({target_node})")
+                state["route"] = chosen
+                return target_node
 
         # ── Mutate the plan to encode the judge's fix ─────────────────────
         plan = state.get("response_plan")

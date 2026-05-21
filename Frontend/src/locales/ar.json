@@ -429,7 +429,7 @@
     "monitor_errors": "الأخطاء (5 دقائق)",
     "monitor_active_count": "نشطة ({count})",
     "monitor_no_sessions": "لا توجد جلسات نشطة",
-    "monitor_activity_feed": "تغذية النشاط",
+    "monitor_activity_feed": "موجز النشاط",
     "monitor_no_activity": "لا يوجد نشاط بعد",
     "engagement_funnel": "قمع التفاعل",
     "engagement_funnel_desc": "رحلة المستخدم عبر المنصة",
